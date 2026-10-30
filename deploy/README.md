@@ -1,114 +1,143 @@
-# Node deployment behind Cloudflare
+# Ubuntu deployment for bills.voltronix.ae
 
-**Current release scope: manual entry, outgoing Books synchronization, and automatic incoming Books/CRM updates.** Follow [the deployment runbook](../docs/MANUAL_DEPLOYMENT.md) and [incoming worker guide](../docs/INCOMING_SYNC.md). The environment keeps `MANUAL_ENTRY_ONLY=false` and retains **Save and sync**. Books authorization, company/accounting verification and the outgoing `sync` worker remain required for posting. The `incoming` worker uses separately verified Books and CRM read sources; it never enables financial writes. OCR/scanner intake remains optional. `web check` and `web check:sync` run the Books readiness inventory. `web check:manual` is only for an explicitly separate local-ledger deployment.
+This release supports manual bill entry with **Save and sync**, incoming Zoho Books/CRM updates and verified project history. The owner will deploy it manually using **Ubuntu, Docker and the existing Cloudflare Tunnel**. Docker is unavailable on the Windows preparation machine: the Linux image, container startup, migration and server import have not been executed there.
 
-This package runs the application on an existing **Linux Docker host** behind the owner's Cloudflare domain. It does not change Cloudflare DNS, create hosting, import the development database, authorize Zoho or post a bill. Docker is not installed in the current Windows workspace, so the Linux image and Compose deployment have **not** been executed here.
+## Manual server handoff
 
-The application needs an external operated MySQL service with verified TLS, a restricted runtime account, a separate schema migration identity and durable invoice storage. Keep `bills.voltronix.ae` on the current site until the new backend has passed login, database, upload and queue acceptance. A production Node backend can also run natively on an existing Windows server; see the final section.
+Initialize a clean production MySQL database and import the existing Zoho business data using [DATA_TRANSFER.md](../docs/DATA_TRANSFER.md). It preserves the Books mirrors and originals, CRM snapshots and reconstructed jobs, while creating operational companies with fresh administrator access. Local users, fixture accounting rows and outgoing financial queues are not cloned.
 
-## Prepare private runtime configuration
+The prepared configuration contains dedicated runtime/migration credentials for `mysql:3306/billing_operational`, verified TLS, the hosted origin, Books/CRM client credentials, both Books profiles and the CRM mapping. Scoped bootstrap grants for **two Books organizations and one CRM source** were checked against the source/target connection fingerprints and administrator membership. The fresh production encryption key is preserved; the old encrypted credential vault is not copied.
 
-1. Copy `production.env.example` to `deploy/.env.production` **on the production host**, and supply operational MySQL and the exact Books credentials/profiles privately. Configure the CRM organization, data center, OAuth read grant, mapping and company source bindings for incoming job updates. Keep `MANUAL_ENTRY_ONLY=false`, enable the Books/CRM read gates, and retain both Books write flags false until company/accounting verification and controlled write enablement. Supply the incoming worker's protected active Admin credentials and preserve known source quota delays. OCR/scanner intake remains disabled. Do not copy the development `.env`, seed users or demo records.
-2. Protect the secret file and any private CA directory with owner/group filesystem permissions. Compose bind mounts secrets as files, so the files must be readable by container UID/GID `1000`; Docker Compose `uid`, `gid` and `mode` declarations do not change the ownership of a file-backed host secret. For example, use an operator-owned directory with group `1000`, directory mode `0750` and file mode `0640`. Do not make the directory generally readable. Use an existing secret manager instead where available.
-3. The runtime defaults to trusted-CA MySQL TLS. If the provider requires a private CA, place the PEM bundle at `deploy/.private/mysql-ca.pem`, set `DATABASE_TLS_CA_FILE=/run/secrets/mysql_ca`, and add `-f deploy/compose.mysql-ca.yaml` to every Compose invocation. Preserve the database DNS hostname; it must match its TLS certificate. Never disable certificate verification.
-4. Provision each real company with `company:prepare`, authorize its exact Books organization and verify accounting/supplier mappings through the operational setup commands. Keep organization grants and mappings separate. Use verified imported CRM jobs or actual local jobs. The bootstrap grants its Admin operator membership; additional staff require an audited assignment to the operating company. The incoming worker needs membership in every active company sharing a CRM source. `company:prepare-manual` creates a different local-ledger company and is not the Books setup command.
+The permanent runtime enables incoming sync and the existing manual bill creation path with `ZOHO_BOOKS_WRITE_ENABLED=true` and `ZOHO_BOOKS_LIVE_ENABLED=true`; `ALLOW_PRODUCTION_ACCOUNTING_WRITES` stays `false`. Each company's posting remains blocked until its exact destination and current accounting mapping pass verification. A separate manifest-pinned setup environment disables all provider networking and financial writes, while a separate accounting environment allows Books reads with financial writes disabled. Both use the fresh protected Admin credential. Bootstrap grants let the runtime establish its own encrypted credentials when it refreshes authorization; hosted grant validity and accounting verification are still required.
 
-The incoming template uses `INCOMING_SYNC_INTERVAL_SECONDS=5`: five seconds between completed source checks, with provider backoff and source leases preserved. Daily reconciliation remains enabled. Restart/recreate the incoming service after changing the protected setting; the visible dashboard's five-second status refresh reads only saved app data and does not call Zoho.
+Transfer the source release separately from these private assets:
 
-Only the final non-root runtime receives production secrets. The Docker build uses unused placeholders, and the Dockerfile-specific allowlist excludes all environment files, local data, private keys and uploads. `tsx` is a production dependency because the supervised workers execute TypeScript scripts. Next starts with `--experimental-next-config-strip-types`, which this installed version supports, so Node 24 loads `next.config.ts` natively after development dependencies are pruned. Do not disable Node's native type stripping in the service environment.
+| Local path under `G:\bills.voltronix.ae` | Ubuntu destination relative to the source root            |
+| ---------------------------------------- | --------------------------------------------------------- |
+| `deploy\.env.production`                 | `deploy/.env.production`                                  |
+| `deploy\.env.migration`                  | `deploy/.env.migration`                                   |
+| `deploy\.env.setup`                      | `deploy/.env.setup`, one-shot setup only                  |
+| `deploy\.env.accounting`                 | `deploy/.env.accounting`, one-shot Books reads only      |
+| `deploy\.private\mysql\`                 | `deploy/.private/mysql/`                                  |
+| `deploy\.private\mysql-ca.pem`           | `deploy/.private/mysql-ca.pem`                            |
+| `deploy\.private\setup-operator.json`    | Protected Admin login handoff; never an app mount         |
+| `deploy\.private\data-transfer\`         | `deploy/.private/data-transfer/`, read-only during import |
 
-## Build and inspect
+The original capture and receipt remain under `.local/production-transfer/`. Source archives under `.local/deployment-release/` contain no private configuration, OAuth tokens, passwords or invoice originals. Transfer private assets through a private channel and apply the permissions in the runbooks.
 
-Run from the repository root on the Linux host using Docker Compose v2:
+Complete the server steps in this order:
 
-```sh
-docker compose -f deploy/compose.yaml config --quiet
-docker compose -f deploy/compose.yaml build web
-docker compose -f deploy/compose.yaml run --rm --no-deps web check
+1. Follow [owned MySQL setup](../docs/MYSQL_HOSTING.md): initialize the persistent database, build the images, explicitly migrate, then apply and verify restricted runtime grants.
+2. Follow [data transfer](../docs/DATA_TRANSFER.md): create the fresh Admin once, prepare operational company/CRM bindings, validate the exact bundle and import it using the offline setup environment.
+3. Start only `web proxy` with normal runtime configuration. Verify restored records, originals, the loopback origin and hosted login.
+4. Start incoming reads and project-history verification. Allow initial reconciliation and retained quota delays to complete; imported cache data and stale proofs do not establish current hosted freshness.
+5. Stop the read workers temporarily, verify every Books destination with the separate accounting environment, then start outgoing sync. Select the real supplier and each line's actual Books account and tax when entering a new bill.
+
+Contracting metadata verification remains subject to its provider cooldown. Hosted destination verification and actual outgoing acceptance are still pending. All current invoices already exist in Zoho; use the next genuine new invoice for posting acceptance, without creating duplicate test invoices.
+
+## Normal runtime commands
+
+Run from the extracted source root on Ubuntu. This owned-MySQL setup needs all three normal Compose files:
+
+```bash
+dc() {
+  sudo docker compose \
+    -f deploy/compose.yaml \
+    -f deploy/compose.mysql-ca.yaml \
+    -f deploy/compose.mysql.yaml "$@"
+}
+
+# After migration, grants and successful data import:
+dc up -d web proxy
+dc run --rm --no-deps web check:sync
+dc ps
 ```
 
-The readiness command reads runtime, OAuth metadata, accounting mappings, company/destination verification and local catalog inventory without calling a provider or writing records. Exit `2` means setup is blocked. `LIVE_WRITES_DISABLED` is expected during setup; `CONFIGURATION_PRESENT_UNVERIFIED` still requires invoice-specific checks, actual provider confirmation, storage and host acceptance. If the schema is not installed, complete the controlled migration below first.
+The transfer runbook adds `compose.transfer.yaml` only for one-shot offline setup; accounting commands use `compose.accounting.yaml` instead. **Never use either fourth override with `up` or continuous workers.** `check:sync` inventories configuration and database evidence; imported destinations remain unverified until the accounting step completes. Fresh transfer creates no local suppliers, so `REAL_VENDOR_REQUIRED` or `VENDOR_MAPPING_REQUIRED` can remain until an actual Books supplier is selected and resolved for that company, or explicitly mapped with `books:suppliers`. No dummy invoice is needed. Web health probes cover `/login`, so database, storage and provider acceptance require separate checks.
 
-For a release, pin the Node and nginx base images to reviewed digests and assign `BILLS_IMAGE` an immutable release tag. The checked-in version tags are runnable starting points, not a supply-chain lock. Preserve the resulting image digest and backup/rollback instructions with the release.
+When the protected Admin, scoped grants and source bindings are ready:
 
-## Explicit schema migration
-
-The migration image retains the Prisma CLI; the runtime image omits build/test tooling. Migrations never run in web or worker startup.
-
-1. Have the database operator create the empty operational schema and dedicated identities with the required grants. Do not use the local `mysql-local` helper or fictional seed. Back up any existing schema before an approved upgrade. An existing unmanaged schema requires a reviewed baseline; do not reset it to force migration success.
-2. Copy `migration.env.example` to protected `deploy/.env.migration`. Select the same production schema with its separate migration identity, verified TLS and `ALLOW_PRODUCTION_MIGRATION=true` only for the intended invocation. Do not reuse the runtime account.
-3. Run the migration image explicitly:
-
-```sh
-docker compose -f deploy/compose.yaml --profile tools build migrate
-docker compose -f deploy/compose.yaml --profile tools run --rm --no-deps migrate
+```bash
+dc up -d incoming job-history
+dc logs --tail=50 incoming job-history
 ```
 
-The wrapper adds Prisma's `sslaccept=strict` and optional CA path only to the migration child process. It does not print or modify the stored URL. MySQL DDL is not transactionally reversible; review the additive migrations before execution and retain the migration output privately. Remove the enabled migration secret from the host when the maintenance operation is complete.
+Incoming checks run 60 seconds after completed passes, with daily reconciliation, durable leases and provider backoff. The dashboard's five-second refresh reads saved app data. Imported project associations start `STALE`; `job-history` rechecks the exact Books project → Zoho Projects project → CRM Deal evidence before treating it as current. It does not guess relationships.
 
-## Start and route traffic
+Monitor source freshness, quota delays, attachment completion, project-proof freshness and eventual outgoing failures. Verify service recreation and host reboot. `restart: unless-stopped` handles exited processes; an unhealthy HTTP probe alone does not restart a container. Retire duplicate local polling during manual cutover once hosted polling is established.
 
-After the staged setup below and the initial verified project-association import are complete, start the full release:
+Preserve both `mysql_data` and `invoices` volumes during upgrades. Back them up with the production encryption key and verify a restore. Do not use `docker compose down -v` for an upgrade. Quiesce writers before maintenance:
 
-```sh
-docker compose -f deploy/compose.yaml up -d web proxy sync incoming job-history
-docker compose -f deploy/compose.yaml ps
-docker compose -f deploy/compose.yaml logs --tail=50 web
-docker compose -f deploy/compose.yaml logs --tail=50 incoming
+```bash
+dc stop incoming job-history sync ocr web proxy
 ```
 
-The proxy listens only on `127.0.0.1:8080` (`BILLS_HTTP_PORT` can override the port). Configure the existing host's Cloudflare Tunnel to route `bills.voltronix.ae` to `http://127.0.0.1:8080` and preserve the hostname. Verify the backend before moving the domain. The web container and MySQL have no published ports in this package. The proxy drops requests for other hostnames, bounds request sizes and rate-limits login without logging callback query strings. Configure Cloudflare's edge rate limits and access policy according to the organization's actual users.
+OCR/scanner intake remains disabled. OCR has an optional Compose profile and requires separate setup and acceptance.
 
-During controlled setup, explicitly start only `web proxy`. Start `incoming` after its Books/CRM source authorization and protected worker account are ready; it can run while financial writes remain disabled. Start `job-history` after the project-association migration, required source permissions and initial complete verified association import described below. Start outgoing `sync` after the runbook's accounting verification and final write-enable configuration. Web liveness probes test `/login`; they do not verify database writes, storage or provider acceptance. Run `web check`, authenticated Save and sync acceptance, and incoming source-status acceptance separately. `restart: unless-stopped` restarts exited processes; Docker does not restart a process solely because HTTP health is unhealthy. Monitor incoming heartbeat, last successful check, stale sources and quota backoff alongside job-history refresh status, outgoing queue age and failed/uncertain outcomes. Stop gracefully before backup or maintenance:
+## Cloudflare Tunnel and hosted login
 
-```sh
-docker compose -f deploy/compose.yaml stop incoming job-history sync ocr web proxy
+Probe the origin before routing the hostname:
+
+```bash
+curl --fail --silent --show-error --output /dev/null --write-out '%{http_code}\n' \
+  --header 'Host: bills.voltronix.ae' http://127.0.0.1:8080/login
 ```
 
-Invoice originals live in the named `invoices` volume. Preserve it and back it up together with the database, including incoming checkpoints and project-association evidence; never use `docker compose down --volumes` for an upgrade. `sync`, `incoming` and `job-history` are normal services for this release. All three share the private upload volume, runtime environment and optional MySQL CA mount. If handing over an older attachment downloader, mount its retained progress JSON privately and keep incoming attachment continuation disabled until the handoff is complete. See [original-file coordination](../docs/INCOMING_SYNC.md#original-files-and-quota-coordination). Only OCR has an opt-in profile; start it later only after its own configuration and acceptance:
+Expect HTTP `200`. Configure the existing tunnel with public hostname `bills.voltronix.ae`, origin `http://127.0.0.1:8080`, and HTTP Host Header `bills.voltronix.ae`. The app origin remains `https://bills.voltronix.ae`. If `BILLS_HTTP_PORT` changes, update the tunnel and probe consistently.
 
-```sh
-docker compose -f deploy/compose.yaml --profile ocr up -d ocr
+This loopback route assumes `cloudflared` runs on the host or uses host networking. A bridge-network container has a separate loopback interface. Preserve existing tunnel credentials and unrelated routes. For a locally managed tunnel, merge [the ingress example](cloudflared.ingress.example.yaml) before the final catch-all and validate with `cloudflared tunnel ingress validate` and `cloudflared tunnel ingress rule https://bills.voltronix.ae/login`. For a dashboard-managed tunnel, update the hostname's origin and Host Header. [Cloudflare ingress](https://developers.cloudflare.com/tunnel/features/locally-managed-tunnels/configuration-file/), [origin settings](https://developers.cloudflare.com/tunnel/reference/origin-parameters/)
+
+Register these callbacks in the existing Zoho clients for hosted reauthorization when needed:
+
+```text
+https://bills.voltronix.ae/api/integrations/oauth/zoho/callback
+https://bills.voltronix.ae/api/integrations/oauth/crm/callback
 ```
 
-## Operator setup and acceptance
+Prepared scoped grants avoid requiring new consent solely because the database is fresh. Revoked grants or changed client/source identities still require correction from the hosted Admin session. Confirm the hosted encrypted credential records before retiring optional bootstrap token values. Preserve the production encryption key with every production backup.
 
-Trusted operator commands are explicit one-shot invocations, not startup tasks. Supply each operation's inputs through the protected runtime environment and remove temporary operator passwords afterward. The continuous incoming worker instead retains its dedicated protected `INCOMING_SYNC_OPERATOR_EMAIL` / `INCOMING_SYNC_OPERATOR_PASSWORD` for restart; production seed credentials are forbidden. The supported one-shot entrypoint commands are:
+## Accounting review and outgoing activation
 
-```sh
-docker compose -f deploy/compose.yaml run --rm --no-deps web operator user:create
-docker compose -f deploy/compose.yaml run --rm --no-deps web operator company:prepare-manual
-docker compose -f deploy/compose.yaml run --rm --no-deps web operator user:manage
-docker compose -f deploy/compose.yaml run --rm --no-deps web operator company:prepare
-docker compose -f deploy/compose.yaml run --rm --no-deps web operator books:authorize
-docker compose -f deploy/compose.yaml run --rm --no-deps web operator books:catalog
-docker compose -f deploy/compose.yaml run --rm --no-deps web operator books:suppliers
-docker compose -f deploy/compose.yaml run --rm --no-deps web operator books:verify-live
+The prepared profiles use the organizations' AED base currency and require explicit line selection. Every bill line must select a valid expense account and tax from that company's Books catalog; expense and tax defaults are not inferred. Select the real Books supplier during manual entry. These per-bill checks remain required after activation.
+
+Use the separate accounting environment for provider reads and destination verification. It is generated from the current runtime profiles and encryption key, with Books networking enabled, CRM and incoming networking disabled, and all financial-write flags disabled. If the runtime credentials or mappings change, regenerate both derived environments with `sudo node deploy/prepare-transfer.mjs --manifest-sha256=<reviewed bundle digest>` before verification, then reapply the UID 1000 file permissions from the transfer guide. This preserves the runtime's enabled posting flags and existing Admin password.
+
+```bash
+daccount() {
+  sudo docker compose \
+    -f deploy/compose.yaml \
+    -f deploy/compose.mysql-ca.yaml \
+    -f deploy/compose.mysql.yaml \
+    -f deploy/compose.accounting.yaml "$@"
+}
+
+# Avoid competing provider reads and keep outgoing processing stopped.
+dc stop incoming job-history sync
+daccount run --rm --no-deps \
+  -e ALLOW_BOOKS_POSTING_ACTIVATION=true \
+  -e BOOKS_ACTIVATION_REFERENCE=manual-bill-activation-20261030 \
+  web operator books:activate
 ```
 
-Follow each command's contract; these lines do not supply or invent company assignments, supplier IDs or operator evidence. Follow the [Save and sync acceptance sequence](../docs/MANUAL_DEPLOYMENT.md). Account recovery is included as `user:manage`; the packaged `backup:verify` operator remains restricted to a separately restored loopback database and private storage. Books setup and confirmed provider bill/attachment delivery are required for this release.
+This command uses the protected Admin and verifies exact operational destinations with provider reads; it does not create a Zoho bill. Expect `VERIFIED` for every configured operational destination. `WAITING_QUOTA`, `WAITING_SOURCE` or `BLOCKED` returns a nonzero result: retain the reported retry time and existing cooldowns, correct any reported prerequisite and keep `sync` stopped. Incoming and history workers may resume between verification attempts; stop them again before retrying. Optional catalog reads use this same `daccount` environment with their specific operator inputs and allow flags.
 
-## Existing Windows server
+Operator commands are explicit one-shot invocations using protected, reviewed inputs. Supported operations include `user:create`, `user:manage`, `company:prepare`, `crm:prepare`, `books:authorize`, `books:catalog`, `books:suppliers`, `books:verify-live`, `books:activate`, `data:transfer` and the separately guarded `backup:verify`. The permanent runtime does not retain `NEW_USER_*` provisioning fields.
 
-The Linux package is optional when the owner already operates a Windows Node server. Keep the release separate from this development checkout, use Node 24 and a dedicated Windows service identity, run `npm ci`, `npm run build`, `npm run check:release`, and `npm prune --omit=dev`, then supervise these four processes using the server's existing service manager:
+`data:transfer prepare` creates this handoff's operational companies, memberships and CRM bindings. For later staff assignment, create the real staff account and use `COMPANY_SETUP_MEMBER_EMAIL` with the exact `company:prepare` inputs. `company:prepare-manual` creates a separate local-ledger company and is not the Books setup command.
 
-```powershell
-node --env-file=.env node_modules/next/dist/bin/next start --experimental-next-config-strip-types --hostname 127.0.0.1
-node --conditions=react-server --env-file=.env --import=tsx scripts/integration-worker.ts --watch --limit=5
-node --conditions=react-server --env-file=.env --import=tsx scripts/incoming-sync-worker.ts --watch
-node --conditions=react-server --env-file=.env --import=tsx scripts/job-history-worker.ts --watch
+After every destination is verified, use the already enabled permanent runtime to recreate services and start outgoing synchronization. Keep `ALLOW_PRODUCTION_ACCOUNTING_WRITES=false` and `MANUAL_ENTRY_ONLY=false`:
+
+```bash
+dc up -d --force-recreate web incoming job-history sync
+dc run --rm --no-deps web check:sync
 ```
 
-These commands load the protected production `.env`; a service manager can instead supply the same settings privately in its environment. Configure restart after failure and reboot. Do not use a foreground developer terminal as production supervision.
+With host Node available, `sudo node deploy/prepare.mjs --check-posting` checks the files offline without printing secrets. It does not establish provider acceptance. The next genuinely new bill must appear locally and receive a confirmed Zoho Books ID plus original-attachment completion. Saved or queued status is not confirmed delivery. No new test invoice was posted during this preparation.
 
-For this release, supervise web, outgoing sync, incoming sync and job history, and run `npm run check:sync` with their protected production environment. They share the protected runtime configuration, persistent private `UPLOAD_DIR` and verified-TLS operational MySQL. Route the existing Cloudflare Tunnel to the loopback application/reverse proxy. Confirm incoming source freshness/quota behavior, outgoing bill/attachment delivery, reboot/service restart, database TLS, Windows ACL and backup recovery on that host. The verified local hidden incoming process does not establish hosted acceptance or Windows reboot supervision. This package does not install a Windows service or start a visible helper window.
+## Other installations and build isolation
 
-## Automatic verified project history
+For a new installation without the prepared data handoff, `node deploy/prepare.mjs` creates private templates without overwriting existing files. `node deploy/prepare-mysql.mjs --configure-env` prepares owned MySQL; an external operator can instead supply an equivalent verified-TLS database and separate identities. The generic [manual deployment guide](../docs/MANUAL_DEPLOYMENT.md) covers that fresh setup. Do not repeat its initial provisioning over an imported target.
 
-The `job-history` Compose service runs `scripts/job-history-worker.ts --watch`. A bounded local check is `npm run worker:job-history`; use `npm run worker:job-history -- --watch` under a supervisor. It uses the same protected administrator operator credentials as incoming sync and exits without reading providers when `INCOMING_SYNC_ENABLED=false`.
+Migrations require separate credentials and explicit approval for each invocation; web and workers never migrate on startup. The wrapper supplies Prisma's strict TLS settings without changing the stored URL. The runtime excludes build/test tools, uses Node 24's supported native loading of `next.config.ts`, and retains `tsx` for workers. Build inputs are allowlisted; private configuration, data, keys and originals are excluded. Pin reviewed image digests and preserve the release manifest and rollback procedure.
 
-Apply the project-association migration and import the initial complete, verified association evidence before starting this worker. It refreshes existing cache records only: at most two due projects per pass, checked every five seconds, with a five-minute successful refresh interval and a 24-hour proof lifetime. Requests are serial GETs, paced at least 1.1 seconds apart. Source quotas, authorization errors and configured cooldowns can delay refresh. Projects-specific throttling pauses only association refreshes for that portal and CRM source; it does not pause ordinary CRM imports. Books/CRM endpoint quotas remain shared with their incoming workers. A durable lease fences duplicate workers and interrupted attempts; incomplete responses preserve the last complete proof until it expires.
-
-The supported initial chain is US production Books project ID → explicit Zoho Projects project ID → exact CRM Deal IDs. Books consent requires `ZohoBooks.projects.READ`; CRM consent requires `ZohoProjects.portals.READ` and `ZohoProjects.clients.READ` in addition to existing CRM reads. Other data centers require an explicit supported implementation. New imported bills with those exact Books project IDs appear through the current bill-line join. This service does not discover or guess new project relationships, create jobs, assign companies to legacy CRM records, allocate financial amounts, or write provider financial records.
-
-References: [Next self-hosting](https://nextjs.org/docs/app/guides/self-hosting), [Compose secrets](https://docs.docker.com/compose/how-tos/use-secrets/), [Docker build-context isolation](https://docs.docker.com/build/concepts/context/#dockerignore-files), [Prisma MySQL TLS](https://www.prisma.io/docs/orm/v7/core-concepts/supported-databases/mysql).
+Further references: [MySQL hosting](../docs/MYSQL_HOSTING.md), [incoming synchronization](../docs/INCOMING_SYNC.md), [production readiness](../docs/PRODUCTION_READINESS.md), [Compose secrets](https://docs.docker.com/compose/how-tos/use-secrets/), [Docker build-context isolation](https://docs.docker.com/build/concepts/context/#dockerignore-files).

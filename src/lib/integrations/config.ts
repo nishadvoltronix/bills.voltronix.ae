@@ -74,8 +74,17 @@ export const booksMappingSchema = z
     ),
     jobCustomFieldIndex: z.number().int().positive().optional(),
     orderCustomFieldIndex: z.number().int().positive().optional(),
+    // Omitted for legacy mappings so their serialized configuration hashes stay stable.
+    lineSelectionRequired: z.literal(true).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((mapping, context) => {
+    if (!mapping.lineSelectionRequired) return;
+    if (Object.keys(mapping.categories).length || Object.keys(mapping.taxes).length)
+      context.addIssue({ code: "custom", message: "Explicit line selection mode must not define category or tax defaults." });
+    if (!mapping.currencies[mapping.baseCurrency])
+      context.addIssue({ code: "custom", path: ["currencies"], message: "The exact base currency must be configured." });
+  });
 export type BooksMapping = z.infer<typeof booksMappingSchema>;
 export const crmMappingSchema = z
   .object({
@@ -164,6 +173,17 @@ export function getBooksOrganizations(env: NodeJS.ProcessEnv = process.env) {
     organizationId,
     name,
   }));
+}
+
+/** Final-save policy must remain enforceable even while OAuth credentials are unavailable. */
+export function booksLineSelectionRequired(organizationId: string, env: NodeJS.ProcessEnv = process.env) {
+  if (!env.ZOHO_BOOKS_ORGANIZATIONS_JSON?.trim() && !env.ZOHO_BOOKS_ORGANIZATION_ID?.trim() && !env.ZOHO_BOOKS_MAPPING_JSON?.trim()) return false;
+  const profile = booksOrganizationProfiles(env).find(value => value.organizationId === organizationId);
+  if (!profile) return false;
+  if (env.ZOHO_BOOKS_ORGANIZATIONS_JSON?.trim()) return profile.mapping?.lineSelectionRequired === true;
+  if (!env.ZOHO_BOOKS_MAPPING_JSON) return false;
+  try { return booksMappingSchema.parse(JSON.parse(env.ZOHO_BOOKS_MAPPING_JSON)).lineSelectionRequired === true; }
+  catch { throw new IntegrationError("INVALID_MAPPING", "The Books accounting policy is invalid. Review the server configuration.", "BLOCKED"); }
 }
 
 /** Server-only bootstrap credentials. Existing scoped vault grants take precedence. */

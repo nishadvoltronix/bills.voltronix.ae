@@ -4,6 +4,7 @@ import { PrismaMariaDb } from "@prisma/adapter-mariadb";
 import { mysqlConnectionOptions } from "../src/lib/mysql-connection";
 import { mysqlTransportOptions } from "../src/lib/mysql-transport";
 import { syncReadiness, type SyncInventory } from "./lib/sync-readiness";
+import { verifyPassword } from "../src/lib/password";
 
 async function inspectDatabase(): Promise<SyncInventory | null> {
   let client: PrismaClient | undefined;
@@ -86,7 +87,38 @@ async function inspectDatabase(): Promise<SyncInventory | null> {
       });
       mappedDestinations.push({ ...destination, mappedRealVendors });
     }
+    let incoming: SyncInventory["incoming"];
+    if (process.env.INCOMING_SYNC_ENABLED === "true") {
+      const email = process.env.INCOMING_SYNC_OPERATOR_EMAIL || process.env.ACCOUNT_OPERATOR_EMAIL ||
+        (process.env.APP_ENV !== "production" ? process.env.SEED_ADMIN_EMAIL : undefined) || "";
+      const password = process.env.INCOMING_SYNC_OPERATOR_PASSWORD || process.env.ACCOUNT_OPERATOR_PASSWORD ||
+        (process.env.APP_ENV !== "production" ? process.env.SEED_ADMIN_PASSWORD : undefined) || "";
+      const [operator, crmCredentials, bindings] = await Promise.all([
+        client.user.findUnique({ where: { email: email.trim().toLowerCase() }, select: {
+          active: true, role: true, passwordHash: true,
+          memberships: { where: { active: true }, select: { companyId: true } },
+        } }),
+        client.integrationCredential.findMany({ where: { target: "CRM" }, select: {
+          organizationId: true, revokedAt: true, connectionFingerprint: true,
+        } }),
+        client.companyCrmSource.findMany({ select: {
+          companyId: true, organizationId: true, dataCenter: true, environment: true,
+        } }),
+      ]);
+      // Do not call the login service: it writes login attempts. Verify only the
+      // supplied private password in memory and return booleans, never the hash.
+      incoming = {
+        operator: operator ? {
+          activeAdministrator: operator.active && operator.role === "ADMIN",
+          passwordMatches: Boolean(password) && await verifyPassword(password, operator.passwordHash),
+          companyIds: operator.memberships.map(row => row.companyId),
+        } : null,
+        credentials: crmCredentials,
+        bindings,
+      };
+    }
     return {
+      ...(incoming ? { incoming } : {}),
       credentials,
       companies: companies.map(({ _count, ...company }) => ({
         ...company,

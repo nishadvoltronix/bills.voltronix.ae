@@ -19,6 +19,9 @@ async function main() {
     companyName: process.env.COMPANY_SETUP_NAME,
     organizationId: process.env.COMPANY_SETUP_ORGANIZATION_ID,
     reference: process.env.COMPANY_SETUP_REFERENCE,
+    ...(process.env.COMPANY_SETUP_MEMBER_EMAIL
+      ? { memberEmail: process.env.COMPANY_SETUP_MEMBER_EMAIL }
+      : {}),
   });
   console.log(JSON.stringify(result, null, 2));
 }

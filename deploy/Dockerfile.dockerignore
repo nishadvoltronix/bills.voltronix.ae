@@ -25,12 +25,16 @@
 !scripts/verify-restore.ts
 !scripts/company-prepare-manual.ts
 !scripts/company-prepare.ts
+!scripts/crm-prepare.ts
+!scripts/zoho-data-transfer.ts
 !scripts/books-authorize.ts
 !scripts/books-verify-live.ts
+!scripts/books-activate.ts
 !scripts/books-catalog.ts
 !scripts/books-suppliers.ts
 !scripts/lib/
 !scripts/lib/sync-readiness.ts
+!scripts/lib/incoming-readiness.ts
 !scripts/lib/manual-readiness.ts
 !scripts/lib/books-attachment-state.ts
 !deploy/

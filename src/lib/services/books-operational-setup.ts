@@ -84,8 +84,11 @@ export async function verifyBooksAccountingMetadata(transport: ZohoTransport, ex
   const config = transport.config;
   const mapping = config.booksMapping;
   if (config.target !== "ZOHO" || config.environment !== "production" || !mapping ||
-    !mapping.currencies[mapping.baseCurrency] || !Object.keys(mapping.categories).length || !Object.keys(mapping.taxes).length)
-    throw blocked("ACCOUNTING_MAPPING_REQUIRED", "Configure this exact production organization's base currency, expense accounts and simple tax mappings first.");
+    !mapping.currencies[mapping.baseCurrency] || (!mapping.lineSelectionRequired &&
+      (!Object.keys(mapping.categories).length || !Object.keys(mapping.taxes).length)))
+    throw blocked("ACCOUNTING_MAPPING_REQUIRED", "Configure this exact organization's base currency and either reviewed account/tax defaults or required explicit line selections.");
+  if (mapping.lineSelectionRequired && (Object.keys(mapping.categories).length || Object.keys(mapping.taxes).length))
+    throw blocked("MAPPING_VERIFICATION_UNSUPPORTED", "Required line selection mode cannot define category or tax defaults.");
   if (Object.keys(mapping.currencies).length > 20 || Object.keys(mapping.taxes).length > 30 ||
     mapping.jobCustomFieldIndex || mapping.orderCustomFieldIndex || Object.values(mapping.categories).some((value) => value?.itemId))
     throw blocked("MAPPING_VERIFICATION_UNSUPPORTED", "This verifier supports up to 20 currencies, 30 simple taxes and manual expense accounts. Item/custom-field mappings need a separate supported verification procedure.");

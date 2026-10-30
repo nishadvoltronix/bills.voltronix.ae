@@ -26,6 +26,11 @@ const inputSchema = z
       .min(10)
       .max(160)
       .regex(/^[^\u0000-\u001f\u007f]+$/),
+    memberEmail: z
+      .email()
+      .max(254)
+      .transform((value) => value.toLowerCase())
+      .optional(),
   })
   .strict();
 
@@ -83,6 +88,17 @@ export async function prepareOperationalBooksCompany(
       });
       if (!operator?.active || operator.role !== "ADMIN")
         throw new HttpError(403, "An active administrator is required.");
+      const member = input.memberEmail
+        ? await tx.user.findUnique({
+            where: { email: input.memberEmail },
+            select: { id: true, active: true },
+          })
+        : null;
+      if (input.memberEmail && !member?.active)
+        throw new HttpError(
+          422,
+          "The requested company member must be an existing active user.",
+        );
       const binding = await tx.companyIntegrationDestination.findUnique({
         where: { target_organizationId_dataCenter_environment: destination },
       });
@@ -148,11 +164,42 @@ export async function prepareOperationalBooksCompany(
             },
           },
         });
+      let memberAssigned = false;
+      if (member && member.id !== actor.id) {
+        const identity = { userId: member.id, companyId };
+        const membership = await tx.userCompanyMembership.findUnique({
+          where: { userId_companyId: identity },
+        });
+        if (!membership?.active) {
+          await tx.userCompanyMembership.upsert({
+            where: { userId_companyId: identity },
+            create: identity,
+            update: { active: true },
+          });
+          await tx.auditLog.create({
+            data: {
+              actorId: actor.id,
+              companyId,
+              action: "COMPANY_MEMBERSHIP_GRANTED",
+              entityType: "User",
+              entityId: member.id,
+              details: {
+                reference: input.reference,
+                source: "reauthenticated_operator",
+                previousActive: membership?.active ?? null,
+                active: true,
+              },
+            },
+          });
+          memberAssigned = true;
+        }
+      }
       return {
         companyId,
         organizationId: input.organizationId,
         created: !existing,
         destinationCreated: !binding,
+        memberAssigned,
         providerRequests: 0,
         financialWritesEnabled: false,
       };

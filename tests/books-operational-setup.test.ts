@@ -64,6 +64,34 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
 
 describe("operational Books company verification", () => {
+  it("verifies the exact organization and currency for required line selections without inventing defaults", async () => {
+    vi.stubEnv("ZOHO_BOOKS_ORGANIZATIONS_JSON", JSON.stringify([{ organizationId: input.organizationId, name: input.organizationName,
+      mapping: { ...mapping, categories: {}, taxes: {}, lineSelectionRequired: true } }]));
+    const { transport, fetcher } = connection();
+    await expect(verifyOperationalBooksDestination(actor, input, transport)).resolves.toMatchObject({
+      destinationVerified: true, providerReads: 2, currencyCount: 1, accountCount: 0, taxCount: 0, providerFinancialWrites: 0,
+    });
+    expect(fetcher.mock.calls.map(call => new URL(call[0]).pathname)).toEqual([
+      "/books/v3/organizations/1001", "/books/v3/settings/currencies/101",
+    ]);
+  });
+  it("keeps legacy empty defaults ineligible for operational verification", async () => {
+    vi.stubEnv("ZOHO_BOOKS_ORGANIZATIONS_JSON", JSON.stringify([{ organizationId: input.organizationId, name: input.organizationName,
+      mapping: { ...mapping, categories: {}, taxes: {} } }]));
+    const { transport, fetcher } = connection();
+    await expect(verifyOperationalBooksDestination(actor, input, transport)).rejects.toMatchObject({ code: "ACCOUNTING_MAPPING_REQUIRED" });
+    expect(fetcher).not.toHaveBeenCalled(); expect(store.$transaction).not.toHaveBeenCalled();
+  });
+  it.each(["organization", "currency"])("still rejects mismatched %s metadata in required line mode", async kind => {
+    vi.stubEnv("ZOHO_BOOKS_ORGANIZATIONS_JSON", JSON.stringify([{ organizationId: input.organizationId, name: input.organizationName,
+      mapping: { ...mapping, categories: {}, taxes: {}, lineSelectionRequired: true } }]));
+    const rows = metadata();
+    if (kind === "organization") rows["/books/v3/organizations/1001"].organization.currency_id = "999";
+    else rows["/books/v3/settings/currencies/101"].currency.is_base_currency = false;
+    const { transport } = connection(rows);
+    await expect(verifyOperationalBooksDestination(actor, input, transport)).rejects.toMatchObject({ kind: "BLOCKED" });
+    expect(store.$transaction).not.toHaveBeenCalled();
+  });
   it("verifies provider identity and mapped records by GET before recording audited destination proof", async () => {
     const { transport, fetcher } = connection();
     const receipt = await verifyOperationalBooksDestination(actor, input, transport);

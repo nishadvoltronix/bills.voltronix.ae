@@ -25,8 +25,10 @@ export function validateDeploymentEnvironment(env, { migration = false } = {}) {
       (!migration && /(admin|migrat)/i.test(user)) ||
       (["127.0.0.1", "localhost", "[::1]"].includes(database.hostname) && database.port === "3308"))
     throw new Error("Use a dedicated operational database and an appropriately restricted identity.");
-  if (env.DATABASE_TLS_MODE !== "verify-full")
+  if (env.DATABASE_TLS_MODE !== "verify-full" || env.NODE_TLS_REJECT_UNAUTHORIZED === "0")
     throw new Error("Production MySQL requires verified TLS.");
+  if (env.DATABASE_TLS_CA_FILE && !path.posix.isAbsolute(env.DATABASE_TLS_CA_FILE))
+    throw new Error("The deployment CA bundle must use an absolute mounted path.");
   if (env.UPLOAD_DIR !== "/var/lib/voltronix/uploads")
     throw new Error("Use the mounted private invoice-storage directory.");
   if (migration && env.ALLOW_PRODUCTION_MIGRATION !== "true")
@@ -55,10 +57,13 @@ export function deploymentCommand(mode, args = []) {
     "backup:verify": "scripts/verify-restore.ts",
     "company:prepare-manual": "scripts/company-prepare-manual.ts",
     "company:prepare": "scripts/company-prepare.ts",
+    "crm:prepare": "scripts/crm-prepare.ts",
     "books:authorize": "scripts/books-authorize.ts",
     "books:catalog": "scripts/books-catalog.ts",
     "books:suppliers": "scripts/books-suppliers.ts",
     "books:verify-live": "scripts/books-verify-live.ts",
+    "books:activate": "scripts/books-activate.ts",
+    "data:transfer": "scripts/zoho-data-transfer.ts",
   };
   if (mode === "operator" && Object.hasOwn(operators, args[0] ?? ""))
     return [...shared, operators[args[0]], ...args.slice(1)];

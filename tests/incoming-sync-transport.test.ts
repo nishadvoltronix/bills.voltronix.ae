@@ -76,7 +76,9 @@ describe("incoming GET-only source transport", () => {
     await expect(run.reader.getBytes("/books/v3/documents/34")).rejects.toMatchObject({ code: "INCOMING_ENDPOINT_REJECTED" });
   });
   it("bounds polling settings", () => {
-    expect(incomingSyncSettings({ NODE_ENV: "test", INCOMING_SYNC_ENABLED: "true" })).toMatchObject({ enabled: true, intervalSeconds: 5, reconcileSeconds: 86400 });
+    expect(incomingSyncSettings({ NODE_ENV: "test", INCOMING_SYNC_ENABLED: "true" })).toMatchObject({ enabled: true, intervalSeconds: 60, reconcileSeconds: 86400 });
+    expect(incomingSyncSettings({ NODE_ENV: "test", INCOMING_SYNC_INTERVAL_SECONDS: "" }).intervalSeconds).toBe(60);
+    expect(incomingSyncSettings({ NODE_ENV: "test", INCOMING_SYNC_INTERVAL_SECONDS: "60" }).intervalSeconds).toBe(60);
     expect(incomingSyncSettings({ NODE_ENV: "test", INCOMING_SYNC_INTERVAL_SECONDS: "5" }).intervalSeconds).toBe(5);
     expect(incomingSyncSettings({ NODE_ENV: "test", INCOMING_SYNC_INTERVAL_SECONDS: "300" }).intervalSeconds).toBe(300);
     expect(incomingSyncSettings({ NODE_ENV: "test", INCOMING_SYNC_INTERVAL_SECONDS: "86400" }).intervalSeconds).toBe(86400);

@@ -19,6 +19,9 @@ const verifier = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/services/bill-books-options", () => ({ verifyBillBooksSelections: verifier }));
 const tag = randomUUID().slice(0, 8);
 const organizationId = `991${Date.now()}`;
+const profiles = (required = false) => JSON.stringify([{ organizationId, name: "Fictional Books organization",
+  mapping: { verified: true, baseCurrency: "AED", currencies: { AED: { id: "101" } }, taxes: {}, categories: {},
+    ...(required ? { lineSelectionRequired: true } : {}) } }]);
 let actor: Actor;
 let companyId: string;
 let otherCompanyId: string;
@@ -44,13 +47,13 @@ beforeAll(async () => {
   for (const [key, value] of Object.entries({ INTEGRATION_NETWORK_ENABLED: "true", ZOHO_BOOKS_NETWORK_ENABLED: "true",
     ZOHO_BOOKS_WRITE_ENABLED: "false", ZOHO_BOOKS_LIVE_ENABLED: "false", ALLOW_PRODUCTION_ACCOUNTING_WRITES: "false",
     ZOHO_BOOKS_DC: "US", ZOHO_BOOKS_ENVIRONMENT: "sandbox", ZOHO_BOOKS_CLIENT_ID: "fictional-client", ZOHO_BOOKS_CLIENT_SECRET: "fictional-secret",
-    ZOHO_BOOKS_ORGANIZATIONS_JSON: JSON.stringify([{ organizationId, name: "Fictional Books organization",
-      mapping: { verified: true, baseCurrency: "AED", currencies: { AED: { id: "101" } }, taxes: {}, categories: {} } }]),
+    ZOHO_BOOKS_ORGANIZATIONS_JSON: profiles(),
   })) vi.stubEnv(key, value);
   await db.integrationCredential.create({ data: { target: "ZOHO", organizationId, dataCenter: "US",
     connectionFingerprint: connectionFingerprint(getConfig("ZOHO", process.env, organizationId)), refreshTokenEncrypted: "never-decrypted-fixture" } });
 });
 beforeEach(() => {
+  vi.stubEnv("ZOHO_BOOKS_ORGANIZATIONS_JSON", profiles());
   verifier.mockReset();
   verifier.mockImplementation(async (_actor: Actor, selectedCompanyId: string, selections: (BooksSelection | null)[]) => {
     expect(selectedCompanyId).toBe(companyId);
@@ -63,6 +66,72 @@ beforeEach(() => {
 afterAll(async () => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); await db.$disconnect(); });
 
 describe("durable verified Books line selections", () => {
+  it("keeps an incomplete bill editable after Save and sync and permits finalization after explicit selections", async () => {
+    vi.stubEnv("ZOHO_BOOKS_ORGANIZATIONS_JSON", profiles(true));
+    const unselected = { description: "Fictional draft purchase", quantity: "1", unitPrice: "100.00" };
+    const data = input({ vatRate: "5", lines: [unselected] });
+    const draft = await createBill(actor, data);
+    expect(draft.status).toBe("DRAFT"); expect(verifier).not.toHaveBeenCalled();
+    await expect(actOnBill(actor, draft.id, { action: "submit", version: draft.version }))
+      .rejects.toMatchObject({ status: 422, message: expect.stringContaining("every line") });
+    vi.stubEnv("ZOHO_BOOKS_CLIENT_SECRET", "");
+    try {
+      await expect(actOnBill(actor, draft.id, { action: "submit", version: draft.version }))
+        .rejects.toMatchObject({ status: 422, message: expect.stringContaining("every line") });
+    } finally { vi.stubEnv("ZOHO_BOOKS_CLIENT_SECRET", "fictional-secret"); }
+    expect(await getBill(actor, draft.id)).toMatchObject({ status: "DRAFT", version: draft.version });
+    expect(await db.integrationJob.count({ where: { billId: draft.id } })).toBe(0);
+    expect(await db.auditLog.count({ where: { entityId: draft.id, action: "BILL_FINALIZED" } })).toBe(0);
+    const reviewed = await updateBill(actor, draft.id, { ...data, version: draft.version,
+      lines: [{ ...unselected, booksSelection: selection() }] });
+    const ready = await actOnBill(actor, draft.id, { action: "submit", version: reviewed.version });
+    expect(ready).toMatchObject({ status: "READY", total: "105.00" });
+    expect(ready.lines[0].booksSelection).toMatchObject({ accountId: "110", taxId: "120" });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it("rolls back direct final-save creates and edits when required line selections are missing", async () => {
+    vi.stubEnv("ZOHO_BOOKS_ORGANIZATIONS_JSON", profiles(true));
+    const data = input({ vatRate: "5", lines: [{ description: "Fictional draft", quantity: "1", unitPrice: "100" }] });
+    const count = await db.bill.count({ where: { companyId } });
+    await expect(createBill(actor, { ...data, submit: true })).rejects.toMatchObject({ status: 422 });
+    expect(await db.bill.count({ where: { companyId } })).toBe(count);
+    const draft = await createBill(actor, data);
+    await expect(updateBill(actor, draft.id, { ...data, version: draft.version, invoiceNumber: `${data.invoiceNumber}-edited`, submit: true }))
+      .rejects.toMatchObject({ status: 422 });
+    expect(await getBill(actor, draft.id)).toMatchObject({ status: "DRAFT", invoiceNumber: data.invoiceNumber, version: draft.version });
+    expect(await db.integrationJob.count({ where: { billId: draft.id } })).toBe(0);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it("refuses mixed explicit and unselected final-save lines before creating any financial row", async () => {
+    vi.stubEnv("ZOHO_BOOKS_ORGANIZATIONS_JSON", profiles(true));
+    const count = await db.bill.count({ where: { companyId } });
+    await expect(createBill(actor, input({ submit: true, lines: [...input().lines,
+      { description: "Unselected line", quantity: "1", unitPrice: "5" }] }))).rejects.toMatchObject({ status: 422 });
+    expect(await db.bill.count({ where: { companyId } })).toBe(count);
+    expect(verifier).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
+  });
+  it.each(["unexpected defaults", "missing base currency", "invalid JSON", "invalid single organization"])("retains editable drafts when explicit configuration becomes invalid: %s", async (failure) => {
+    for (const selected of [false, true]) {
+      vi.stubEnv("ZOHO_BOOKS_ORGANIZATIONS_JSON", profiles(true));
+      const draft = await createBill(actor, input({ vatRate: "5", lines: [{ description: "Fictional configuration recovery", quantity: "1", unitPrice: "100",
+        ...(selected ? { booksSelection: selection() } : {}) }] }));
+      const invalid = JSON.parse(profiles(true)) as { mapping: { categories: Record<string, unknown>; currencies: Record<string, unknown> } }[];
+      if (failure === "unexpected defaults") invalid[0].mapping.categories.MATERIALS = { accountId: "110" };
+      if (failure === "missing base currency") invalid[0].mapping.currencies = {};
+      vi.stubEnv("ZOHO_BOOKS_ORGANIZATIONS_JSON", failure === "invalid JSON" ? "[invalid" : JSON.stringify(invalid));
+      if (failure === "invalid single organization") {
+        vi.stubEnv("ZOHO_BOOKS_ORGANIZATIONS_JSON", "");
+        vi.stubEnv("ZOHO_BOOKS_ORGANIZATION_ID", `${organizationId}x`);
+        vi.stubEnv("ZOHO_BOOKS_MAPPING_JSON", JSON.stringify(invalid[0].mapping));
+      }
+      await expect(actOnBill(actor, draft.id, { action: "submit", version: draft.version }))
+        .rejects.toMatchObject({ status: 422, message: expect.stringContaining("configuration is invalid") });
+      expect(await getBill(actor, draft.id)).toMatchObject({ status: "DRAFT", version: draft.version });
+      expect(await db.integrationJob.count({ where: { billId: draft.id } })).toBe(0);
+      expect(await db.auditLog.count({ where: { entityId: draft.id, action: "BILL_FINALIZED" } })).toBe(0);
+    }
+    expect(fetch).not.toHaveBeenCalled();
+  });
   it("saves and reloads normalized provider identities and calculates from verified line rates", async () => {
     const saved = await createBill(actor, input());
     expect(saved).toMatchObject({ subtotal: "100.00", vatRate: "5.00", vatAmount: "5.00", total: "105.00", usesBooksLineTaxes: true });

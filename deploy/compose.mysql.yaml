@@ -1,0 +1,72 @@
+# Optional owned MySQL. Use with compose.yaml and compose.mysql-ca.yaml.
+# Initialize only a fresh volume: lower_case_table_names cannot change later.
+services:
+  mysql:
+    image: ${BILLS_MYSQL_IMAGE:-mysql:8.4}
+    restart: unless-stopped
+    entrypoint: ["/bin/bash", "/opt/bills-mysql/start.sh"]
+    command: [mysqld]
+    environment:
+      MYSQL_DATABASE: billing_operational
+      MYSQL_ROOT_HOST: localhost
+      MYSQL_ROOT_PASSWORD_FILE: /run/bills-mysql/root-password
+    # The official entrypoint needs root briefly to prepare files, then drops
+    # to the image's mysql user. No image-specific numeric UID is assumed.
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 120s
+    mem_limit: 2g
+    pids_limit: 256
+    tmpfs:
+      - /run/bills-mysql:mode=0700
+      - /docker-entrypoint-initdb.d:mode=0700
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql/my.cnf:/etc/mysql/conf.d/bills.cnf:ro
+      - ./mysql/start.sh:/opt/bills-mysql/start.sh:ro
+      - ./mysql/healthcheck.sh:/opt/bills-mysql/healthcheck.sh:ro
+      - ./mysql/grant-runtime.sh:/opt/bills-mysql/grant-runtime.sh:ro
+      - ./mysql/grant-runtime.sql:/opt/bills-mysql/grant-runtime.sql:ro
+    secrets:
+      - source: mysql_root_password
+        target: bills_mysql_root_password
+      - source: mysql_bootstrap
+        target: bills_mysql_bootstrap
+      - source: mysql_ca
+        target: bills_mysql_ca
+      - source: mysql_server_certificate
+        target: bills_mysql_server_certificate
+      - source: mysql_server_key
+        target: bills_mysql_server_key
+    healthcheck:
+      test: [CMD, /bin/bash, /opt/bills-mysql/healthcheck.sh]
+      interval: 10s
+      timeout: 5s
+      start_period: 90s
+      retries: 12
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  web:
+    depends_on:
+      mysql:
+        condition: service_healthy
+  migrate:
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+secrets:
+  mysql_root_password:
+    file: ./.private/mysql/root-password
+  mysql_bootstrap:
+    file: ./.private/mysql/bootstrap.sql
+  mysql_server_certificate:
+    file: ./.private/mysql/server-cert.pem
+  mysql_server_key:
+    file: ./.private/mysql/server-key.pem
+
+volumes:
+  mysql_data:

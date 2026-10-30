@@ -135,7 +135,10 @@ export function BillDetail({
   const booksRecord = bill?.syncRecords?.find(
     (record) => record.target === "ZOHO",
   );
-  const syncPending = !manualEntryOnly && booksRecord?.status === "PENDING";
+  const booksJobs = bill?.integrationJobs ?? [];
+  const hasBooksOperation = booksJobs.length > 0;
+  const syncPending = !manualEntryOnly && (booksRecord?.status === "PENDING" ||
+    booksJobs.some((job) => ["QUEUED", "RETRY", "PROCESSING"].includes(job.status)));
   const reloadBill = state.reload;
   const refreshInFlight = useRef(false);
   useEffect(() => {
@@ -174,6 +177,27 @@ export function BillDetail({
         body: JSON.stringify({ target: "ZOHO", organizationId }),
       });
       setShowSaveOutcome(true);
+      state.reload();
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function recoverSync(job: NonNullable<Bill["integrationJobs"]>[number], action: "retry" | "reconcile") {
+    if (!canWrite || !["ADMIN", "ACCOUNTS"].includes(user.role)) return;
+    setBusy(true);
+    setError("");
+    setSuccess("");
+    setShowSaveOutcome(false);
+    try {
+      await api(`/api/integrations/jobs/${job.id}`, {
+        method: "POST",
+        body: JSON.stringify({ action, organizationId: job.organizationId }),
+      });
+      setSuccess(action === "reconcile"
+        ? "Zoho Books reconciliation queued. The worker will check the existing outcome before any further posting."
+        : "Zoho Books retry queued for the existing operation.");
       state.reload();
     } catch (e) {
       setError(errorMessage(e));
@@ -693,6 +717,25 @@ export function BillDetail({
             {booksRecord?.externalId && (
               <p>Books bill ID: <strong>{booksRecord.externalId}</strong></p>
             )}
+            {booksJobs.filter((job) => job.status !== "SUCCEEDED").map((job) => {
+              const uncertain = job.needsReconciliation || job.status === "UNKNOWN";
+              const waiting = ["QUEUED", "RETRY", "PROCESSING"].includes(job.status);
+              return (
+                <div key={job.id} role="group" aria-label={`${job.operation === "CREATE_BILL" ? "Bill" : "Attachment"} synchronization recovery`}>
+                  <strong>{job.operation === "CREATE_BILL" ? "Bill posting" : "Original attachment"}</strong>{" "}
+                  <StatusBadge status={job.status} />
+                  {job.lastError && <p className="text-danger">{job.lastError}</p>}
+                  {job.status === "RETRY" && <p>Automatic retry scheduled for {dateTime(job.nextAttemptAt)} Dubai.</p>}
+                  {accounts && canWrite && !waiting && (
+                    <Button variant="secondary" disabled={busy || (!uncertain && !selectedConnection?.writeEnabled)}
+                      onClick={() => recoverSync(job, uncertain ? "reconcile" : "retry")}>
+                      {uncertain ? "Reconcile Zoho Books outcome" : job.operation === "CREATE_BILL" ? "Retry Zoho Books sync" : "Retry original attachment"}
+                    </Button>
+                  )}
+                  {!accounts && !waiting && <p>Ask an administrator or Accounts user to {uncertain ? "reconcile the existing Books outcome" : "retry this operation"}.</p>}
+                </div>
+              );
+            })}
             {syncPending && (
               <p>Waiting for Zoho Books confirmation. This page checks for updates for two minutes; use Refresh sync status to check again.</p>
             )}
@@ -744,13 +787,13 @@ export function BillDetail({
                 {integrations.data && organizations.length === 0 && (
                   <p>Books synchronization is unavailable for this company. Contact your administrator.</p>
                 )}
-                <Button
+                {!hasBooksOperation && <Button
                   variant="secondary"
-                  disabled={busy || !selectedConnection?.writeEnabled}
+                  disabled={busy || !selectedConnection?.writeEnabled || ["PENDING", "UNKNOWN", "SYNCED"].includes(booksRecord?.status ?? "") || !!booksRecord?.externalId}
                   onClick={queueSync}
                 >
                   Queue Zoho Books sync
-                </Button>
+                </Button>}
               </>
             )}
             {integrations.error && (

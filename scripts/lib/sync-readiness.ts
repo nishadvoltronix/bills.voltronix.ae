@@ -6,8 +6,10 @@ import {
 } from "../../src/lib/integrations/config";
 import { connectionFingerprint } from "../../src/lib/integrations/connection-fingerprint";
 import { mysqlConnectionOptions } from "../../src/lib/mysql-connection";
+import { incomingReadiness, type IncomingInventory } from "./incoming-readiness";
 
 export type SyncInventory = {
+  incoming?: IncomingInventory;
   credentials: {
     organizationId: string;
     revokedAt: Date | null;
@@ -59,7 +61,7 @@ const actions = {
   OAUTH_REAUTHORIZATION_REQUIRED:
     "Reauthorize the exact organization; an environment token cannot override a revoked, changed or legacy vault grant.",
   ACCOUNTING_MAPPING_REQUIRED:
-    "Verify this organization's base currency, expense accounts and VAT mappings against Books and configure them on the server.",
+    "Verify this organization's base currency and configure either reviewed account/tax defaults or lineSelectionRequired=true with an account and tax selection required on every invoice line.",
   COMPANY_DESTINATION_REQUIRED:
     "Assign this exact organization, data center and environment to the intended real company through trusted operational setup.",
   REAL_COMPANY_REQUIRED:
@@ -156,11 +158,13 @@ export function syncReadiness(
       )
         blockers.push("LIVE_WRITES_DISABLED");
       const mapping = config.booksMapping;
+      const lineSelectionRequired = mapping?.lineSelectionRequired === true;
       const accountingMappingPresent = Boolean(
         mapping &&
         mapping.currencies[mapping.baseCurrency] &&
-        Object.keys(mapping.categories).length &&
-        Object.keys(mapping.taxes).length,
+        (lineSelectionRequired ||
+          (Object.keys(mapping.categories).length &&
+            Object.keys(mapping.taxes).length)),
       );
       if (!accountingMappingPresent)
         blockers.push("ACCOUNTING_MAPPING_REQUIRED");
@@ -238,6 +242,10 @@ export function syncReadiness(
         networkEnabled: config.networkEnabled,
         runtimeWriteGateEnabled: config.writeEnabled,
         accountingMappingPresent,
+        lineSelectionRequired,
+        invoiceAccountingRequirement: lineSelectionRequired
+          ? "Every invoice line requires a current Books account and tax selection for this exact organization."
+          : null,
         authorization: {
           inventoryAvailable: inventory !== null,
           vaultGrantPresent: Boolean(grant),
@@ -275,9 +283,10 @@ export function syncReadiness(
       ...organizations.flatMap((item) => item.blockers),
     ]),
   ];
+  const incoming = incomingReadiness(env, inventory?.incoming ?? null, inventory?.companies ?? [], inventory?.destinations ?? []);
   return {
     recordedAt: now.toISOString(),
-    status: allBlockers.length ? "BLOCKED" : "CONFIGURATION_PRESENT_UNVERIFIED",
+    status: allBlockers.length || incoming.actions.length ? "BLOCKED" : "CONFIGURATION_PRESENT_UNVERIFIED",
     databaseInspected: inventory !== null,
     runtimeEligible,
     databaseTlsConfigured,
@@ -287,7 +296,8 @@ export function syncReadiness(
     databaseWrites: 0,
     globalBlockers,
     organizations,
-    actions: allBlockers.map((code) => ({ code, action: actions[code] })),
+    actions: [...allBlockers.map((code) => ({ code, action: actions[code] })), ...incoming.actions],
+    incoming,
     worker: {
       required: true,
       status: "NOT_CHECKED",

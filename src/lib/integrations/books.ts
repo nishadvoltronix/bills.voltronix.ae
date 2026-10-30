@@ -92,6 +92,22 @@ export function wireNumber(value: string) {
     );
   return n;
 }
+
+/** Used before finalization and again before constructing any provider payload. */
+export function assertBooksLineSelections(lines: readonly { booksSelection?: unknown }[], config: ZohoConfig) {
+  const selected = lines.filter(line => line.booksSelection !== null && line.booksSelection !== undefined);
+  if ((config.booksMapping?.lineSelectionRequired && (!lines.length || selected.length !== lines.length)) ||
+    (selected.length > 0 && selected.length !== lines.length))
+    throw new IntegrationError("LINE_SELECTION_REQUIRED", "Select a Books account and tax for every line before Save and sync. You can keep this bill as a draft.", "BLOCKED");
+  for (const line of selected) {
+    const parsed = booksSelectionSchema.safeParse(line.booksSelection);
+    if (!parsed.success || parsed.data.organizationId !== config.organizationId ||
+      parsed.data.dataCenter !== config.dataCenter || parsed.data.environment !== config.environment)
+      throw new IntegrationError("LINE_DESTINATION_MISMATCH", "Every line's complete Books selection must match this exact company destination.", "BLOCKED");
+  }
+  return selected.length > 0;
+}
+
 export function buildBooksPayload(snapshot: BillSnapshot, config: ZohoConfig) {
   const mapping = config.booksMapping;
   if (!mapping)
@@ -110,14 +126,7 @@ export function buildBooksPayload(snapshot: BillSnapshot, config: ZohoConfig) {
   const category =
     mapping.categories[snapshot.category as keyof typeof mapping.categories];
   const tax = mapping.taxes[new Decimal(snapshot.vatRate).toFixed(2)];
-  const hasSelectedLines = snapshot.lines.some((line) => line.booksSelection);
-  for (const line of snapshot.lines) {
-    if (!line.booksSelection) continue;
-    const selected = booksSelectionSchema.safeParse(line.booksSelection);
-    if (!selected.success || selected.data.organizationId !== config.organizationId ||
-      selected.data.dataCenter !== config.dataCenter || selected.data.environment !== config.environment)
-      throw new IntegrationError("LINE_DESTINATION_MISMATCH", "A line's Books selection does not match this exact company destination.", "BLOCKED");
-  }
+  const hasSelectedLines = assertBooksLineSelections(snapshot.lines, config);
   if (
     !currency ||
     (!hasSelectedLines && (!category?.accountId || !tax || !new Decimal(tax.percentage).equals(snapshot.vatRate)))

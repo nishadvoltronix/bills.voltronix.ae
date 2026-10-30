@@ -63,7 +63,10 @@ beforeEach(async () => {
 afterEach(() => { vi.unstubAllEnvs(); vi.useRealTimers(); });
 
 describe("company Books dropdown options", () => {
-  it("returns sanitized account/tax/customer options for the exact company destination without category mappings", async () => {
+  it.each(["development", "production"] as const)("returns exact-company account/tax/customer options without category mappings in %s", async (runtime) => {
+    vi.stubEnv("APP_ENV", runtime);
+    vi.stubEnv("NODE_ENV", runtime);
+    vi.stubEnv("APP_URL", runtime === "production" ? "https://bills.example.invalid" : "http://127.0.0.1:3000");
     const { transport, fetcher } = connection({ accounts: [account(), account({ account_id: "302", account_name: "Equipment", account_type: "fixed_asset" }), account({ account_id: "303", account_type: "other_current_asset" })] });
     const result = await getOptions(actor, { companyId: "company-a" }, transport);
     expect(result).toMatchObject({ companyId: "company-a", ...destination, warning: null, hasMoreCustomers: false });

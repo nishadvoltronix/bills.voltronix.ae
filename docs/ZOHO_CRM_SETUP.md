@@ -1,5 +1,31 @@
 # Zoho CRM server configuration
 
+## Prepare a fresh production CRM source — 30 October 2026
+
+A new production database needs its own company-to-CRM source bindings before shared CRM OAuth can start. After `company:prepare` has created each real company and its exact Books destination, use the supported `crm:prepare` operator once per company. The local `crm-connect-local.ts` command is intentionally restricted to local connection checks and must not be used for production.
+
+Supply the active Admin's `ACCOUNT_OPERATOR_EMAIL` / `ACCOUNT_OPERATOR_PASSWORD` privately, along with these temporary inputs:
+
+| Variable | Required value |
+| --- | --- |
+| `ALLOW_CRM_OPERATIONAL_SOURCE_SETUP` | `true` for this invocation |
+| `CRM_SETUP_COMPANY_ID` | Exact existing real company ID returned by `company:prepare` |
+| `CRM_SETUP_BOOKS_ORGANIZATION_ID` | That company's configured Books organization ID |
+| `CRM_SETUP_ORGANIZATION_ID` | Exact configured `ZOHO_CRM_ORGANIZATION_ID` |
+| `CRM_SETUP_REFERENCE` | Reviewed source-assignment reference, 10–160 characters |
+
+Keep all three financial-write switches explicitly false. The command requires the operational production runtime, verified database TLS, configured production Books/CRM identities and an explicitly verified `ZOHO_CRM_MAPPING_JSON`. The operator needs active Admin membership in the target company and every active company already sharing that CRM source.
+
+```sh
+docker compose -f deploy/compose.yaml run --rm --no-deps web operator crm:prepare
+```
+
+For a native Node deployment with the protected production `.env`, run `npm run crm:prepare`. Remove the temporary setup inputs and operator credentials after use. The separate incoming worker credentials remain configured for its supervised operation.
+
+This command creates only the audited source binding; it makes no provider requests, creates no job or bill, and does not enable posting or certify an OAuth grant. An identical binding is reused. Different existing sources, legacy CRM destinations, demo companies, mismatched Books destinations and previously imported CRM-linked records without a source are refused for review rather than reassigned.
+
+Prepare every intended company binding first, then open `/account/crm-authorization` in the hosted Admin session and complete consent for that shared source. Register exactly `https://bills.voltronix.ae/api/integrations/oauth/crm/callback` in the CRM OAuth client. OAuth verifies the provider organization separately. After consent and the protected incoming operator's company memberships are ready, start the incoming service and verify its source status. The initial import of verified project-association evidence remains a separate prerequisite for job-history refresh; this source setup does not discover those relationships.
+
 ## Job and bill search — 30 October 2026
 
 Manual entry and the dashboard now accept **Job ID, bill number or job name** with a **Search** button. Choose **View job history** to open all verified linked invoices and their original Open/Download actions. Bill-number results resolve the job through verified identities; ambiguous companies remain separate choices. Existing live CRM search and **Use CRM job** still provide source verification when needed. See [job bill history](JOB_BILL_HISTORY.md) for current attachment behavior and historical source-link limitations. The following dated workflow describes the earlier milestone.
@@ -81,7 +107,7 @@ The two Zoho Projects scopes were added on 30 October 2026 to read existing proj
 
 An existing grant requires owner consent again through `/account/crm-authorization` to obtain these added permissions. Changing the requested scopes does not expand a saved token automatically. The consent page describes the requested reads before redirecting to Zoho. No CRM related-list metadata scope or Projects write scope is requested. After consent, exact portal/project/CRM identities and company boundaries must still be verified before associating bill history. Multiple CRM deals may share a project; that association alone does not establish each job's allocated invoice cost.
 
-No CRM CREATE, UPDATE or DELETE scope is requested. Keep credentials private and enable provider networking only within the authorized account/environment scope. The legacy import guard remains unchanged. The approved local selection endpoint requires a shared-source binding, exact company routing and disabled financial-write modes before reading or saving a selected job locally.
+No CRM CREATE, UPDATE or DELETE scope is requested. Keep credentials private and enable provider networking only within the authorized account/environment scope. The legacy bulk import guard remains unchanged. Development job selection retains its disabled-write restriction. Production Job-ID lookup and local selection use a separate operational branch: valid production runtime and verified database TLS, a real company with current user access, its exact verified Books destination/accounting hash, explicit CRM mapping/source, and current read authorization are required. It works with Books writes enabled after company verification. All provider calls in this lookup remain reads; selection only saves the verified job locally.
 
 ## Checks and remaining limits
 

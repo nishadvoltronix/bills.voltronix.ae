@@ -1,0 +1,10 @@
+# For an existing locally managed tunnel on the Ubuntu host.
+# Merge this hostname entry before the existing catch-all; preserve other routes,
+# tunnel identity and credentials. Do not replace the entire live configuration.
+# Dashboard-managed tunnels use the same hostname, service and HTTP Host Header.
+ingress:
+  - hostname: bills.voltronix.ae
+    service: http://127.0.0.1:8080
+    originRequest:
+      httpHostHeader: bills.voltronix.ae
+  - service: http_status:404

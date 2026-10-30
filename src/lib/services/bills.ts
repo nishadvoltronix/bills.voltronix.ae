@@ -6,7 +6,8 @@ import { z } from "zod";
 import type { Actor } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { assertBooksLineTaxMode, booksLineTaxMode, booksSelectionDestination, booksSelectionFields, type BooksSelection } from "@/lib/books-selection";
-import { booksConfigurationHash, getConfig } from "@/lib/integrations/config";
+import { booksConfigurationHash, booksLineSelectionRequired, getConfig } from "@/lib/integrations/config";
+import { assertBooksLineSelections } from "@/lib/integrations/books";
 import { connectionFingerprint } from "@/lib/integrations/connection-fingerprint";
 import { LEGACY_UNSCOPED_ORGANIZATION } from "@/lib/integrations/oauth";
 import { verifyBillBooksSelections } from "@/lib/services/bill-books-options";
@@ -381,6 +382,30 @@ export async function finalizeBillInTransaction(
   } catch {
     throw new HttpError(422, "The saved bill's tax mode does not match its line selections. Review the bill before continuing.");
   }
+  if (!isManualEntryOnly()) {
+    const destinations = await tx.companyIntegrationDestination.findMany({ where: {
+      companyId: bill.companyId, target: "ZOHO", company: { active: true },
+    }, select: { organizationId: true, dataCenter: true, environment: true } });
+    for (const destination of destinations) {
+      let required;
+      try { required = booksLineSelectionRequired(destination.organizationId); }
+      catch {
+        // The policy reader handles absent legacy configuration. Invalid configured
+        // policies must not turn a repairable draft into an uneditable bill.
+        throw new HttpError(422, "This company's Books accounting configuration is invalid. Keep the bill as a draft until it is corrected.");
+      }
+      if (!required) continue;
+      if (!bill.lines.length || bill.lines.some(line => line.booksSelection === null))
+        throw new HttpError(422, "Select a Books account and tax for every line before Save and sync. You can keep this bill as a draft.");
+      let config;
+      try { config = getConfig("ZOHO", process.env, destination.organizationId); }
+      catch { throw new HttpError(422, "This company's Books configuration is unavailable. Keep the bill as a draft until its connection is restored."); }
+      if (destinations.length !== 1 || config.dataCenter !== destination.dataCenter || config.environment !== destination.environment)
+        throw new HttpError(422, "Confirm this company's exact Books destination before Save and sync. The bill remains a draft.");
+      try { assertBooksLineSelections(bill.lines, config); }
+      catch (error) { throw new HttpError(422, error instanceof Error ? error.message : "Select an account and tax for every Books line."); }
+    }
+  }
   const totals = calculateBill(
     bill.lines.map((line) => ({
       description: line.description,
@@ -451,7 +476,24 @@ export async function getBill(actor: Actor, id: string) {
     orderBy: { createdAt: "desc" },
     take: 100,
   });
-  return { ...serializeBill(bill), auditLogs };
+  // Expose recovery state only after the same company/creator access check as
+  // the bill. Payload snapshots, credentials and worker leases remain private.
+  const integrationJobs = await db.integrationJob.findMany({
+    where: { billId: id, target: "ZOHO" },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    select: {
+      id: true,
+      organizationId: true,
+      operation: true,
+      status: true,
+      needsReconciliation: true,
+      attempts: true,
+      nextAttemptAt: true,
+      externalId: true,
+      lastError: true,
+    },
+  });
+  return { ...serializeBill(bill), auditLogs, integrationJobs };
 }
 
 export async function updateBill(actor: Actor, id: string, payload: unknown) {

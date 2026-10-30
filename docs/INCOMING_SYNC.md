@@ -2,9 +2,13 @@
 
 The incoming worker keeps the app's imported Zoho Books bills and CRM jobs current. It runs separately from the web server and the outgoing **Save and sync** worker. Its scheduled provider work reads Zoho and updates local imported records; it does not create or update provider accounting records. Manual bill entry and outgoing synchronization retain their existing workflow.
 
-The default check interval is **five seconds**, with a full reconciliation every 24 hours. This is the scheduling delay between completed checks, not a guarantee that source changes appear within five seconds. Provider response time, quota, incomplete pages, unavailable credentials, connectivity, or a stopped worker can delay a successful check. Existing leases and provider backoff still apply, and imported records remain available during delays. The 29 October first-run evidence below records the earlier 300-second setting; the current cadence was changed at the user's request on 30 October.
+The current default check interval is **60 seconds**, selected by the user on **30 October 2026** to preserve daily provider quota, with a full reconciliation every 24 hours. The dashboard still reads saved app status every **five seconds**. The source interval is the scheduling delay between completed checks, not a guarantee that changes appear within one minute. Provider response time, quota, incomplete pages, unavailable credentials, connectivity, or a stopped worker can delay a successful check. Existing leases and provider backoff still apply, and imported records remain available during delays.
+
+Even an unchanged Books check uses two provider reads: organization verification and the bill list. At 60 seconds the nominal idle budget is at most 2,880 reads per organization per day, plus changed bill details, originals and reconciliation. This is not a guaranteed daily ceiling: resumable batches and other API consumers use additional quota. The earlier five-second setting and its observations below are historical. Changing the protected setting requires restarting the incoming worker; an already-due check can complete once before the longer interval applies. Existing source cooldowns are preserved.
 
 ## Verified current completion — 30 October 2026
+
+**Historical morning snapshot:** the results in this section describe the earlier checks and five-second setting, not the current source cadence or quota state. Consult the dashboard and [production readiness](PRODUCTION_READINESS.md) for the latest evidence.
 
 At **04:43:13 UTC / 08:43:13 Dubai**, all three sources had current successful checks, no quota/error state, and a healthy continuous incoming worker. The local mirror contained **4,674 Books bills, 6,048 CRM inventory rows and 154 canonical jobs**. Three additional Books bills arrived overnight. All **4,188 current originals were downloaded**, with zero pending, invalid-metadata or invalid-byte records. The earlier Contracting quota hold and attachment backlog are cleared; future source additions remain subject to normal scheduled checks and provider limits.
 
@@ -27,7 +31,7 @@ Configure a current, active Admin operator in the worker's protected environment
 | Setting | Default | Supported values / purpose |
 | --- | --- | --- |
 | `INCOMING_SYNC_ENABLED` | `false` | `true` enables the incoming worker. |
-| `INCOMING_SYNC_INTERVAL_SECONDS` | `5` | 5–86,400 seconds between completed checks; provider backoff takes precedence. |
+| `INCOMING_SYNC_INTERVAL_SECONDS` | `60` | 5–86,400 seconds between completed checks; provider backoff takes precedence. Five-second checks require an explicit override and sufficient daily quota. |
 | `INCOMING_SYNC_RECONCILE_SECONDS` | `86400` | 3,600–604,800 seconds between full reconciliations. |
 | `INCOMING_SYNC_MAX_REQUESTS` | `40` | 5–200 reads per source batch; unfinished work resumes from its checkpoint. |
 | `INCOMING_SYNC_ATTACHMENTS_ENABLED` | `false` | Enables remaining original-file work after bill metadata completes. |

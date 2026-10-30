@@ -11,7 +11,7 @@ export function incomingSyncSettings(env: NodeJS.ProcessEnv = process.env) {
     throw new Error("INCOMING_SYNC_ENABLED must be true or false.");
   return {
     enabled: env.INCOMING_SYNC_ENABLED === "true",
-    intervalSeconds: seconds(env.INCOMING_SYNC_INTERVAL_SECONDS, 5, 5, 86_400),
+    intervalSeconds: seconds(env.INCOMING_SYNC_INTERVAL_SECONDS, 60, 5, 86_400),
     reconcileSeconds: seconds(env.INCOMING_SYNC_RECONCILE_SECONDS, 86_400, 3600, 604_800),
     maxRequests: seconds(env.INCOMING_SYNC_MAX_REQUESTS, 40, 5, 200),
     requestIntervalMs: 1100,

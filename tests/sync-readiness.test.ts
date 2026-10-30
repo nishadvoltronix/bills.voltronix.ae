@@ -76,8 +76,26 @@ function inventory(env = environment()): SyncInventory {
 }
 const codes = (report: ReturnType<typeof syncReadiness>) =>
   report.actions.map((item) => item.code);
+function explicitLineEnvironment() {
+  const env = environment();
+  const profiles = JSON.parse(env.ZOHO_BOOKS_ORGANIZATIONS_JSON!);
+  profiles[0].mapping = { verified: true, lineSelectionRequired: true, baseCurrency: "AED",
+    currencies: { AED: { id: "101" } }, taxes: {}, categories: {} };
+  env.ZOHO_BOOKS_ORGANIZATIONS_JSON = JSON.stringify(profiles);
+  return env;
+}
 
 describe("read-only Books synchronization inventory", () => {
+  it("blocks the combined release when incoming synchronization is enabled but its setup is missing", () => {
+    const env = { ...environment(), INCOMING_SYNC_ENABLED: "true" };
+    const report = syncReadiness(env, inventory(env), now);
+    expect(report.status).toBe("BLOCKED");
+    expect(codes(report)).toEqual(expect.arrayContaining([
+      "INCOMING_OPERATOR_REQUIRED", "INCOMING_DATABASE_INVENTORY_REQUIRED", "INCOMING_CRM_CONFIGURATION_INVALID",
+    ]));
+    expect(report.providerRequests).toBe(0);
+    expect(report.databaseWrites).toBe(0);
+  });
   it("keeps valid local metadata unverified and never claims a live provider or worker check", () => {
     const report = syncReadiness(environment(), inventory(), now);
     expect(report.status).toBe("CONFIGURATION_PRESENT_UNVERIFIED");
@@ -91,7 +109,64 @@ describe("read-only Books synchronization inventory", () => {
     });
     expect(report.organizations[0]).toMatchObject({
       authorization: { authorizationPresent: true, providerVerified: false },
+      accountingMappingPresent: true,
+      lineSelectionRequired: false,
+      invoiceAccountingRequirement: null,
     });
+  });
+
+  it("accepts explicit line selection with a mapped base currency and no account or tax defaults", () => {
+    const env = explicitLineEnvironment();
+    const report = syncReadiness(env, inventory(env), now);
+    expect(report.status).toBe("CONFIGURATION_PRESENT_UNVERIFIED");
+    expect(report.organizations[0]).toMatchObject({ accountingMappingPresent: true, lineSelectionRequired: true,
+      invoiceAccountingRequirement: "Every invoice line requires a current Books account and tax selection for this exact organization." });
+    expect(report.providerVerified).toBe(false);
+    expect(report.providerRequests).toBe(0);
+    expect(report.databaseWrites).toBe(0);
+  });
+
+  it("does not accept empty default mappings without the explicit line-selection contract", () => {
+    const env = explicitLineEnvironment();
+    const profiles = JSON.parse(env.ZOHO_BOOKS_ORGANIZATIONS_JSON!);
+    delete profiles[0].mapping.lineSelectionRequired;
+    env.ZOHO_BOOKS_ORGANIZATIONS_JSON = JSON.stringify(profiles);
+    const report = syncReadiness(env, inventory(env), now);
+    expect(report.status).toBe("BLOCKED");
+    expect(codes(report)).toContain("ACCOUNTING_MAPPING_REQUIRED");
+    expect(report.organizations[0]).toMatchObject({ accountingMappingPresent: false, lineSelectionRequired: false });
+  });
+
+  it.each(["no-currencies", "base-currency-unmapped", "no-base-currency"])("blocks explicit selection with %s", (kind) => {
+    const env = explicitLineEnvironment();
+    const validInventory = inventory(env);
+    const profiles = JSON.parse(env.ZOHO_BOOKS_ORGANIZATIONS_JSON!);
+    if (kind === "no-currencies") profiles[0].mapping.currencies = {};
+    if (kind === "base-currency-unmapped") profiles[0].mapping.currencies = { USD: { id: "104", exchangeRate: "3.67" } };
+    if (kind === "no-base-currency") delete profiles[0].mapping.baseCurrency;
+    env.ZOHO_BOOKS_ORGANIZATIONS_JSON = JSON.stringify(profiles);
+    const report = syncReadiness(env, validInventory, now);
+    expect(report.status).toBe("BLOCKED");
+    expect(codes(report).some((code) => ["CONFIGURATION_INVALID", "ACCOUNTING_MAPPING_REQUIRED"].includes(code))).toBe(true);
+  });
+
+  it("does not reuse default-mode destination verification after switching to explicit line selection", () => {
+    const report = syncReadiness(explicitLineEnvironment(), inventory(), now);
+    expect(report.status).toBe("BLOCKED");
+    expect(codes(report)).toContain("DESTINATION_VERIFICATION_REQUIRED");
+  });
+
+  it("retains credential, company, supplier and job blockers in explicit selection mode", () => {
+    const env = explicitLineEnvironment();
+    const state = inventory(env);
+    state.credentials.push({ organizationId: "1001", revokedAt: now,
+      connectionFingerprint: connectionFingerprint(getConfig("ZOHO", env, "1001")) });
+    Object.assign(state.companies[0], { isDemo: true, liveAccountingEnabled: false, realVendors: 0, realJobs: 0, activeWriters: 0 });
+    Object.assign(state.destinations[0], { liveEnabled: false, mappedRealVendors: 0 });
+    expect(codes(syncReadiness(env, state, now))).toEqual(expect.arrayContaining([
+      "OAUTH_REAUTHORIZATION_REQUIRED", "REAL_COMPANY_REQUIRED", "COMPANY_LIVE_DISABLED", "DESTINATION_VERIFICATION_REQUIRED",
+      "REAL_VENDOR_REQUIRED", "REAL_JOB_REQUIRED", "COMPANY_WRITER_REQUIRED", "VENDOR_MAPPING_REQUIRED",
+    ]));
   });
 
   it("identifies local-ledger mode even when all Books network flags are enabled", () => {

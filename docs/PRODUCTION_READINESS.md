@@ -1,4 +1,63 @@
-# Production readiness — 29 October 2026
+# Production readiness — 30 October 2026
+
+## Current release preparation
+
+The owner subsequently authorized **existing new-bill creation and incoming synchronization**, excluding posted-bill editing. The prepared `deploy/.env.production` now enables both Books write flags, keeps incoming reads at 60 seconds and passes `check:deploy:posting` with no missing or invalid inputs. Each organization's observed AED currency is configured with `lineSelectionRequired: true`; every invoice line must select its actual Books account and tax. No category account, tax default or foreign exchange rate was inferred. Missing selections are rejected before finalization, leaving the draft editable.
+
+The separate `.env.setup` remains offline for import. `.env.accounting` provides write-disabled Books reads for `books:activate`, which checks exact operational companies against Zoho metadata, preserves source quota holds and leases, and records destination verification without creating bills. The command must run on Ubuntu after restoration; real supplier selection and each line's provider checks still apply. The runtime flags do not replace this destination evidence or prove invoice delivery. The development `.env` and connection-check companies remain unchanged.
+
+The manual Save and sync release includes production CRM Job-ID search/selection, company-scoped supplier and accounting options, a durable Books queue, original attachments, and separate incoming/outgoing workers. The production-only CRM branch now accepts enabled Books writes while requiring the operational runtime, verified TLS, real company membership, exact verified Books destination and CRM source/grant. The former development-only lookup blocker is fixed.
+
+The deployment package now supplies `crm:prepare` for audited operational CRM bindings, optional `COMPANY_SETUP_MEMBER_EMAIL` on `company:prepare` for staff access, `deploy:prepare` for non-overwriting private environment preparation, and `check:deploy` / `check:deploy:posting` for offline setup checks. Bill detail exposes retries for existing failed operations and reconciliation for uncertain provider outcomes. `check:sync` additionally inventories incoming operator credentials, memberships, CRM configuration/bindings and grant metadata. Neither offline checks nor the database inventory claim provider acceptance or running workers.
+
+**Production activation is still pending.** The local read-only inventory on 30 October confirms stored Books grants for both organizations and incoming operator/CRM metadata, but reports the development runtime, absent operational account/tax/currency mappings, connection-check company provenance, disabled posting and missing real-company job/supplier mappings. These records and the local `.env` were preserved. The production origin remains `https://bills.voltronix.ae` in the separate deployment template.
+
+On the target host, follow the [prepared MySQL/data handoff](DATA_TRANSFER.md): start the owned MySQL service, explicitly migrate, provision the prepared operator and operational companies, restore the verified source bundle, and complete fresh provider reconciliation. Private database credentials, TLS files, scoped Books/CRM bootstrap grants and a fresh production operator are prepared locally; they still require host execution and acceptance. Run the write-disabled activation command for destination verification, select the actual supplier and line accounts/taxes, then supervise the outgoing worker using the enabled runtime. Register the hosted callbacks for subsequent authorization and renewal. Confirm an actual authorized invoice's Books ID and original attachment before accepting live synchronization. No real supplier bill or payment was created during this work. Docker is unavailable in this workspace, so the Linux image, Compose services, DNS/tunnel routing and host restart/restore remain unverified.
+
+Known functional limits: nonzero discounts and unsupported tax/currency combinations block Books posting. Invoice line descriptions are exported; the app's header description/notes remain local. Payments are separate. See the official [Books bill API](https://www.zoho.com/books/api/v3/bills/) and [OAuth setup](https://www.zoho.com/books/api/v3/oauth/) for the provider contract.
+
+Validation on 30 October:
+
+| Check | Result |
+| --- | --- |
+| Full unit/route suite | 1,639 passed across 77 files, including explicit line selections and guarded activation |
+| Disposable MySQL integration suite | 297 passed across 29 files, one optional test skipped; all 15 migrations and cleanup passed, including required line selections, malformed-policy draft recovery, the 60-second incoming schedule and transfer rollback/uncertain-commit handling |
+| Isolated optimized-build browser checks | 12 passed: complete manual workflows for both companies, status polling, failed-operation retry and uncertain-outcome reconciliation |
+| TypeScript, ESLint and optimized build | Passed |
+| Release privacy scan | 1,366 build files; no configured secrets or private runtime references |
+| Local live-sync inventory | Correctly BLOCKED; zero provider requests or database writes; incoming metadata checks passed |
+| Actual-data restore rehearsal | 4,674 Books bills, 4,188 original records, 6,049 CRM snapshots, 154 jobs and nine project associations restored and independently checked in a disposable database; all 4,188 original checksums matched |
+| Private production configuration | Offline `check:deploy:posting` passed with no missing/invalid inputs; runtime write flags enabled, setup/accounting processes write-disabled, hosted acceptance unverified |
+
+Browser business/provider responses were mocked. These results prove the tested code behavior, not hosted provider delivery.
+
+The owner subsequently confirmed Ubuntu + Docker + Cloudflare Tunnel. A Docker-context dependency regression caught and fixed the omitted `scripts/lib/incoming-readiness.ts`; all packaged script imports are now covered by that check. The proxy now refreshes Docker DNS for recreated web containers. The [Ubuntu host/tunnel instructions](../deploy/README.md#cloudflare-tunnel-and-hosted-login) include the loopback origin, required Host header, ingress example and connector-network assumptions. These are local package fixes; actual Linux image/nginx execution and hosted acceptance remain pending.
+
+## Local handoff — 30 October 2026
+
+The owner will perform server deployment manually and has only existing Zoho invoices available for verification. The local application at `http://127.0.0.1:3000` contains 4,674 imported Books bills and 4,188 originals. Authenticated HTTP checks passed for dashboard/manual-entry pages, company-scoped bill lists and details, exact CRM job searches, and original-file Open/Download with matching checksums; anonymous financial-data requests returned 401. Native bill/payment/outgoing-operation counts were unchanged by verification.
+
+An existing Switchgear bill was compared directly with Zoho using two GET requests: its identity, dates, currency, amounts, complete line content and original file matched. Contracting's cached source and original passed local integrity checks; its live check was deferred because the existing provider quota cooldown expires at **31 October 2026, 00:01:59 Dubai**. Existing imported bills were not reposted. These checks establish incoming read fidelity, not acceptance of a new outgoing invoice.
+
+The owner selected **60-second incoming checks** to reduce API consumption. Dashboard status refresh remains five seconds, and outgoing Save and sync timing is unchanged. The local incoming and project-history workers were started as hidden processes, with logs under `.local/readiness/local-workers/`. A 75.7-second observation confirmed healthy authenticated worker status, advancing CRM/Switchgear success timestamps, exact 60-second schedules and the unchanged Contracting cooldown. All nine Switchgear project associations refreshed successfully; both workers' error logs were empty. The ignored `.local/readiness/start-local-workers.ps1` helper reuses these exact workers when rerun. This local helper does not provide reboot supervision; the Ubuntu Compose services do so on the deployment host. MySQL and the local web server remain separate processes.
+
+The cadence change passed 73 targeted configuration/readiness/deployment tests, touched-code lint, and the full 297-test disposable MySQL integration suite above. The integration run retained explicit five-second overrides while proving the new default's persisted 60-second schedule.
+
+Private runtime/migration/setup files are prepared in `deploy/`, with owned-MySQL credentials and TLS, client credentials, scoped existing refresh grants, a fresh production encryption key and a fresh administrator. Transfer them through the private handoff separately from the source archive, following [DATA_TRANSFER.md](DATA_TRANSFER.md). Host execution, provider reconciliation and reviewed accounting setup remain outstanding. New-invoice posting acceptance remains pending until an authorized genuine new invoice is available on the configured production host.
+
+## Preserving the existing MySQL data
+
+The current development database remains intact. Its verified Zoho source data is transferred through a typed bundle into fresh operational companies; demo users, native test bills, payments, outbound operations, sessions and live-write permissions are excluded. The target uses a separate MySQL 8.4 volume with trusted TLS, separate migration/runtime identities and no published database port. This avoids making the local development database the production backend.
+
+The successful bundle was captured at **30 October 2026, 14:37:25 Dubai**, with source read workers paused only for capture and restarted afterward. It contains 4,674 Books bills, 4,188 original records backed by 4,155 distinct content-addressed files, 6,049 raw CRM snapshots, 154 reconstructable jobs and nine project associations. Its manifest SHA-256 is `678d26d3d0a4d91a7192e1d6e1709b8fb7e0b659a16a069b0082236260c1cda0`.
+
+The complete bundle passed a disposable MySQL restore rehearsal at **14:43:24 Dubai**. Every bill and CRM raw record matched the captured source, all 4,188 original records resolved to matching bytes, operational company isolation and reconstructed jobs matched, and project-proof expiry and provider quota delays were preserved. Associations remain stale until freshly checked; imported source states claim no new provider success and require full reconciliation. Source database counts were unchanged by the rehearsal, no provider request was made, and both the disposable schema and restored files were removed afterward. The private receipt is `.local/production-transfer/rehearsal-1793357004015.json`.
+
+Existing Books grants for both organizations and the separate CRM grant were checked against their exact source memberships and client fingerprints before private bootstrap preparation. The source encryption key was not copied; supported bootstrap handling stores the grants under the fresh production key on the target. This is credential preparation, not proof of future provider acceptance. After the owner's enablement request, the deployment's offline check reports `CONFIGURATION_PRESENT_UNVERIFIED` / `POSTING_CONFIGURED_UNVERIFIED` with no missing or invalid inputs. The exact AED currency and required per-line selections are configured; hosted provider verification and actual outgoing bill acceptance still require the steps above.
+
+## Historical assessment — 29 October 2026
+
+The remainder records the earlier state and its tests. Its CRM/setup/package blockers are superseded by the current release preparation above; its host provisioning and live delivery requirements still apply.
 
 ## Current scope: typed manual entry with Zoho Books synchronization
 

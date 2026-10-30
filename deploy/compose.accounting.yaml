@@ -1,0 +1,20 @@
+# One-shot Books accounting reads/verification only. Never use with `up`.
+# The current runtime mapping is copied into this separate protected file.
+services:
+  web:
+    environment:
+      INTEGRATION_NETWORK_ENABLED: "true"
+      ZOHO_BOOKS_NETWORK_ENABLED: "true"
+      ZOHO_CRM_NETWORK_ENABLED: "false"
+      INCOMING_SYNC_ENABLED: "false"
+      ZOHO_BOOKS_WRITE_ENABLED: "false"
+      ZOHO_BOOKS_LIVE_ENABLED: "false"
+      ALLOW_PRODUCTION_ACCOUNTING_WRITES: "false"
+      ALLOW_USER_PROVISIONING: "false"
+      ALLOW_OPERATIONAL_COMPANY_SETUP: "false"
+      ALLOW_CRM_OPERATIONAL_SOURCE_SETUP: "false"
+      ALLOW_ZOHO_DATA_RESTORE: "false"
+      ALLOW_ZOHO_DATA_EXPORT: "false"
+secrets:
+  app_environment:
+    file: ./.env.accounting

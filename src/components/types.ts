@@ -185,6 +185,17 @@ export type Bill = {
   payments?: Payment[];
   auditEvents?: AuditEvent[];
   auditLogs?: AuditEvent[];
+  integrationJobs?: {
+    id: string;
+    organizationId: string;
+    operation: "CREATE_BILL" | "ATTACH_DOCUMENT";
+    status: string;
+    needsReconciliation: boolean;
+    attempts: number;
+    nextAttemptAt: string;
+    externalId: string | null;
+    lastError: string | null;
+  }[];
   syncRecords?: {
     id: string;
     provider?: string;

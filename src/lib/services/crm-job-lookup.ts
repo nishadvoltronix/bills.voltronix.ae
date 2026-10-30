@@ -7,7 +7,7 @@ import type { Actor } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { HttpError } from "@/lib/http";
 import { billScope, canCreateBill, canViewFinancialSummary } from "@/lib/permissions";
-import { centers, getConfig, IntegrationError, type CrmMapping, type DataCenter, type ZohoConfig } from "@/lib/integrations/config";
+import { booksConfigurationHash, centers, getConfig, IntegrationError, productionBooksRuntimeReady, type CrmMapping, type DataCenter, type ZohoConfig } from "@/lib/integrations/config";
 import { connectionFingerprint } from "@/lib/integrations/connection-fingerprint";
 import { mapCrmJob, VERIFIED_CRM_JOB_MAPPING } from "@/lib/integrations/crm";
 import { accessToken, LEGACY_UNSCOPED_ORGANIZATION } from "@/lib/integrations/oauth";
@@ -31,7 +31,8 @@ type Source = Prisma.CompanyCrmSourceGetPayload<object>;
 type Context = {
   company: { id: string; active: boolean; isDemo: boolean; liveAccountingEnabled: boolean };
   source: Source | null;
-  destinations: { organizationId: string; dataCenter: string; environment: string }[];
+  destinations: { organizationId: string; dataCenter: string; environment: string; liveEnabled: boolean;
+    verifiedAt: Date | null; verificationReference: string | null; verifiedConfigurationHash: string | null }[];
   config: ZohoConfig | null;
   mapping: CrmMapping | null;
   sourceId: string | null;
@@ -53,11 +54,19 @@ async function context(store: Store, actor: Actor, companyId: string): Promise<C
   if (!company?.active) throw new HttpError(404, "Company not found.");
   const source = await store.companyCrmSource.findUnique({ where: { companyId } });
   const destinations = await store.companyIntegrationDestination.findMany({
-    where: { companyId, target: "ZOHO" }, select: { organizationId: true, dataCenter: true, environment: true },
+    where: { companyId, target: "ZOHO" }, select: { organizationId: true, dataCenter: true, environment: true,
+      liveEnabled: true, verifiedAt: true, verificationReference: true, verifiedConfigurationHash: true },
     orderBy: [{ organizationId: "asc" }, { dataCenter: "asc" }, { environment: "asc" }],
   });
   const result: Context = { company, source, destinations, config: null, mapping: null, sourceId: null, authorized: false, warning: null };
-  if (!["development", "test"].includes(process.env.APP_ENV ?? "") || company.liveAccountingEnabled ||
+  const production = process.env.APP_ENV === "production";
+  if (production) {
+    if (!productionBooksRuntimeReady(process.env) || process.env.DATABASE_TLS_MODE !== "verify-full" ||
+      process.env.NODE_TLS_REJECT_UNAUTHORIZED === "0" || company.isDemo || !company.liveAccountingEnabled ||
+      /^(demo[-_]|connection-check-)/i.test(company.id)) {
+      result.warning = "Production CRM job lookup requires a verified operational runtime and real company."; return result;
+    }
+  } else if (!["development", "test"].includes(process.env.APP_ENV ?? "") || company.liveAccountingEnabled ||
     ["ZOHO_BOOKS_WRITE_ENABLED", "ZOHO_BOOKS_LIVE_ENABLED", "ALLOW_PRODUCTION_ACCOUNTING_WRITES"].some(key => process.env[key] === "true")) {
     result.warning = "This local CRM job lookup requires accounting writes to remain disabled."; return result;
   }
@@ -70,6 +79,11 @@ async function context(store: Store, actor: Actor, companyId: string): Promise<C
     if (config.dataCenter !== source.dataCenter || config.environment !== source.environment ||
       books.dataCenter !== destinations[0].dataCenter || books.environment !== destinations[0].environment)
       throw invalid("The selected company's source configuration changed.");
+    if (production && (config.environment !== "production" || books.environment !== "production" ||
+      !config.crmMapping?.verified || !books.booksMapping?.verified || !books.networkEnabled || !destinations[0].liveEnabled ||
+      !destinations[0].verifiedAt || destinations[0].verifiedAt > new Date() || !destinations[0].verificationReference?.trim() ||
+      destinations[0].verifiedConfigurationHash !== booksConfigurationHash(books)))
+      throw invalid("Production CRM job lookup requires this company's verified Books destination and CRM mapping.");
     result.config = config;
     result.mapping = config.crmMapping ?? VERIFIED_CRM_JOB_MAPPING;
     result.sourceId = createHash("sha256").update(JSON.stringify([companyId, source.organizationId, source.dataCenter, source.environment,
@@ -255,7 +269,7 @@ export async function searchCrmJobs(actor: Actor, payload: unknown, provided?: Z
   return result;
 }
 
-/** Explicit approved local import of one verified CRM job; never writes to Zoho. */
+/** Saves one explicitly selected, company-verified CRM job locally; never writes to Zoho. */
 export async function resolveCrmJob(actor: Actor, payload: unknown, provided?: ZohoTransport) {
   const input = selectionInput.parse(payload);
   const before = await context(db, actor, input.companyId);
@@ -286,7 +300,7 @@ export async function resolveCrmJob(actor: Actor, payload: unknown, provided?: Z
       const collision = await tx.job.findFirst({ where: { companyId: input.companyId, jobNumber: { equals: mapped.jobNumber } }, select: { id: true } });
       if (collision && collision.id !== existing?.id) throw new HttpError(409, "A different saved job already uses this job number. Existing records were preserved; ask an administrator to review the link.");
       if (existing) {
-        if (normalized(existing.jobNumber) !== mapped.jobNumber || existing.name !== mapped.name || existing.customer !== mapped.customer || existing.currency !== mapped.currency ||
+        if (existing.isDemo !== before.company.isDemo || normalized(existing.jobNumber) !== mapped.jobNumber || existing.name !== mapped.name || existing.customer !== mapped.customer || existing.currency !== mapped.currency ||
           (existing.contractValue?.toFixed(2) ?? null) !== mapped.contractValue ||
           (before.mapping.approvedVariationsField && !new Decimal(existing.approvedVariations.toString()).equals(mapped.approvedVariations)))
           throw new HttpError(409, "The saved job differs from its current CRM identity, currency or value. Existing records were preserved; ask an administrator to review the job before adding bills.");

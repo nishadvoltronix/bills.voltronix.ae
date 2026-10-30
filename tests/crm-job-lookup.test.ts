@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Actor } from "@/lib/auth";
-import { getConfig } from "@/lib/integrations/config";
+import { booksConfigurationHash, getConfig } from "@/lib/integrations/config";
 import { connectionFingerprint } from "@/lib/integrations/connection-fingerprint";
 import { ZohoTransport, type Fetch } from "@/lib/integrations/transport";
 import { VERIFIED_CRM_JOB_MAPPING } from "@/lib/integrations/crm";
@@ -24,7 +24,8 @@ let authorized: boolean, currentRole: Actor["role"], activeCompany: boolean, dem
 let authorizedCompanies: Set<string>;
 let sourcePresent: boolean, grantPresent: boolean, grantRevoked: boolean, grantFingerprint: string | null;
 let sources: { companyId: string; organizationId: string; dataCenter: string; environment: string; createdAt: Date }[];
-let destinations: { companyId: string; organizationId: string; dataCenter: string; environment: string }[];
+let destinations: { companyId: string; organizationId: string; dataCenter: string; environment: string;
+  liveEnabled?: boolean; verifiedAt?: Date | null; verificationReference?: string | null; verifiedConfigurationHash?: string | null }[];
 function record(overrides: Record<string, unknown> = {}) {
   return { id: "5001", JobDealNumber: "JOB-5384", Deal_Name: "Fictional CRM job", Amount: 2200,
     Account_Name: { id: "6001", name: "Fictional customer" }, Currency: "AED", Books_Organization_ID: "1001", Stage: "Closed Won",
@@ -81,7 +82,7 @@ beforeEach(() => {
   store.companyCrmSource.findUnique.mockImplementation(async ({ where }: { where: { companyId: string } }) => sourcePresent ? sources.find(row => row.companyId === where.companyId) ?? null : null);
   store.companyCrmSource.findMany.mockImplementation(async () => sourcePresent && authorized && activeCompany ? sources.filter(row => authorizedCompanies.has(row.companyId))
     .sort((a, b) => a.companyId.localeCompare(b.companyId)).slice(0, 21).map(row => ({ ...row })) : []);
-  store.companyIntegrationDestination.findMany.mockImplementation(async ({ where }: { where: { companyId: string } }) => destinations.filter(row => row.companyId === where.companyId).map(({ organizationId, dataCenter, environment }) => ({ organizationId, dataCenter, environment })));
+  store.companyIntegrationDestination.findMany.mockImplementation(async ({ where }: { where: { companyId: string } }) => destinations.filter(row => row.companyId === where.companyId).map(({ companyId: ignored, ...destination }) => { void ignored; return { ...destination }; }));
   store.integrationCredential.findUnique.mockImplementation(async () => grantPresent ? { revokedAt: grantRevoked ? new Date() : null, connectionFingerprint: grantFingerprint ?? connectionFingerprint(getConfig("CRM")) } : null);
   store.job.findMany.mockImplementation(async ({ where }: { where: { companyId: string; externalCrmId: { in: string[] } } }) => jobs.filter(job => job.companyId === where.companyId && job.externalCrmId && where.externalCrmId.in.includes(job.externalCrmId)));
   store.job.findUnique.mockImplementation(async ({ where }: { where: { companyId_externalCrmId: { companyId: string; externalCrmId: string } } }) => jobs.find(job => job.companyId === where.companyId_externalCrmId.companyId && job.externalCrmId === where.companyId_externalCrmId.externalCrmId) ?? null);
@@ -407,6 +408,99 @@ describe("explicit CRM job resolution", () => {
     await expect(resolveCrmJob(actor, withoutSource)).rejects.toHaveProperty("name", "ZodError");
     await expect(resolveCrmJob(actor, { ...input, contractValue: "1.00" })).rejects.toHaveProperty("name", "ZodError");
     expect(store.user.findFirst).not.toHaveBeenCalled();
+  });
+});
+
+describe("production CRM job lookup and selection", () => {
+  function operational(writes = "true") {
+    for (const [key, value] of Object.entries({ APP_ENV: "production", NODE_ENV: "production", APP_URL: "https://bills.voltronix.ae",
+      DATABASE_URL: "mysql://billing_runtime:unused-fixture@db.example.invalid:3306/billing_operational", DATABASE_TLS_MODE: "verify-full",
+      ZOHO_BOOKS_WRITE_ENABLED: writes, ZOHO_BOOKS_LIVE_ENABLED: writes, MANUAL_ENTRY_ONLY: "false",
+      ZOHO_BOOKS_ORGANIZATIONS_JSON: JSON.stringify(["1001", "1002"].map(organizationId => ({ organizationId, name: `Company ${organizationId}`,
+        mapping: { verified: true, baseCurrency: "AED", currencies: { AED: { id: "11" } }, taxes: { "5.00": { id: "21", percentage: "5" } },
+          categories: { MATERIALS: { accountId: "31" } } },
+      }))),
+    })) vi.stubEnv(key, value);
+    demoCompany = false; liveCompany = true;
+    for (const destination of destinations) Object.assign(destination, { liveEnabled: true,
+      verifiedAt: new Date("2026-01-01T00:00:00Z"), verificationReference: "Reviewed operational destination",
+      verifiedConfigurationHash: booksConfigurationHash(getConfig("ZOHO", process.env, destination.organizationId)),
+    });
+  }
+
+  it.each(["true", "false"])("searches and resolves a real company job with Books write flags %s using only provider GETs", async writes => {
+    operational(writes); currentRole = "ACCOUNTS";
+    const writer = { ...actor, role: "ACCOUNTS" as const }, remote = connection();
+    const result = await searchCrmJobs(writer, { companyId: "company-a", q: "JOB" }, remote.transport);
+    expect(result.warning).toBeNull(); expect(result.jobs).toHaveLength(1);
+    const resolved = await resolveCrmJob(writer, selection(result.jobs[0]), remote.transport);
+    expect(resolved.job).toMatchObject({ companyId: "company-a", externalCrmId: "5001", isDemo: false, contractValue: "2200.00" });
+    expect((await resolveCrmJob(writer, selection(result.jobs[0]), remote.transport)).job.id).toBe(resolved.job.id);
+    expect(jobs).toHaveLength(1); expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({ details: { providerFinancialWrites: 0 } });
+    expect(remote.fetcher.mock.calls.every(([, init]) => init?.method === "GET" && init.body === undefined)).toBe(true);
+  });
+
+  it("keeps production DATA_ENTRY contract amounts private while saving the selected real CRM identity", async () => {
+    operational(); currentRole = "DATA_ENTRY";
+    const writer = { ...actor, role: "DATA_ENTRY" as const }, remote = connection();
+    const result = await searchCrmJobs(writer, { q: "JOB" }, remote.transport);
+    expect(result.warning).toBeNull(); expect(result.jobs).toHaveLength(1);
+    expect(result.jobs[0].contractValue).toBeNull();
+    const resolved = await resolveCrmJob(writer, selection(result.jobs[0]), remote.transport);
+    expect(resolved.job).toMatchObject({ isDemo: false, contractValue: null, financialScope: "YOUR_BILLS" });
+    expect(jobs[0].contractValue?.toFixed(2)).toBe("2200.00");
+  });
+
+  it.each(["http-origin", "development-database", "tls-disabled", "tls-bypass", "demo-company", "unverified-company", "unverified-destination",
+    "missing-proof", "future-proof", "stale-mapping", "missing-crm-mapping", "books-network-disabled", "revoked-grant"])("does not read CRM for unsafe production context: %s", async reason => {
+    operational();
+    if (reason === "http-origin") vi.stubEnv("APP_URL", "http://127.0.0.1:3000");
+    if (reason === "development-database") vi.stubEnv("DATABASE_URL", "mysql://billing_runtime:unused@127.0.0.1:3308/voltronix_billing_dev");
+    if (reason === "tls-disabled") vi.stubEnv("DATABASE_TLS_MODE", "disabled");
+    if (reason === "tls-bypass") vi.stubEnv("NODE_TLS_REJECT_UNAUTHORIZED", "0");
+    if (reason === "demo-company") demoCompany = true;
+    if (reason === "unverified-company") liveCompany = false;
+    if (reason === "unverified-destination") destinations[0].liveEnabled = false;
+    if (reason === "missing-proof") destinations[0].verificationReference = null;
+    if (reason === "future-proof") destinations[0].verifiedAt = new Date(Date.now() + 60_000);
+    if (reason === "stale-mapping") destinations[0].verifiedConfigurationHash = "a".repeat(64);
+    if (reason === "missing-crm-mapping") vi.stubEnv("ZOHO_CRM_MAPPING_JSON", "");
+    if (reason === "books-network-disabled") vi.stubEnv("ZOHO_BOOKS_NETWORK_ENABLED", "false");
+    if (reason === "revoked-grant") grantRevoked = true;
+    const remote = connection();
+    const result = await searchCrmJobs(actor, { companyId: "company-a", q: "JOB" }, remote.transport);
+    expect(result.jobs).toEqual([]); expect(result.warning).toBeTruthy(); expect(remote.fetcher).not.toHaveBeenCalled();
+  });
+
+  it.each(["verification", "company", "grant", "membership"])("rejects production results after %s changes during the provider read", async changed => {
+    operational();
+    const remote = connection({ onRead: url => {
+      if (!url.pathname.endsWith("/search")) return;
+      if (changed === "verification") destinations[0].verifiedConfigurationHash = "a".repeat(64);
+      if (changed === "company") demoCompany = true;
+      if (changed === "grant") grantRevoked = true;
+      if (changed === "membership") authorized = false;
+    } });
+    await expect(searchCrmJobs(actor, { companyId: "company-a", q: "JOB" }, remote.transport))
+      .rejects.toMatchObject({ status: changed === "membership" ? 403 : 409 });
+    expect(jobs).toEqual([]);
+  });
+
+  it("rolls back a production job selection when its verified destination is revoked during creation", async () => {
+    operational();
+    const input = await selected();
+    store.job.create.mockImplementationOnce(async () => {
+      const created = local({ isDemo: false }); destinations[0].liveEnabled = false; return created;
+    });
+    await expect(resolveCrmJob(actor, input, connection().transport)).rejects.toMatchObject({ status: 409 });
+    expect(jobs).toEqual([]); expect(audits).toEqual([]);
+  });
+
+  it("does not reuse a demo-marked saved job in an operational company", async () => {
+    operational(); const input = await selected(); const existing = local({ isDemo: true });
+    await expect(resolveCrmJob(actor, input, connection().transport)).rejects.toMatchObject({ status: 409 });
+    expect(jobs).toEqual([existing]); expect(audits).toEqual([]);
   });
 });
 

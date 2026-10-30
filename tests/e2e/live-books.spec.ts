@@ -282,3 +282,55 @@ test("polling lets a slow status request finish before starting another", async 
   await expect(page.getByText("Bill saved and synchronized with Zoho Books.", { exact: true })).toBeVisible({timeout:20000});
   expect(reads).toBe(2);
 });
+
+test("failed posting retries its existing operation without creating another bill", async ({ page }) => {
+  const bill = await setup(page);
+  bill.syncRecords[0].status = "FAILED";
+  bill.syncRecords[0].organizationId = firstOrganization;
+  bill.integrationJobs = [{ id: "mock-retry-operation", organizationId: firstOrganization,
+    operation: "CREATE_BILL", status: "FAILED", needsReconciliation: false, attempts: 5,
+    nextAttemptAt: "2026-10-30T06:00:00Z", externalId: null, lastError: "Temporary Books failure." }];
+  const writes: string[] = [];
+  page.on("request", (request) => { if (request.method() === "POST") writes.push(new URL(request.url()).pathname); });
+  await page.route("**/api/integrations/jobs/mock-retry-operation", async (route) => {
+    expect(route.request().postDataJSON()).toEqual({ action: "retry", organizationId: firstOrganization });
+    bill.integrationJobs![0].status = "QUEUED";
+    bill.syncRecords[0].status = "PENDING";
+    await route.fulfill(json({ job: { id: "mock-retry-operation", status: "QUEUED", needsReconciliation: false } }));
+  });
+  await page.goto(`/bills/${billId}`);
+  await expect(page.getByRole("button", { name: "Queue Zoho Books sync", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Retry Zoho Books sync", exact: true }).click();
+  await expect(page.getByText("Zoho Books retry queued for the existing operation.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry Zoho Books sync", exact: true })).toHaveCount(0);
+  expect(writes).toEqual(["/api/integrations/jobs/mock-retry-operation"]);
+  expect(bill.payments).toEqual([]);
+});
+
+test("unknown posting permits reconciliation only and polls its read result", async ({ page }) => {
+  const bill = await setup(page);
+  bill.syncRecords[0].status = "UNKNOWN";
+  bill.syncRecords[0].organizationId = firstOrganization;
+  bill.integrationJobs = [{ id: "mock-uncertain-operation", organizationId: firstOrganization,
+    operation: "CREATE_BILL", status: "UNKNOWN", needsReconciliation: true, attempts: 1,
+    nextAttemptAt: "2026-10-30T06:00:00Z", externalId: null, lastError: "The response was lost." }];
+  const writes: string[] = [];
+  page.on("request", (request) => { if (request.method() === "POST") writes.push(new URL(request.url()).pathname); });
+  await page.route("**/api/integrations/jobs/mock-uncertain-operation", async (route) => {
+    expect(route.request().postDataJSON()).toEqual({ action: "reconcile", organizationId: firstOrganization });
+    bill.integrationJobs![0].status = "QUEUED";
+    await route.fulfill(json({ job: { id: "mock-uncertain-operation", status: "QUEUED", needsReconciliation: true } }));
+  });
+  await page.goto(`/bills/${billId}?saved=1`);
+  await expect(page.getByRole("button", { name: /Retry Zoho Books sync|Queue Zoho Books sync/ })).toHaveCount(0);
+  await page.getByRole("button", { name: "Reconcile Zoho Books outcome", exact: true }).click();
+  await expect(page.getByText("Zoho Books reconciliation queued.", { exact: false })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Reconcile Zoho Books outcome", exact: true })).toHaveCount(0);
+  bill.integrationJobs![0].status = "SUCCEEDED";
+  bill.integrationJobs![0].needsReconciliation = false;
+  bill.syncRecords[0].status = "SYNCED";
+  bill.syncRecords[0].externalId = "mock-reconciled-books-bill";
+  await expect(page.getByText("mock-reconciled-books-bill", { exact: true })).toBeVisible({ timeout: 12000 });
+  expect(writes).toEqual(["/api/integrations/jobs/mock-uncertain-operation"]);
+  expect(bill.payments).toEqual([]);
+});

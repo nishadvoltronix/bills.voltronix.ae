@@ -8,11 +8,12 @@ import { ZohoTransport, type Fetch } from "@/lib/integrations/transport";
 const selected: BooksSelection = { organizationId: "100", dataCenter: "US", environment: "sandbox", accountId: "110",
   accountName: "Reviewed labour account", taxId: "120", taxName: "Standard tax", taxRate: "5.00",
   customerId: "130", customerName: "Fictional customer" };
-function config(): ZohoConfig {
+function config(requireSelections = false): ZohoConfig {
   const result: ZohoConfig = { target: "ZOHO", organizationId: "100", dataCenter: "US", environment: "sandbox",
     clientId: "fictional-client", clientSecret: "fictional-secret", apiOrigin: "https://www.zohoapis.com",
     accountsOrigin: "https://accounts.zoho.com", networkEnabled: true, writeEnabled: true,
-    booksMapping: { verified: true, baseCurrency: "AED", currencies: { AED: { id: "101" } }, categories: {}, taxes: {} } };
+    booksMapping: { verified: true, baseCurrency: "AED", currencies: { AED: { id: "101" } }, categories: {}, taxes: {},
+      ...(requireSelections ? { lineSelectionRequired: true } : {}) } };
   result.testAuthorization = { mode: "nonproduction", organizationId: "100", dataCenter: "US",
     configurationHash: booksTestConfigurationHash(result), approvedBy: "fictional-operator",
     approvalReference: "FIXTURE-100", isolationEvidenceReference: "FIXTURE-ISOLATION-100",
@@ -26,7 +27,7 @@ function snapshot(): BillSnapshot {
     externalVendorId: "104", jobId: "job", jobNumber: "FICTIONAL-JOB", externalCrmJobId: null,
     lines: [{ description: "Reviewed line", quantity: "1", unitPrice: "100.00", booksSelection: selected }], documents: [] };
 }
-function adapter(overrides: Record<string, unknown> = {}) {
+function adapter(overrides: Record<string, unknown> = {}, requireSelections = false) {
   const read = snapshot();
   const remote = { code: 0, bill: { bill_id: "999", bill_number: read.invoiceNumber, vendor_id: "104",
     reference_number: "VX-BILL-selected-fixture", currency_code: "AED", total: "105.00", tax_total: "5.00",
@@ -51,10 +52,35 @@ function adapter(overrides: Record<string, unknown> = {}) {
     if (!(parsed.pathname in rows)) throw new Error("Unexpected provider fixture request");
     return new Response(JSON.stringify(rows[parsed.pathname]));
   });
-  return { adapter: new BooksAdapter(new ZohoTransport(config(), async () => "fictional-token", fetcher)), fetcher, remote };
+  return { adapter: new BooksAdapter(new ZohoTransport(config(requireSelections), async () => "fictional-token", fetcher)), fetcher, remote };
 }
 
 describe("explicit Books line payload and metadata changes", () => {
+  it.each(["missing", "mixed", "empty"])("blocks %s required line selections before any provider request", async kind => {
+    const value = snapshot();
+    const unselected = { description: "Unselected purchase", quantity: "1", unitPrice: "100.00" };
+    value.lines = kind === "missing" ? [unselected] : kind === "mixed" ? [...value.lines, unselected] : [];
+    const fixture = adapter({}, true);
+    await expect(fixture.adapter.create(value)).rejects.toMatchObject({ code: "LINE_SELECTION_REQUIRED", kind: "BLOCKED" });
+    expect(fixture.fetcher).not.toHaveBeenCalled();
+  });
+  it("rejects mixed selection and fallback lines even under the legacy mapping mode", () => {
+    const value = snapshot();
+    value.lines.push({ description: "Unselected purchase", quantity: "1", unitPrice: "100" });
+    expect(() => buildBooksPayload(value, config())).toThrowError(expect.objectContaining({ code: "LINE_SELECTION_REQUIRED" }));
+  });
+  it("revalidates a selected asset account and simple tax in required mode before creating the exact bill", async () => {
+    const fixture = adapter({ "/books/v3/chartofaccounts/110": {
+      code: 0, chart_of_account: { account_id: "110", account_type: "fixed_asset", is_active: true },
+    } }, true);
+    await expect(fixture.adapter.create(snapshot())).resolves.toMatchObject({ externalId: "999" });
+    const requests = fixture.fetcher.mock.calls;
+    expect(requests.some(call => new URL(call[0]).pathname === "/books/v3/chartofaccounts/110")).toBe(true);
+    expect(requests.some(call => new URL(call[0]).pathname === "/books/v3/settings/taxes/120")).toBe(true);
+    const posts = requests.filter(call => call[1]?.method === "POST");
+    expect(posts).toHaveLength(1);
+    expect(JSON.parse(posts[0][1]!.body as string).line_items[0]).toMatchObject({ account_id: "110", tax_id: "120" });
+  });
   it("uses an explicit labour account, tax and nonbillable customer without a category fallback", () => {
     const payload = buildBooksPayload(snapshot(), config());
     expect(payload).toMatchObject({ is_item_level_tax_calc: false, line_items: [{ account_id: "110", tax_id: "120", customer_id: "130", is_billable: false }] });

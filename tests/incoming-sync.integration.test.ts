@@ -50,12 +50,13 @@ async function oldIntervalState(data: Prisma.IncomingSyncStateUpdateInput = {}) 
 }
 
 describe("durable incoming worker fencing", () => {
-  it("commits freshness and schedules the next read without provider financial writes", async () => {
+  it.each([{ interval: "5", delay: 5000 }, { interval: "", delay: 60000 }])("commits freshness and schedules the next read after $delay ms without provider financial writes", async ({ interval, delay }) => {
+    vi.stubEnv("INCOMING_SYNC_INTERVAL_SECONDS", interval);
     expect(await processIncomingSync(actor)).toMatchObject({ enabled: true, processed: 2, sources: 1 });
     const saved = await state();
     expect(saved).toMatchObject({ status: "IDLE", leaseToken: null, leaseExpiresAt: null, failures: 0, processedCount: 2, providerReads: 0 });
     expect(saved.lastSuccessAt).not.toBeNull(); expect(saved.lastReconciledAt).not.toBeNull();
-    expect(saved.nextRunAt.valueOf() - saved.lastSuccessAt!.valueOf()).toBe(5000);
+    expect(saved.nextRunAt.valueOf() - saved.lastSuccessAt!.valueOf()).toBe(delay);
     await processIncomingSync(actor); expect(mocks.books).toHaveBeenCalledOnce(); expect(fetch).not.toHaveBeenCalled();
   });
   it("picks up a successful source still scheduled with the previous five-minute interval", async () => {

@@ -1,0 +1,12 @@
+# One-shot setup/restore only. Never use this override with `up`.
+# The private setup environment disables providers and all background workers.
+services:
+  web:
+    volumes:
+      - type: bind
+        source: ./.private/data-transfer
+        target: /run/zoho-transfer
+        read_only: true
+secrets:
+  app_environment:
+    file: ./.env.setup

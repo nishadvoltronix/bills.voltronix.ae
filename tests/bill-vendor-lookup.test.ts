@@ -128,7 +128,10 @@ describe("company-specific bill vendor search", () => {
     expect(store.vendor.findMany).not.toHaveBeenCalled();
   });
 
-  it("uses the exact company's Books organization and excludes customer, inactive, unsupported-currency and nonmatching rows", async () => {
+  it.each(["development", "production"] as const)("uses the exact company's Books organization in %s and excludes unsupported supplier results", async (runtime) => {
+    vi.stubEnv("APP_ENV", runtime);
+    vi.stubEnv("NODE_ENV", runtime);
+    vi.stubEnv("APP_URL", runtime === "production" ? "https://bills.example.invalid" : "http://127.0.0.1:3000");
     local({ name: "Books unrelated local" });
     const { transport, fetcher } = connection(page([
       contact(), contact({ contact_id: "2002", contact_type: "customer" }), contact({ contact_id: "2003", status: "inactive" }),
@@ -325,6 +328,19 @@ describe("company-specific bill vendor search", () => {
 });
 
 describe("resolving an existing Books supplier for bill entry", () => {
+  it("resolves a real company supplier on the hosted production runtime using provider reads only", async () => {
+    vi.stubEnv("APP_ENV", "production");
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("APP_URL", "https://bills.example.invalid");
+    companies[0].isDemo = false;
+    const { transport, fetcher } = connection({ code: 0, contact: contact() });
+    const result = await resolveBillVendor(actor, selection, transport);
+    expect(vendors[0].isDemo).toBe(false);
+    expect(mappings[0]).toMatchObject({ vendorId: result.id, externalVendorId: "2001", ...destination });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0][1]?.method).toBe("GET");
+  });
+
   it("allows a current Data Entry user to select a provider vendor without promoting demo provenance or enabling writes", async () => {
     const { transport, fetcher } = connection({ code: 0, contact: contact() });
     const result = await resolveBillVendor(actor, selection, transport);

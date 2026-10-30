@@ -13,6 +13,8 @@ const mocks = vi.hoisted(() => ({
   destinationFind: vi.fn(),
   destinationCreate: vi.fn(),
   audit: vi.fn(),
+  membership: vi.fn(),
+  grantMembership: vi.fn(),
 }));
 vi.mock("@/lib/db", () => ({ db: { $transaction: mocks.transaction } }));
 vi.mock("@/lib/company", () => ({ requireCompanyAccess: mocks.access }));
@@ -30,6 +32,7 @@ const tx = {
   company: { findUnique: mocks.companyFind, findFirst: mocks.companyByName, create: mocks.companyCreate },
   companyIntegrationDestination: { findUnique: mocks.destinationFind, create: mocks.destinationCreate },
   auditLog: { create: mocks.audit },
+  userCompanyMembership: { findUnique: mocks.membership, upsert: mocks.grantMembership },
 };
 function existingCompany(overrides: Partial<CompanyRecord> = {}): CompanyRecord {
   return { id: companyId, name: payload.companyName, active: true, isDemo: false, liveAccountingEnabled: false, ...overrides };
@@ -143,7 +146,7 @@ describe("operational Books company preparation", () => {
 
   it("creates a disabled real company with operator membership and exact disabled destination, then audits the assignment", async () => {
     const result = await prepareOperationalBooksCompany(actor, payload);
-    expect(result).toEqual({ companyId, organizationId: "1001", created: true, destinationCreated: true, providerRequests: 0, financialWritesEnabled: false });
+    expect(result).toEqual({ companyId, organizationId: "1001", created: true, destinationCreated: true, memberAssigned: false, providerRequests: 0, financialWritesEnabled: false });
     expect(mocks.transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
     expect(mocks.companyCreate).toHaveBeenCalledWith({ data: {
       id: companyId, name: payload.companyName, isDemo: false, liveAccountingEnabled: false,
@@ -201,6 +204,57 @@ describe("operational Books company preparation", () => {
     await expect(prepareOperationalBooksCompany(actor, payload)).rejects.toMatchObject({ status: 403 });
     expect(mocks.access).toHaveBeenCalledWith(actor, companyId, tx);
     expect(mocks.destinationCreate).not.toHaveBeenCalled();
+    expect(mocks.audit).not.toHaveBeenCalled();
+  });
+
+  it("assigns an explicitly selected active staff member and audits the exact company without changing roles or verification", async () => {
+    company = existingCompany({ liveAccountingEnabled: true });
+    binding = existingBinding({ liveEnabled: true, verifiedAt: new Date("2026-10-30T00:00:00Z") });
+    const before = structuredClone({ company, binding });
+    mocks.user.mockImplementation(async ({ where }) => where.email
+      ? { id: "staff", active: true } : { active: true, role: "ADMIN" });
+    mocks.membership.mockResolvedValue({ active: false });
+    const result = await prepareOperationalBooksCompany(actor, { ...payload, memberEmail: "Staff@example.invalid" });
+    expect(result).toMatchObject({ companyId, created: false, destinationCreated: false, memberAssigned: true });
+    expect(mocks.user).toHaveBeenCalledWith({ where: { email: "staff@example.invalid" }, select: { id: true, active: true } });
+    expect(mocks.grantMembership).toHaveBeenCalledWith({
+      where: { userId_companyId: { userId: "staff", companyId } },
+      create: { userId: "staff", companyId }, update: { active: true },
+    });
+    expect(mocks.audit).toHaveBeenCalledWith({ data: expect.objectContaining({
+      actorId: actor.id, companyId, action: "COMPANY_MEMBERSHIP_GRANTED", entityId: "staff",
+      details: { reference: payload.reference, source: "reauthenticated_operator", previousActive: false, active: true },
+    }) });
+    expect({ company, binding }).toEqual(before);
+    expect(mocks.companyCreate).not.toHaveBeenCalled();
+    expect(mocks.destinationCreate).not.toHaveBeenCalled();
+  });
+
+  it.each([null, { id: "staff", active: false }])("refuses a missing or inactive requested staff member before creating company records", async member => {
+    mocks.user.mockResolvedValueOnce({ active: true, role: "ADMIN" }).mockResolvedValueOnce(member);
+    await expect(prepareOperationalBooksCompany(actor, { ...payload, memberEmail: "staff@example.invalid" })).rejects.toMatchObject({ status: 422 });
+    expect(mocks.companyCreate).not.toHaveBeenCalled();
+    expect(mocks.grantMembership).not.toHaveBeenCalled();
+    expect(mocks.audit).not.toHaveBeenCalled();
+  });
+
+  it("does not let an outsider administrator grant staff access to an existing company", async () => {
+    company = existingCompany();
+    binding = existingBinding();
+    mocks.user.mockResolvedValueOnce({ active: true, role: "ADMIN" }).mockResolvedValueOnce({ id: "staff", active: true });
+    mocks.access.mockRejectedValue(new HttpError(404, "Company or record not found."));
+    await expect(prepareOperationalBooksCompany(actor, { ...payload, memberEmail: "staff@example.invalid" })).rejects.toMatchObject({ status: 404 });
+    expect(mocks.grantMembership).not.toHaveBeenCalled();
+    expect(mocks.audit).not.toHaveBeenCalled();
+  });
+
+  it("preserves an already active staff membership without duplicate audits", async () => {
+    company = existingCompany();
+    binding = existingBinding();
+    mocks.user.mockResolvedValueOnce({ active: true, role: "ADMIN" }).mockResolvedValueOnce({ id: "staff", active: true });
+    mocks.membership.mockResolvedValue({ active: true });
+    await expect(prepareOperationalBooksCompany(actor, { ...payload, memberEmail: "staff@example.invalid" })).resolves.toMatchObject({ memberAssigned: false });
+    expect(mocks.grantMembership).not.toHaveBeenCalled();
     expect(mocks.audit).not.toHaveBeenCalled();
   });
 });

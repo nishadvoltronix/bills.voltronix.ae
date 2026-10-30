@@ -240,6 +240,7 @@ function migrationExpectations() {
   );
   const source = readdirSync(migrationRoot, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
+    .sort((a, b) => a.name.localeCompare(b.name))
     .map((entry) =>
       readFileSync(
         path.join(migrationRoot, entry.name, "migration.sql"),
@@ -247,13 +248,16 @@ function migrationExpectations() {
       ),
     )
     .join("\n");
+  const checks = new Set();
+  for (const event of source.matchAll(/CONSTRAINT\s+`([^`]+)`\s+CHECK|DROP\s+(?:CHECK|CONSTRAINT)\s+`([^`]+)`/g)) {
+    if (event[1]) checks.add(event[1]);
+    else checks.delete(event[2]);
+  }
   return {
     tables: [...source.matchAll(/CREATE TABLE\s+`([^`]+)`/g)].map((match) =>
       match[1].toLowerCase(),
     ),
-    checks: [...source.matchAll(/CONSTRAINT\s+`([^`]+)`\s+CHECK/g)].map(
-      (match) => match[1],
-    ),
+    checks: [...checks],
     foreignKeys: [
       ...source.matchAll(/CONSTRAINT\s+`([^`]+)`\s+FOREIGN KEY/g),
     ].map((match) => match[1]),
