@@ -1,0 +1,29 @@
+# Add only when the MySQL provider uses a private CA bundle.
+services:
+  web:
+    secrets:
+      - source: mysql_ca
+        target: mysql_ca
+  sync:
+    secrets:
+      - source: mysql_ca
+        target: mysql_ca
+  incoming:
+    secrets:
+      - source: mysql_ca
+        target: mysql_ca
+  job-history:
+    secrets:
+      - source: mysql_ca
+        target: mysql_ca
+  ocr:
+    secrets:
+      - source: mysql_ca
+        target: mysql_ca
+  migrate:
+    secrets:
+      - source: mysql_ca
+        target: mysql_ca
+secrets:
+  mysql_ca:
+    file: ./.private/mysql-ca.pem

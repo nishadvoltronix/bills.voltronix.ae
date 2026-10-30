@@ -1,0 +1,130 @@
+name: voltronix-bills
+
+x-runtime: &runtime
+  image: ${BILLS_IMAGE:-voltronix-bills:local}
+  init: true
+  restart: unless-stopped
+  user: "1000:1000"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  pids_limit: 256
+  stop_grace_period: 90s
+  tmpfs:
+    - /tmp:uid=1000,gid=1000,mode=0700
+    - /app/.next/cache:uid=1000,gid=1000,mode=0700
+  secrets:
+    - source: app_environment
+      target: app_env
+  volumes:
+    - invoices:/var/lib/voltronix/uploads
+  logging:
+    driver: local
+    options:
+      max-size: "10m"
+      max-file: "5"
+
+services:
+  web:
+    <<: *runtime
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: runtime
+    command: [web]
+    mem_limit: 1g
+    healthcheck:
+      test: [CMD, node, deploy/healthcheck.mjs]
+      interval: 30s
+      timeout: 7s
+      start_period: 45s
+      retries: 3
+
+  sync:
+    <<: *runtime
+    command: [sync]
+    mem_limit: 768m
+    depends_on:
+      web:
+        condition: service_healthy
+
+  incoming:
+    <<: *runtime
+    command: [incoming]
+    mem_limit: 768m
+    depends_on:
+      web:
+        condition: service_healthy
+
+  job-history:
+    <<: *runtime
+    command: [job-history]
+    mem_limit: 512m
+    depends_on:
+      web:
+        condition: service_healthy
+
+  ocr:
+    <<: *runtime
+    profiles: [ocr]
+    command: [ocr]
+    mem_limit: 768m
+    depends_on:
+      web:
+        condition: service_healthy
+
+  proxy:
+    image: nginxinc/nginx-unprivileged:1.28-alpine
+    init: true
+    restart: unless-stopped
+    user: "101:101"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    mem_limit: 128m
+    entrypoint: [nginx]
+    command: ["-g", "daemon off;"]
+    ports:
+      - "127.0.0.1:${BILLS_HTTP_PORT:-8080}:8080"
+    tmpfs:
+      - /tmp:uid=101,gid=101,mode=0700
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      web:
+        condition: service_healthy
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  migrate:
+    profiles: [tools]
+    image: ${BILLS_MIGRATION_IMAGE:-voltronix-bills:migration}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: migration
+    init: true
+    restart: "no"
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:uid=1000,gid=1000,mode=0700
+    secrets:
+      - source: migration_environment
+        target: migration_env
+    command: [migrate]
+
+secrets:
+  app_environment:
+    file: ./.env.production
+  migration_environment:
+    file: ./.env.migration
+
+volumes:
+  invoices:

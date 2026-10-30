@@ -1,0 +1,7 @@
+.files { min-width: 175px; max-width: 270px; margin-top: 12px; white-space: normal; }
+.files ul { padding: 0; margin: 0; list-style: none; }
+.files li + li { margin-top: 13px; padding-top: 12px; border-top: 1px solid #edf0f3; }
+.name { display: block; overflow-wrap: anywhere; color: #455368; font-size: 12px; line-height: 1.5; }
+.actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.actions :global(.button) { min-height: 30px; padding: 5px 8px; font-size: 11px; }
+.pending { display: block; color: #798596; font-size: 11px; line-height: 1.5; }

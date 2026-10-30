@@ -1,0 +1,415 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  ADMIN
+  ACCOUNTS
+  DATA_ENTRY
+  MANAGEMENT
+}
+
+enum BillStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+enum PaymentTerm {
+  CUSTOM
+  DUE_ON_RECEIPT
+  NET_7
+  NET_15
+  NET_30
+  NET_45
+  NET_60
+}
+
+enum SyncTarget {
+  ZOHO
+  CRM
+}
+
+enum SyncStatus {
+  NOT_CONFIGURED
+  PENDING
+  SYNCED
+  FAILED
+  UNKNOWN
+}
+
+enum OcrStatus {
+  QUEUED
+  PROCESSING
+  REVIEW_REQUIRED
+  FAILED
+  POSTED
+}
+
+model User {
+  id             String     @id @default(cuid())
+  email          String     @unique
+  name           String
+  passwordHash   String
+  role           Role
+  active         Boolean    @default(true)
+  createdAt      DateTime   @default(now())
+  sessions       Session[]
+  createdBills   Bill[]     @relation("BillCreator")
+  approvedBills  Bill[]     @relation("BillApprover")
+  payments       Payment[]
+  documents      Document[]
+  auditLogs      AuditLog[]
+  ocrBatches     OcrBatch[]
+  ocrTemplates   OcrTemplate[]
+  reviewedOcrDocuments OcrDocument[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  tokenHash String   @unique
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model LoginAttempt {
+  key         String    @id
+  count       Int       @default(0)
+  windowStart DateTime  @default(now())
+  lockedUntil DateTime?
+}
+
+model Vendor {
+  id             String   @id @default(cuid())
+  name           String
+  email          String?
+  trn            String?
+  currency       String   @default("AED")
+  externalCrmId  String?  @unique
+  externalZohoId String?  @unique
+  isDemo         Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  bills          Bill[]
+  ocrTemplates   OcrTemplate[]
+  booksMappings  VendorBooksMapping[]
+
+  @@index([name])
+}
+
+model VendorBooksMapping {
+  id               String @id @default(cuid())
+  vendorId         String
+  organizationId   String
+  dataCenter       String
+  environment      String
+  externalVendorId String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  vendor           Vendor @relation(fields: [vendorId], references: [id], onDelete: Restrict)
+
+  @@unique([vendorId, organizationId, dataCenter, environment], map: "VendorBooksMapping_vendor_destination_key")
+  @@unique([organizationId, dataCenter, environment, externalVendorId], map: "VendorBooksMapping_destination_external_key")
+  @@index([organizationId, dataCenter, environment])
+}
+
+model Job {
+  id                 String   @id @default(cuid())
+  jobNumber          String   @unique
+  name               String
+  customer           String
+  contractValue      Decimal? @db.Decimal(18, 2)
+  approvedVariations Decimal  @default(0) @db.Decimal(18, 2)
+  currency           String   @default("AED")
+  externalCrmId      String?  @unique
+  isDemo             Boolean  @default(false)
+  createdAt          DateTime @default(now())
+  bills              Bill[]
+
+  @@index([name])
+}
+
+model Bill {
+  id                      String       @id @default(cuid())
+  vendorId                String
+  jobId                   String
+  invoiceNumber           String
+  orderNumber             String?      @db.VarChar(120)
+  paymentTerms            PaymentTerm  @default(CUSTOM)
+  normalizedInvoiceNumber String
+  invoiceDate             DateTime     @db.Date
+  dueDate                 DateTime?    @db.Date
+  category                String
+  currency                String
+  description             String?
+  notes                   String?
+  status                  BillStatus   @default(DRAFT)
+  subtotal                Decimal      @db.Decimal(18, 2)
+  discount                Decimal      @default(0) @db.Decimal(18, 2)
+  vatRate                 Decimal      @default(0) @db.Decimal(5, 2)
+  vatAmount               Decimal      @db.Decimal(18, 2)
+  total                   Decimal      @db.Decimal(18, 2)
+  paidAmount              Decimal      @default(0) @db.Decimal(18, 2)
+  version                 Int          @default(1)
+  createdById             String
+  approvedById            String?
+  approvedAt              DateTime?
+  createdAt               DateTime     @default(now())
+  updatedAt               DateTime     @updatedAt
+  vendor                  Vendor       @relation(fields: [vendorId], references: [id], onDelete: Restrict)
+  job                     Job          @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  createdBy               User         @relation("BillCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  approvedBy              User?        @relation("BillApprover", fields: [approvedById], references: [id], onDelete: Restrict)
+  lines                   BillLine[]
+  payments                Payment[]
+  documents               Document[]
+  syncRecords             SyncRecord[]
+  ocrDocument             OcrDocument?
+  integrationJobs         IntegrationJob[]
+
+  @@unique([vendorId, normalizedInvoiceNumber])
+  @@index([jobId, status])
+  @@index([createdById])
+  @@index([status, invoiceDate])
+  @@index([invoiceDate])
+}
+
+model BillLine {
+  id          String  @id @default(cuid())
+  billId      String
+  description String
+  quantity    Decimal @db.Decimal(14, 3)
+  unitPrice   Decimal @db.Decimal(18, 2)
+  lineTotal   Decimal @db.Decimal(18, 2)
+  bill        Bill    @relation(fields: [billId], references: [id], onDelete: Cascade)
+
+  @@index([billId])
+}
+
+model Payment {
+  id          String   @id @default(cuid())
+  billId      String
+  amount      Decimal  @db.Decimal(18, 2)
+  reference   String
+  createdById String
+  createdAt   DateTime @default(now())
+  bill        Bill     @relation(fields: [billId], references: [id], onDelete: Restrict)
+  createdBy   User     @relation(fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@unique([billId, reference])
+  @@index([billId])
+}
+
+model Document {
+  id           String   @id @default(cuid())
+  billId       String
+  storageKey   String   @unique
+  fileName     String
+  mimeType     String
+  byteSize     Int
+  sha256       String
+  uploadedById String
+  createdAt    DateTime @default(now())
+  bill         Bill     @relation(fields: [billId], references: [id], onDelete: Restrict)
+  uploadedBy   User     @relation(fields: [uploadedById], references: [id], onDelete: Restrict)
+
+  @@index([billId])
+}
+
+model SyncRecord {
+  id         String     @id @default(cuid())
+  billId     String
+  target     SyncTarget
+  status     SyncStatus @default(NOT_CONFIGURED)
+  externalId String?
+  lastError  String?
+  attempts   Int        @default(0)
+  organizationId String?
+  lastSyncedAt DateTime?
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+  bill       Bill       @relation(fields: [billId], references: [id], onDelete: Restrict)
+
+  @@unique([billId, target])
+  @@unique([target, organizationId, externalId])
+}
+
+enum IntegrationJobStatus {
+  QUEUED
+  PROCESSING
+  RETRY
+  UNKNOWN
+  SUCCEEDED
+  FAILED
+  BLOCKED
+  CANCELLED
+}
+
+enum IntegrationOperation {
+  CREATE_BILL
+  ATTACH_DOCUMENT
+  CREATE_EXPENSE
+}
+
+model IntegrationJob {
+  id                    String               @id @default(cuid())
+  billId                String
+  target                SyncTarget
+  operation             IntegrationOperation
+  status                IntegrationJobStatus @default(QUEUED)
+  idempotencyKey        String               @unique
+  organizationId        String
+  sourceVersion         Int
+  snapshot              Json
+  payloadHash           String
+  externalId            String?
+  documentId            String?
+  attempts              Int                  @default(0)
+  reconciliationAttempts Int                 @default(0)
+  needsReconciliation   Boolean              @default(false)
+  nextAttemptAt         DateTime             @default(now())
+  leaseToken            String?
+  leaseUntil            DateTime?
+  lastAttemptAt         DateTime?
+  lastError             String?
+  errorCode             String?
+  completedAt           DateTime?
+  createdAt             DateTime             @default(now())
+  updatedAt             DateTime             @updatedAt
+  bill                  Bill                 @relation(fields: [billId], references: [id], onDelete: Restrict)
+  history               IntegrationAttempt[]
+
+  @@index([status, nextAttemptAt, leaseUntil])
+  @@index([billId, target])
+}
+
+model IntegrationAttempt {
+  id           String         @id @default(cuid())
+  jobId        String
+  operation    String
+  outcome      String
+  errorCode    String?
+  safeError    String?
+  externalId   String?
+  startedAt    DateTime
+  finishedAt   DateTime       @default(now())
+  job          IntegrationJob @relation(fields: [jobId], references: [id], onDelete: Restrict)
+
+  @@index([jobId, startedAt])
+}
+
+model IntegrationCredential {
+  target                SyncTarget
+  organizationId        String
+  dataCenter            String
+  connectionFingerprint String
+  refreshTokenEncrypted String
+  accessTokenEncrypted  String?
+  accessExpiresAt       DateTime?
+  revokedAt             DateTime?
+  createdAt             DateTime   @default(now())
+  updatedAt             DateTime   @updatedAt
+
+  @@id([target, organizationId])
+}
+
+model IntegrationOAuthState {
+  tokenHash   String     @id
+  target      SyncTarget
+  organizationId String
+  userId      String
+  dataCenter  String
+  connectionFingerprint String
+  expiresAt   DateTime
+  consumedAt  DateTime?
+  createdAt   DateTime   @default(now())
+
+  @@index([expiresAt])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  action     String
+  entityType String
+  entityId   String
+  details    Json
+  createdAt  DateTime @default(now())
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: Restrict)
+
+  @@index([entityType, entityId, createdAt])
+  @@index([createdAt])
+}
+
+model OcrBatch {
+  id          String        @id @default(cuid())
+  createdById String
+  createdAt   DateTime      @default(now())
+  createdBy   User          @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  documents   OcrDocument[]
+
+  @@index([createdById, createdAt])
+}
+
+model OcrDocument {
+  id                 String       @id @default(cuid())
+  batchId            String
+  status             OcrStatus    @default(QUEUED)
+  storageKey         String       @unique
+  fileName           String
+  mimeType           String
+  byteSize           Int
+  sha256             String
+  version            Int          @default(1)
+  attempts           Int          @default(0)
+  pollCount          Int          @default(0)
+  nextAttemptAt      DateTime     @default(now())
+  leaseUntil         DateTime?
+  leaseToken         String?
+  providerRequestId  String?
+  extraction         Json?
+  verifiedInput      Json?
+  lastError          String?
+  failureCode        String?
+  templateId         String?
+  reviewedById       String?
+  reviewedAt         DateTime?
+  billId             String?      @unique
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+  batch              OcrBatch     @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  reviewedBy         User?        @relation(fields: [reviewedById], references: [id], onDelete: Restrict)
+  bill               Bill?        @relation(fields: [billId], references: [id], onDelete: Restrict)
+  template           OcrTemplate? @relation(fields: [templateId], references: [id], onDelete: Restrict)
+
+  @@unique([batchId, sha256])
+  @@index([status, nextAttemptAt, leaseUntil])
+  @@index([sha256])
+}
+
+model OcrTemplate {
+  id           String        @id @default(cuid())
+  vendorId     String
+  version      Int
+  name         String
+  mappings     Json
+  active       Boolean       @default(true)
+  createdById  String
+  createdAt    DateTime      @default(now())
+  vendor       Vendor        @relation(fields: [vendorId], references: [id], onDelete: Restrict)
+  createdBy    User          @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  documents    OcrDocument[]
+
+  @@unique([vendorId, version])
+  @@index([vendorId, active])
+}

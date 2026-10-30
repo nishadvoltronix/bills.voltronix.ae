@@ -1,0 +1,8 @@
+node_modules
+.next
+.local
+coverage
+test-results
+playwright-report
+package-lock.json
+AGENTS.md

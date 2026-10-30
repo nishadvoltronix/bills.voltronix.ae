@@ -1,0 +1,852 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+}
+
+enum Role {
+  ADMIN
+  ACCOUNTS
+  DATA_ENTRY
+  MANAGEMENT
+}
+
+enum BillStatus {
+  DRAFT
+  READY
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+enum PaymentTerm {
+  CUSTOM
+  DUE_ON_RECEIPT
+  NET_7
+  NET_15
+  NET_30
+  NET_45
+  NET_60
+}
+
+enum SyncTarget {
+  ZOHO
+  CRM
+}
+
+enum SyncStatus {
+  NOT_CONFIGURED
+  PENDING
+  SYNCED
+  FAILED
+  UNKNOWN
+}
+
+enum OcrStatus {
+  QUEUED
+  PROCESSING
+  REVIEW_REQUIRED
+  FAILED
+  POSTED
+}
+
+enum ScannerImportStatus {
+  IMPORTED
+  DUPLICATE
+  REJECTED
+}
+
+model User {
+  id                   String                  @id @default(cuid()) @db.VarChar(100)
+  email                String                  @unique @db.VarChar(254)
+  name                 String                  @db.VarChar(200)
+  passwordHash         String                  @db.VarChar(255)
+  role                 Role
+  active               Boolean                 @default(true)
+  createdAt            DateTime                @default(now()) @db.DateTime(3)
+  sessions             Session[]
+  createdBills         Bill[]                  @relation("BillCreator")
+  approvedBills        Bill[]                  @relation("BillApprover")
+  payments             Payment[]
+  documents            Document[]
+  auditLogs            AuditLog[]
+  ocrBatches           OcrBatch[]
+  ocrTemplates         OcrTemplate[]
+  reviewedOcrDocuments OcrDocument[]
+  memberships          UserCompanyMembership[]
+  hubBindings          HubUserBinding[]
+  scannerSources       ScannerSource[]
+  liveSyncAuthorizations LiveSyncAuthorization[]
+  initiatedIntegrationJobs IntegrationJob[] @relation("IntegrationJobInitiator")
+  booksImportRuns       BooksImportRun[]
+  crmImportRuns         CrmImportRun[]
+}
+
+model Session {
+  id        String   @id @default(cuid()) @db.VarChar(100)
+  tokenHash String   @unique @db.Char(64)
+  userId    String   @db.VarChar(100)
+  expiresAt DateTime @db.DateTime(3)
+  createdAt DateTime @default(now()) @db.DateTime(3)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model LoginAttempt {
+  key         String    @id @db.VarChar(64)
+  count       Int       @default(0)
+  windowStart DateTime  @default(now()) @db.DateTime(3)
+  lockedUntil DateTime? @db.DateTime(3)
+}
+
+model Vendor {
+  companyId      String               @db.VarChar(100)
+  company        Company              @relation(fields: [companyId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  id             String               @id @default(cuid()) @db.VarChar(100)
+  name           String               @db.VarChar(200)
+  email          String?              @db.VarChar(254)
+  trn            String?              @db.VarChar(40)
+  currency       String               @default("AED") @db.Char(3)
+  externalCrmId  String?              @db.VarChar(100)
+  externalZohoId String?              @db.VarChar(100)
+  isDemo         Boolean              @default(false)
+  createdAt      DateTime             @default(now()) @db.DateTime(3)
+  bills          Bill[]
+  ocrTemplates   OcrTemplate[]
+  booksMappings  VendorBooksMapping[]
+
+  @@unique([id, companyId])
+  @@unique([companyId, externalCrmId])
+  @@unique([companyId, externalZohoId])
+  @@index([name])
+  @@index([companyId])
+}
+
+model VendorBooksMapping {
+  id               String   @id @default(cuid()) @db.VarChar(100)
+  vendorId         String   @db.VarChar(100)
+  organizationId   String   @db.VarChar(100)
+  dataCenter       String   @db.VarChar(2)
+  environment      String   @db.VarChar(10)
+  externalVendorId String   @db.VarChar(100)
+  createdAt        DateTime @default(now()) @db.DateTime(3)
+  updatedAt        DateTime @updatedAt @db.DateTime(3)
+  vendor           Vendor   @relation(fields: [vendorId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([vendorId, organizationId, dataCenter, environment], map: "VendorBooksMapping_vendor_destination_key")
+  @@unique([organizationId, dataCenter, environment, externalVendorId], map: "VendorBooksMapping_destination_external_key")
+  @@index([organizationId, dataCenter, environment])
+}
+
+model Job {
+  companyId          String   @db.VarChar(100)
+  company            Company  @relation(fields: [companyId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  id                 String   @id @default(cuid()) @db.VarChar(100)
+  jobNumber          String   @db.VarChar(80)
+  name               String   @db.VarChar(200)
+  customer           String   @db.VarChar(200)
+  contractValue      Decimal? @db.Decimal(18, 2)
+  approvedVariations Decimal  @default(0) @db.Decimal(18, 2)
+  currency           String   @default("AED") @db.Char(3)
+  externalCrmId      String?  @db.VarChar(100)
+  isDemo             Boolean  @default(false)
+  createdAt          DateTime @default(now()) @db.DateTime(3)
+  bills              Bill[]
+  crmSnapshots       CrmJobSnapshot[]
+
+  @@unique([id, companyId])
+  @@unique([companyId, externalCrmId])
+  @@unique([companyId, jobNumber])
+  @@index([name])
+  @@index([companyId])
+}
+
+model Bill {
+  companyId               String           @db.VarChar(100)
+  company                 Company          @relation(fields: [companyId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  id                      String           @id @default(cuid()) @db.VarChar(100)
+  vendorId                String           @db.VarChar(100)
+  jobId                   String           @db.VarChar(100)
+  invoiceNumber           String           @db.VarChar(120)
+  orderNumber             String?          @db.VarChar(120)
+  paymentTerms            PaymentTerm      @default(CUSTOM)
+  normalizedInvoiceNumber String           @db.VarChar(360)
+  invoiceDate             DateTime         @db.Date
+  dueDate                 DateTime?        @db.Date
+  category                String           @db.VarChar(30)
+  currency                String           @db.Char(3)
+  description             String?          @db.Text
+  notes                   String?          @db.Text
+  status                  BillStatus       @default(DRAFT)
+  subtotal                Decimal          @db.Decimal(18, 2)
+  discount                Decimal          @default(0) @db.Decimal(18, 2)
+  vatRate                 Decimal          @default(0) @db.Decimal(5, 2)
+  vatAmount               Decimal          @db.Decimal(18, 2)
+  usesBooksLineTaxes       Boolean          @default(false)
+  total                   Decimal          @db.Decimal(18, 2)
+  paidAmount              Decimal          @default(0) @db.Decimal(18, 2)
+  version                 Int              @default(1)
+  createdById             String           @db.VarChar(100)
+  approvedById            String?          @db.VarChar(100)
+  approvedAt              DateTime?        @db.DateTime(3)
+  createdAt               DateTime         @default(now()) @db.DateTime(3)
+  updatedAt               DateTime         @updatedAt @db.DateTime(3)
+  vendor                  Vendor           @relation(fields: [vendorId, companyId], references: [id, companyId], onDelete: Restrict, onUpdate: Restrict)
+  job                     Job              @relation(fields: [jobId, companyId], references: [id, companyId], onDelete: Restrict, onUpdate: Restrict)
+  createdBy               User             @relation("BillCreator", fields: [createdById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  approvedBy              User?            @relation("BillApprover", fields: [approvedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  lines                   BillLine[]
+  payments                Payment[]
+  documents               Document[]
+  syncRecords             SyncRecord[]
+  ocrDocument             OcrDocument?
+  integrationJobs         IntegrationJob[]
+  liveSyncAuthorization   LiveSyncAuthorization?
+
+  @@unique([vendorId, normalizedInvoiceNumber])
+  @@index([companyId, status, invoiceDate])
+  @@index([jobId, status])
+  @@index([createdById])
+  @@index([status, invoiceDate])
+  @@index([invoiceDate])
+}
+
+model BillLine {
+  id          String  @id @default(cuid()) @db.VarChar(100)
+  billId      String  @db.VarChar(100)
+  description String  @db.Text
+  quantity    Decimal @db.Decimal(14, 3)
+  unitPrice   Decimal @db.Decimal(18, 2)
+  lineTotal   Decimal @db.Decimal(18, 2)
+  booksSelection Json?
+  bill        Bill    @relation(fields: [billId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+
+  @@index([billId])
+}
+
+model Payment {
+  id          String   @id @default(cuid()) @db.VarChar(100)
+  billId      String   @db.VarChar(100)
+  amount      Decimal  @db.Decimal(18, 2)
+  reference   String   @db.VarChar(200)
+  createdById String   @db.VarChar(100)
+  createdAt   DateTime @default(now()) @db.DateTime(3)
+  bill        Bill     @relation(fields: [billId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  createdBy   User     @relation(fields: [createdById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([billId, reference])
+  @@index([billId])
+}
+
+model Document {
+  id             String          @id @default(cuid()) @db.VarChar(100)
+  billId         String          @db.VarChar(100)
+  storageKey     String          @unique @db.VarChar(100)
+  fileName       String          @db.VarChar(200)
+  mimeType       String          @db.VarChar(100)
+  byteSize       Int
+  sha256         String          @db.Char(64)
+  uploadedById   String          @db.VarChar(100)
+  createdAt      DateTime        @default(now()) @db.DateTime(3)
+  bill           Bill            @relation(fields: [billId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  uploadedBy     User            @relation(fields: [uploadedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  scannerImports ScannerImport[]
+
+  @@index([billId])
+}
+
+model SyncRecord {
+  id             String     @id @default(cuid()) @db.VarChar(100)
+  billId         String     @db.VarChar(100)
+  target         SyncTarget
+  status         SyncStatus @default(NOT_CONFIGURED)
+  externalId     String?    @db.VarChar(100)
+  lastError      String?    @db.Text
+  attempts       Int        @default(0)
+  organizationId String?    @db.VarChar(100)
+  lastSyncedAt   DateTime?  @db.DateTime(3)
+  createdAt      DateTime   @default(now()) @db.DateTime(3)
+  updatedAt      DateTime   @updatedAt @db.DateTime(3)
+  bill           Bill       @relation(fields: [billId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([billId, target])
+  @@unique([target, organizationId, externalId])
+}
+
+enum IntegrationJobStatus {
+  QUEUED
+  PROCESSING
+  RETRY
+  UNKNOWN
+  SUCCEEDED
+  FAILED
+  BLOCKED
+  CANCELLED
+}
+
+enum IntegrationOperation {
+  CREATE_BILL
+  ATTACH_DOCUMENT
+  CREATE_EXPENSE
+}
+
+model IntegrationJob {
+  id                     String               @id @default(cuid()) @db.VarChar(100)
+  billId                 String               @db.VarChar(100)
+  target                 SyncTarget
+  operation              IntegrationOperation
+  status                 IntegrationJobStatus @default(QUEUED)
+  idempotencyKey         String               @unique @db.VarChar(255)
+  organizationId         String               @db.VarChar(100)
+  sourceVersion          Int
+  initiatedById          String?              @db.VarChar(100)
+  snapshot               Json
+  payloadHash            String               @db.Char(64)
+  externalId             String?              @db.VarChar(100)
+  documentId             String?              @db.VarChar(100)
+  attempts               Int                  @default(0)
+  reconciliationAttempts Int                  @default(0)
+  needsReconciliation    Boolean              @default(false)
+  nextAttemptAt          DateTime             @default(now()) @db.DateTime(3)
+  leaseToken             String?              @db.VarChar(100)
+  leaseUntil             DateTime?            @db.DateTime(3)
+  lastAttemptAt          DateTime?            @db.DateTime(3)
+  lastError              String?              @db.Text
+  errorCode              String?              @db.VarChar(100)
+  completedAt            DateTime?            @db.DateTime(3)
+  createdAt              DateTime             @default(now()) @db.DateTime(3)
+  updatedAt              DateTime             @updatedAt @db.DateTime(3)
+  bill                   Bill                 @relation(fields: [billId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  initiatedBy            User?                @relation("IntegrationJobInitiator", fields: [initiatedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  history                IntegrationAttempt[]
+  liveSyncAuthorization  LiveSyncAuthorization?
+
+  @@index([status, nextAttemptAt, leaseUntil])
+  @@index([billId, target])
+  @@index([initiatedById])
+}
+
+model IntegrationAttempt {
+  id         String         @id @default(cuid()) @db.VarChar(100)
+  jobId      String         @db.VarChar(100)
+  operation  String         @db.VarChar(100)
+  outcome    String         @db.VarChar(100)
+  errorCode  String?        @db.VarChar(100)
+  safeError  String?        @db.Text
+  externalId String?        @db.VarChar(100)
+  startedAt  DateTime       @db.DateTime(3)
+  finishedAt DateTime       @default(now()) @db.DateTime(3)
+  job        IntegrationJob @relation(fields: [jobId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([jobId, startedAt])
+}
+
+model IntegrationCredential {
+  target                SyncTarget
+  organizationId        String     @db.VarChar(100)
+  dataCenter            String     @db.VarChar(2)
+  connectionFingerprint String     @db.Char(64)
+  refreshTokenEncrypted String     @db.LongText
+  accessTokenEncrypted  String?    @db.LongText
+  accessExpiresAt       DateTime?  @db.DateTime(3)
+  revokedAt             DateTime?  @db.DateTime(3)
+  createdAt             DateTime   @default(now()) @db.DateTime(3)
+  updatedAt             DateTime   @updatedAt @db.DateTime(3)
+
+  @@id([target, organizationId])
+}
+
+model IntegrationOAuthState {
+  tokenHash             String     @id @db.Char(64)
+  target                SyncTarget
+  organizationId        String     @db.VarChar(100)
+  userId                String     @db.VarChar(100)
+  dataCenter            String     @db.VarChar(2)
+  connectionFingerprint String     @db.Char(64)
+  expiresAt             DateTime   @db.DateTime(3)
+  consumedAt            DateTime?  @db.DateTime(3)
+  createdAt             DateTime   @default(now()) @db.DateTime(3)
+
+  @@index([expiresAt])
+}
+
+model AuditLog {
+  companyId  String?  @db.VarChar(100)
+  company    Company? @relation(fields: [companyId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  id         String   @id @default(cuid()) @db.VarChar(100)
+  actorId    String?  @db.VarChar(100)
+  action     String   @db.VarChar(100)
+  entityType String   @db.VarChar(100)
+  entityId   String   @db.VarChar(100)
+  details    Json
+  createdAt  DateTime @default(now()) @db.DateTime(3)
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([companyId, createdAt])
+  @@index([entityType, entityId, createdAt])
+  @@index([createdAt])
+}
+
+model OcrBatch {
+  companyId   String        @db.VarChar(100)
+  company     Company       @relation(fields: [companyId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  id          String        @id @default(cuid()) @db.VarChar(100)
+  createdById String        @db.VarChar(100)
+  createdAt   DateTime      @default(now()) @db.DateTime(3)
+  createdBy   User          @relation(fields: [createdById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  documents   OcrDocument[]
+
+  @@index([companyId, createdById, createdAt])
+  @@index([createdById, createdAt])
+}
+
+model OcrDocument {
+  id                String          @id @default(cuid()) @db.VarChar(100)
+  batchId           String          @db.VarChar(100)
+  status            OcrStatus       @default(QUEUED)
+  storageKey        String          @unique @db.VarChar(100)
+  fileName          String          @db.VarChar(200)
+  mimeType          String          @db.VarChar(100)
+  byteSize          Int
+  sha256            String          @db.Char(64)
+  version           Int             @default(1)
+  attempts          Int             @default(0)
+  pollCount         Int             @default(0)
+  nextAttemptAt     DateTime        @default(now()) @db.DateTime(3)
+  leaseUntil        DateTime?       @db.DateTime(3)
+  leaseToken        String?         @db.VarChar(100)
+  providerRequestId String?         @db.VarChar(200)
+  extraction        Json?
+  verifiedInput     Json?
+  lastError         String?         @db.Text
+  failureCode       String?         @db.VarChar(100)
+  templateId        String?         @db.VarChar(100)
+  reviewedById      String?         @db.VarChar(100)
+  reviewedAt        DateTime?       @db.DateTime(3)
+  billId            String?         @unique @db.VarChar(100)
+  createdAt         DateTime        @default(now()) @db.DateTime(3)
+  updatedAt         DateTime        @updatedAt @db.DateTime(3)
+  batch             OcrBatch        @relation(fields: [batchId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  reviewedBy        User?           @relation(fields: [reviewedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  bill              Bill?           @relation(fields: [billId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  template          OcrTemplate?    @relation(fields: [templateId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  scannerImports    ScannerImport[]
+
+  @@unique([batchId, sha256])
+  @@index([status, nextAttemptAt, leaseUntil])
+  @@index([sha256])
+}
+
+model OcrTemplate {
+  id          String        @id @default(cuid()) @db.VarChar(100)
+  vendorId    String        @db.VarChar(100)
+  version     Int
+  name        String        @db.VarChar(200)
+  mappings    Json
+  active      Boolean       @default(true)
+  createdById String        @db.VarChar(100)
+  createdAt   DateTime      @default(now()) @db.DateTime(3)
+  vendor      Vendor        @relation(fields: [vendorId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  createdBy   User          @relation(fields: [createdById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  documents   OcrDocument[]
+
+  @@unique([vendorId, version])
+  @@index([vendorId, active])
+}
+
+// Explicit local companies; external destination labels never grant membership.
+model Company {
+  id                      String                          @id @default(cuid()) @db.VarChar(100)
+  name                    String                          @db.VarChar(200)
+  active                  Boolean                         @default(true)
+  isDemo                  Boolean                         @default(true)
+  liveAccountingEnabled   Boolean                         @default(false)
+  createdAt               DateTime                        @default(now()) @db.DateTime(3)
+  memberships             UserCompanyMembership[]
+  integrationDestinations CompanyIntegrationDestination[]
+  crmSource               CompanyCrmSource?
+  vendors                 Vendor[]
+  jobs                    Job[]
+  bills                   Bill[]
+  booksBills              BooksBill[]
+  booksProjectAssociations BooksProjectAssociation[]
+  booksImportRuns         BooksImportRun[]
+  incomingSyncStates      IncomingSyncState[]
+  crmJobSnapshots         CrmJobSnapshot[]
+  ocrBatches              OcrBatch[]
+  auditLogs               AuditLog[]
+  scannerSources          ScannerSource[]
+  liveSyncAuthorizations   LiveSyncAuthorization[]
+}
+
+// Provider snapshots are deliberately separate from locally authored accounting bills.
+// They never enter the outgoing integration queue or invent local jobs/payments.
+model BooksImportRun {
+  id                 String    @id @default(cuid()) @db.VarChar(100)
+  companyId          String    @db.VarChar(100)
+  organizationId     String    @db.VarChar(100)
+  organizationName   String    @db.VarChar(200)
+  dataCenter         String    @db.VarChar(2)
+  environment        String    @db.VarChar(10)
+  initiatedById      String    @db.VarChar(100)
+  status             String    @default("RUNNING") @db.VarChar(20)
+  runKind            String    @default("FULL") @db.VarChar(20)
+  lastPage           Int       @default(0)
+  lastPageHash       String?   @db.Char(64)
+  listingComplete    Boolean   @default(false)
+  listedCount        Int       @default(0)
+  detailCount        Int       @default(0)
+  lastErrorCode      String?   @db.VarChar(100)
+  startedAt          DateTime  @default(now()) @db.DateTime(3)
+  completedAt        DateTime? @db.DateTime(3)
+  company            Company   @relation(fields: [companyId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  initiatedBy        User      @relation(fields: [initiatedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  bills              BooksBill[] @relation("BooksBillListing")
+  detailedBills      BooksBill[] @relation("BooksBillDetail")
+
+  @@unique([id, companyId])
+  @@index([companyId, startedAt])
+  @@index([organizationId, dataCenter, environment, status], map: "BooksImportRun_destination_status_idx")
+}
+
+model BooksBill {
+  id                   String    @id @default(cuid()) @db.VarChar(100)
+  companyId            String    @db.VarChar(100)
+  organizationId       String    @db.VarChar(100)
+  organizationName     String    @db.VarChar(200)
+  dataCenter           String    @db.VarChar(2)
+  environment          String    @db.VarChar(10)
+  externalBillId       String    @db.VarChar(100)
+  billNumber           String    @db.VarChar(500)
+  vendorId             String    @db.VarChar(100)
+  vendorName           String    @db.VarChar(500)
+  status               String    @db.VarChar(100)
+  currencyCode         String    @db.Char(3)
+  billDate             DateTime? @db.Date
+  dueDate              DateTime? @db.Date
+  // Exact provider decimal text, without local rounding or inferred payment values.
+  subtotal             String?   @db.VarChar(100)
+  taxTotal             String?   @db.VarChar(100)
+  total                String    @db.VarChar(100)
+  balance              String    @db.VarChar(100)
+  paymentMade          String?   @db.VarChar(100)
+  vendorCreditsApplied String?   @db.VarChar(100)
+  sourceModifiedAt     String?   @db.VarChar(60)
+  sourceSummary        Json
+  sourceDetail         Json?
+  lastImportRunId      String    @db.VarChar(100)
+  detailImportRunId    String?   @db.VarChar(100)
+  importedAt           DateTime  @default(now()) @db.DateTime(3)
+  lastSeenAt           DateTime  @db.DateTime(3)
+  detailFetchedAt      DateTime? @db.DateTime(3)
+  isStale              Boolean   @default(false)
+  company              Company   @relation(fields: [companyId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  lastImportRun        BooksImportRun @relation("BooksBillListing", fields: [lastImportRunId, companyId], references: [id, companyId], onDelete: Restrict, onUpdate: Restrict)
+  detailImportRun      BooksImportRun? @relation("BooksBillDetail", fields: [detailImportRunId, companyId], references: [id, companyId], onDelete: Restrict, onUpdate: Restrict)
+  attachments          BooksBillAttachment[]
+
+  @@unique([id, companyId, organizationId, dataCenter, environment], map: "BooksBill_attachment_scope_key")
+  @@unique([organizationId, dataCenter, environment, externalBillId], map: "BooksBill_destination_external_key")
+  @@index([companyId, status, billDate])
+  @@index([companyId, currencyCode, billDate])
+  @@index([companyId, billNumber])
+  @@index([lastImportRunId, companyId])
+  @@index([detailImportRunId, companyId])
+}
+
+// Original provider bytes remain private; a source document ID is scoped to its bill.
+model BooksBillAttachment {
+  id                 String   @id @default(cuid()) @db.VarChar(100)
+  billId             String   @db.VarChar(100)
+  companyId          String   @db.VarChar(100)
+  organizationId     String   @db.VarChar(100)
+  dataCenter         String   @db.VarChar(2)
+  environment        String   @db.VarChar(10)
+  externalDocumentId String   @db.VarChar(100)
+  sourceMetadata     Json
+  sourceMetadataHash String   @db.Char(64)
+  storageKey         String   @unique @db.VarChar(100)
+  fileName           String   @db.VarChar(200)
+  mimeType           String   @db.VarChar(100)
+  byteSize           Int
+  sha256             String   @db.Char(64)
+  downloadedAt       DateTime @db.DateTime(3)
+  importedAt         DateTime @default(now()) @db.DateTime(3)
+  bill               BooksBill @relation(fields: [billId, companyId, organizationId, dataCenter, environment], references: [id, companyId, organizationId, dataCenter, environment], onDelete: Restrict, onUpdate: Restrict, map: "BooksBillAttachment_scope_fkey")
+
+  @@unique([billId, externalDocumentId])
+  @@index([billId, companyId, organizationId, dataCenter, environment], map: "BooksBillAttachment_scope_idx")
+  @@index([companyId, downloadedAt])
+}
+
+// Exact Books project -> Zoho Projects -> CRM references. History only: never an accounting allocation.
+model BooksProjectAssociation {
+  id                   String   @id @default(cuid()) @db.VarChar(100)
+  companyId            String   @db.VarChar(100)
+  organizationId       String   @db.VarChar(100)
+  dataCenter           String   @db.VarChar(2)
+  environment          String   @db.VarChar(10)
+  booksProjectId       String   @db.VarChar(100)
+  projectName          String   @db.VarChar(500)
+  zprojectsProjectId   String   @db.VarChar(100)
+  portalId             String   @db.VarChar(100)
+  crmOrganizationId    String   @db.VarChar(100)
+  crmDataCenter        String   @db.VarChar(2)
+  crmEnvironment       String   @db.VarChar(10)
+  dealIds              Json
+  sourceProject        Json
+  sourceDealsPages     Json
+  sourceCrmRecords     Json
+  sourceHash           String   @db.Char(64)
+  status               String   @default("VERIFIED") @db.VarChar(20)
+  verifiedAt           DateTime @db.DateTime(3)
+  validUntil           DateTime @db.DateTime(3)
+  nextRefreshAt        DateTime @db.DateTime(3)
+  lastAttemptAt        DateTime @db.DateTime(3)
+  lastErrorCode        String?  @db.VarChar(100)
+  failures             Int      @default(0)
+  backoffUntil         DateTime? @db.DateTime(3)
+  leaseToken           String?  @db.VarChar(64)
+  leaseExpiresAt       DateTime? @db.DateTime(3)
+  importedAt           DateTime @default(now()) @db.DateTime(3)
+  updatedAt            DateTime @updatedAt @db.DateTime(3)
+  company              Company  @relation(fields: [companyId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([organizationId, dataCenter, environment, booksProjectId], map: "BooksProjectAssociation_source_project_key")
+  @@index([companyId, status, validUntil], map: "BooksProjectAssociation_company_status_idx")
+  @@index([nextRefreshAt], map: "BooksProjectAssociation_refresh_idx")
+  @@index([crmOrganizationId, crmDataCenter, crmEnvironment], map: "BooksProjectAssociation_crm_source_idx")
+}
+
+// Complete CRM inventory, including records that cannot safely become local jobs.
+model CrmImportRun {
+  id                   String    @id @default(cuid()) @db.VarChar(100)
+  crmOrganizationId    String    @db.VarChar(100)
+  dataCenter           String    @db.VarChar(2)
+  environment          String    @db.VarChar(10)
+  sourceModule         String    @db.VarChar(100)
+  initiatedById        String    @db.VarChar(100)
+  scopeHash            String    @db.Char(64)
+  mappingJson          Json
+  fieldsJson           Json
+  status               String    @default("RUNNING") @db.VarChar(20)
+  runKind              String    @default("FULL") @db.VarChar(20)
+  lastPage             Int       @default(0)
+  lastPageHash         String?   @db.Char(64)
+  nextPageToken        String?   @db.Text
+  listingComplete      Boolean   @default(false)
+  snapshotCount        Int       @default(0)
+  mappedCount          Int       @default(0)
+  canonicalCount       Int       @default(0)
+  unassignedCount      Int       @default(0)
+  reviewCount          Int       @default(0)
+  lastErrorCode        String?   @db.VarChar(100)
+  startedAt            DateTime  @default(now()) @db.DateTime(3)
+  completedAt          DateTime? @db.DateTime(3)
+  initiatedBy          User      @relation(fields: [initiatedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  snapshots            CrmJobSnapshot[]
+
+  @@index([crmOrganizationId, dataCenter, environment, startedAt], map: "CrmImportRun_source_started_idx")
+}
+
+// Durable incoming provider reads. Lease fencing and checkpoints survive restarts.
+model IncomingSyncState {
+  id                  String    @id @default(cuid()) @db.VarChar(100)
+  target              String    @db.VarChar(10)
+  organizationId      String    @db.VarChar(100)
+  dataCenter          String    @db.VarChar(2)
+  environment         String    @db.VarChar(10)
+  companyId           String?   @db.VarChar(100)
+  scopeHash           String    @db.Char(64)
+  status              String    @default("PENDING") @db.VarChar(20)
+  checkpoint          Json?
+  watermark           DateTime? @db.DateTime(3)
+  lastReconciledAt     DateTime? @db.DateTime(3)
+  nextRunAt           DateTime  @default(now()) @db.DateTime(3)
+  backoffUntil        DateTime? @db.DateTime(3)
+  lastAttemptAt       DateTime? @db.DateTime(3)
+  lastSuccessAt       DateTime? @db.DateTime(3)
+  lastHeartbeatAt     DateTime? @db.DateTime(3)
+  lastErrorCode       String?   @db.VarChar(100)
+  failures            Int       @default(0)
+  processedCount      Int       @default(0)
+  providerReads       Int       @default(0)
+  leaseToken          String?   @db.VarChar(64)
+  leaseExpiresAt      DateTime? @db.DateTime(3)
+  createdAt           DateTime  @default(now()) @db.DateTime(3)
+  updatedAt           DateTime  @updatedAt @db.DateTime(3)
+  company             Company?  @relation(fields: [companyId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([target, organizationId, dataCenter, environment], map: "IncomingSyncState_source_key")
+  @@index([nextRunAt, leaseExpiresAt])
+  @@index([companyId])
+}
+
+model CrmJobSnapshot {
+  id                   String    @id @default(cuid()) @db.VarChar(100)
+  crmOrganizationId    String    @db.VarChar(100)
+  dataCenter           String    @db.VarChar(2)
+  environment          String    @db.VarChar(10)
+  sourceModule         String    @db.VarChar(100)
+  externalCrmId        String    @db.VarChar(100)
+  companyId            String?   @db.VarChar(100)
+  booksOrganizationId  String?   @db.VarChar(100)
+  jobNumber            String?   @db.Text
+  normalizedJobNumber  String?   @db.VarChar(255)
+  name                 String?   @db.Text
+  customerId           String?   @db.VarChar(100)
+  customerName         String?   @db.Text
+  currencyCode         String?   @db.VarChar(20)
+  amount               String?   @db.VarChar(100)
+  approvedVariations   String?   @db.VarChar(100)
+  stage                String?   @db.Text
+  canonicalJobId       String?   @db.VarChar(100)
+  linkStatus           String    @default("PENDING") @db.VarChar(40)
+  sourceModifiedAt     String?   @db.VarChar(60)
+  sourceRecordJson     Json
+  importRunId          String    @db.VarChar(100)
+  importedAt           DateTime  @default(now()) @db.DateTime(3)
+  lastSeenAt           DateTime  @db.DateTime(3)
+  isStale              Boolean   @default(false)
+  company              Company? @relation(fields: [companyId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  canonicalJob         Job?      @relation(fields: [canonicalJobId, companyId], references: [id, companyId], onDelete: Restrict, onUpdate: Restrict)
+  importRun            CrmImportRun @relation(fields: [importRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([crmOrganizationId, dataCenter, environment, sourceModule, externalCrmId], map: "CrmJobSnapshot_source_external_key")
+  @@index([companyId, normalizedJobNumber])
+  @@index([companyId, canonicalJobId])
+  @@index([canonicalJobId, companyId])
+  @@index([importRunId, linkStatus])
+}
+
+model UserCompanyMembership {
+  userId    String   @db.VarChar(100)
+  companyId String   @db.VarChar(100)
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now()) @db.DateTime(3)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@id([userId, companyId])
+  @@index([companyId, active])
+}
+
+model CompanyIntegrationDestination {
+  companyId      String     @db.VarChar(100)
+  target         SyncTarget
+  organizationId String     @db.VarChar(100)
+  dataCenter     String     @db.VarChar(2)
+  environment    String     @db.VarChar(10)
+  createdAt      DateTime   @default(now()) @db.DateTime(3)
+  liveEnabled                Boolean   @default(false)
+  verifiedAt                 DateTime? @db.DateTime(3)
+  verificationReference      String?   @db.VarChar(160)
+  verifiedConfigurationHash  String?   @db.Char(64)
+  company        Company    @relation(fields: [companyId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@id([companyId, target, organizationId, dataCenter, environment])
+  @@unique([target, organizationId, dataCenter, environment], map: "CompanyIntegrationDestination_destination_key")
+}
+
+// A shared read source is distinct from a company's unique accounting destination.
+model CompanyCrmSource {
+  companyId      String   @id @db.VarChar(100)
+  organizationId String   @db.VarChar(100)
+  dataCenter     String   @db.VarChar(2)
+  environment    String   @db.VarChar(10)
+  createdAt      DateTime @default(now()) @db.DateTime(3)
+  company        Company  @relation(fields: [companyId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([organizationId, dataCenter, environment])
+}
+
+model LiveSyncAuthorization {
+  id                String   @id @default(cuid()) @db.VarChar(100)
+  purpose           String   @default("LIVE") @db.VarChar(32)
+  localProof        Json?
+  localProofHash    String?  @db.Char(64)
+  billId            String   @unique @db.VarChar(100)
+  companyId         String   @db.VarChar(100)
+  actorId           String   @db.VarChar(100)
+  organizationId    String   @db.VarChar(100)
+  dataCenter        String   @db.VarChar(2)
+  sourceVersion     Int
+  challengeHash     String   @db.Char(64)
+  payloadHash       String   @db.Char(64)
+  configurationHash String   @db.Char(64)
+  expiresAt         DateTime @db.DateTime(3)
+  confirmedAt       DateTime? @db.DateTime(3)
+  revokedAt         DateTime? @db.DateTime(3)
+  canonicalJobId    String?  @unique @db.VarChar(100)
+  createdAt         DateTime @default(now()) @db.DateTime(3)
+  bill              Bill    @relation(fields: [billId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  company           Company @relation(fields: [companyId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  actor             User    @relation(fields: [actorId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  canonicalJob      IntegrationJob? @relation(fields: [canonicalJobId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([companyId, expiresAt])
+}
+
+model HubUserBinding {
+  issuer        String   @db.VarChar(191)
+  subject       String   @db.VarChar(191)
+  billingUserId String   @db.VarChar(100)
+  createdAt     DateTime @default(now()) @db.DateTime(3)
+  billingUser   User     @relation(fields: [billingUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@id([issuer, subject])
+  @@index([billingUserId])
+}
+
+model HubBridgeNonce {
+  nonceHash String   @id @db.Char(64)
+  expiresAt DateTime @db.DateTime(3)
+  createdAt DateTime @default(now()) @db.DateTime(3)
+
+  @@index([expiresAt])
+}
+
+// Machine intake credentials are separate from staff sessions and financial permissions.
+model ScannerSource {
+  id           String          @id @default(cuid()) @db.VarChar(100)
+  companyId    String          @db.VarChar(100)
+  uploadedById String          @db.VarChar(100)
+  name         String          @db.VarChar(200)
+  active       Boolean         @default(false)
+  tokenHash    String          @unique @db.Char(64)
+  createdAt    DateTime        @default(now()) @db.DateTime(3)
+  updatedAt    DateTime        @updatedAt @db.DateTime(3)
+  company      Company         @relation(fields: [companyId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  uploadedBy   User            @relation(fields: [uploadedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  imports      ScannerImport[]
+
+  @@index([companyId, active])
+  @@index([uploadedById])
+}
+
+// Handoff receipts survive lost HTTP replies/restarts. OCR processing remains in OcrDocument.
+model ScannerImport {
+  id            String              @id @default(cuid()) @db.VarChar(100)
+  sourceId      String              @db.VarChar(100)
+  sha256        String              @db.Char(64)
+  byteSize      Int
+  status        ScannerImportStatus
+  ocrDocumentId String?             @db.VarChar(100)
+  documentId    String?             @db.VarChar(100)
+  failureCode   String?             @db.VarChar(100)
+  createdAt     DateTime            @default(now()) @db.DateTime(3)
+  updatedAt     DateTime            @updatedAt @db.DateTime(3)
+  source        ScannerSource       @relation(fields: [sourceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  ocrDocument   OcrDocument?        @relation(fields: [ocrDocumentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  document      Document?           @relation(fields: [documentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([sourceId, sha256])
+  @@index([sourceId, createdAt])
+  @@index([ocrDocumentId])
+  @@index([documentId])
+}

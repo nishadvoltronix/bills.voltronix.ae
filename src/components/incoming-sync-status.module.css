@@ -1,0 +1,35 @@
+.panel {
+  margin-bottom: 22px;
+  padding: 18px 22px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.heading, .sourceHeading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.heading h2 { font-size: 14px; font-weight: 600; }
+.heading p, .sourceHeading p, .footnote { color: #64748b; }
+.heading button { flex-shrink: 0; }
+.overview, .badges { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; }
+.overview { margin-top: 12px; }
+.warning { color: #985f23; margin-top: 8px; }
+.details { margin-top: 12px; }
+.details summary { cursor: pointer; font-weight: 600; color: #465163; width: fit-content; }
+.details summary:focus-visible { outline: 2px solid #df743e; outline-offset: 4px; }
+.sources { margin-top: 12px; display: grid; gap: 10px; }
+.source { border: 1px solid #e6ebf1; border-radius: 7px; padding: 14px; min-width: 0; }
+.source h3 { font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
+.times { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 10px; }
+.times dt { font-size: 10px; color: #64748b; }
+.times dd { margin: 0; color: #334155; overflow-wrap: anywhere; }
+.message { color: #64748b; margin-top: 8px; overflow-wrap: anywhere; }
+.footnote { font-size: 10px; margin-top: 8px; }
+@media (max-width: 600px) {
+  .panel { padding: 16px; }
+  .heading, .sourceHeading { flex-direction: column; gap: 7px; }
+  .heading button { align-self: flex-start; }
+  .times { grid-template-columns: minmax(0, 1fr); }
+}
