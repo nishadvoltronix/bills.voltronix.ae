@@ -113,10 +113,12 @@ export function authorizationUrl(config: ZohoConfig, state: string) {
         ]
       : [
           "ZohoCRM.modules.deals.READ",
+          "ZohoCRM.modules.custom.READ",
           "ZohoSearch.securesearch.READ",
           "ZohoCRM.modules.vendors.READ",
           "ZohoCRM.settings.modules.READ",
           "ZohoCRM.settings.fields.READ",
+          "ZohoCRM.settings.related_lists.READ",
           "ZohoCRM.org.READ",
           "ZohoProjects.portals.READ",
           "ZohoProjects.clients.READ",

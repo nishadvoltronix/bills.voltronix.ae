@@ -20,10 +20,12 @@ const actor: Actor = {
 };
 const crmReadScopes = [
   "ZohoCRM.modules.deals.READ",
+  "ZohoCRM.modules.custom.READ",
   "ZohoSearch.securesearch.READ",
   "ZohoCRM.modules.vendors.READ",
   "ZohoCRM.settings.modules.READ",
   "ZohoCRM.settings.fields.READ",
+  "ZohoCRM.settings.related_lists.READ",
   "ZohoCRM.org.READ",
   "ZohoProjects.portals.READ",
   "ZohoProjects.clients.READ",
@@ -87,7 +89,7 @@ describe("CRM connection setup boundaries", () => {
     },
   );
 
-  it("requests exactly the CRM and Projects association read scopes with its own callback and offline consent", () => {
+  it("requests CRM custom-job and related-list reads alongside Projects association reads with its own offline consent", () => {
     const crm = new URL(
       oauth.authorizationUrl(getConfig("CRM"), "fictional-crm-state"),
     );
@@ -101,7 +103,8 @@ describe("CRM connection setup boundaries", () => {
     expect(crm.searchParams.get("scope")?.split(",").filter(scope => scope.startsWith("ZohoProjects."))).toEqual([
       "ZohoProjects.portals.READ", "ZohoProjects.clients.READ",
     ]);
-    expect(crm.searchParams.get("scope")).not.toContain("ZohoCRM.settings.related_lists");
+    expect(crm.searchParams.get("scope")?.split(",")).toContain("ZohoCRM.modules.custom.READ");
+    expect(crm.searchParams.get("scope")?.split(",")).toContain("ZohoCRM.settings.related_lists.READ");
     expect(crm.searchParams.get("redirect_uri")).toBe(
       "http://127.0.0.1:3000/api/integrations/oauth/crm/callback",
     );

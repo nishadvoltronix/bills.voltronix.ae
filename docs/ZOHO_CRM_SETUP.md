@@ -94,10 +94,12 @@ The CRM authorization flow requests these read scopes:
 
 ```text
 ZohoCRM.modules.deals.READ
+ZohoCRM.modules.custom.READ
 ZohoSearch.securesearch.READ
 ZohoCRM.modules.vendors.READ
 ZohoCRM.settings.modules.READ
 ZohoCRM.settings.fields.READ
+ZohoCRM.settings.related_lists.READ
 ZohoCRM.org.READ
 ZohoProjects.portals.READ
 ZohoProjects.clients.READ
@@ -105,7 +107,9 @@ ZohoProjects.clients.READ
 
 The two Zoho Projects scopes were added on 30 October 2026 to read existing project-to-CRM-job associations. `ZohoProjects.portals.READ` permits portal discovery through `GET /api/v3.1/portals`; `ZohoProjects.clients.READ` permits client/customer reads, including `GET /api/v3/portal/{portal_id}/projects/{project_id}/crm/deals`. The latter returns associated CRM Deal IDs. See the official [portal API](https://projectsapi.zoho.com/api-docs/portals) and [project CRM associations API](https://projectsapi.zoho.com/api-docs/clients_and_customers/project_customers).
 
-An existing grant requires owner consent again through `/account/crm-authorization` to obtain these added permissions. Changing the requested scopes does not expand a saved token automatically. The consent page describes the requested reads before redirecting to Zoho. No CRM related-list metadata scope or Projects write scope is requested. After consent, exact portal/project/CRM identities and company boundaries must still be verified before associating bill history. Multiple CRM deals may share a project; that association alone does not establish each job's allocated invoice cost.
+The custom-module and related-list metadata read scopes were added on 31 October 2026 after Zoho rejected the exact Deal's related `Jobs` lookup and related-list metadata with `OAUTH_SCOPE_MISMATCH`. `ZohoCRM.modules.custom.READ` permits reading custom CRM records, including native Jobs; `ZohoCRM.settings.related_lists.READ` permits discovering their actual related-list endpoints. See [related records](https://www.zoho.com/crm/developer/docs/api/v8/get-related-records.html) and [related-list metadata](https://www.zoho.com/crm/developer/docs/api/v8/related-list-meta.html).
+
+An existing grant requires owner consent again through `/account/crm-authorization` to obtain these added permissions. Changing the requested scopes or copying an existing refresh token does not expand that token automatically. The consent page describes the requested reads before redirecting to Zoho. No Projects write scope is requested. After consent, exact portal/project/CRM identities and company boundaries must still be verified before associating bill history. Multiple CRM deals may share a project; that association alone does not establish each job's allocated invoice cost. Permission to inspect a native CRM Job does not by itself create a Books project association or change the current history importer.
 
 No CRM CREATE, UPDATE or DELETE scope is requested. Keep credentials private and enable provider networking only within the authorized account/environment scope. The legacy bulk import guard remains unchanged. Development job selection retains its disabled-write restriction. Production Job-ID lookup and local selection use a separate operational branch: valid production runtime and verified database TLS, a real company with current user access, its exact verified Books destination/accounting hash, explicit CRM mapping/source, and current read authorization are required. It works with Books writes enabled after company verification. All provider calls in this lookup remain reads; selection only saves the verified job locally.
 

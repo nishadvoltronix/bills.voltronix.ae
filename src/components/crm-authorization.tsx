@@ -55,15 +55,18 @@ export function CrmAuthorization() {
   }
   return <>
     <PageHeader eyebrow="ADMINISTRATOR" title="Connect Zoho CRM"
-      description="Authorize job lookup and read existing Zoho Projects links to CRM jobs for the assigned companies." />
+      description="Authorize job lookup and read existing CRM and Zoho Projects relationships for the assigned companies." />
     <Notice>Sign in and approve access on Zoho&apos;s website. Refresh tokens are encrypted and kept on this server. These permissions allow reading existing records and project associations. Authorizing does not create or change jobs, projects or bills in Zoho.</Notice>
     <Card className="form-card">
       <h2>Read permissions requested</h2>
       <ul>
-        <li>Zoho CRM: jobs, suppliers, search results, organization details and field/module information.</li>
+        <li>Zoho CRM: deals, suppliers, search results and organization details.</li>
+        <li>CRM custom modules, including Jobs: read existing records and their related records.</li>
+        <li>CRM metadata: read field, module and related-list definitions to identify the available record relationships.</li>
         <li>Zoho Projects: portal details and client/customer records, including existing links between projects and CRM jobs.</li>
       </ul>
-      <p>Reconnect an existing authorization to approve the added Zoho Projects read permissions. A saved grant alone does not confirm these permissions or a job&apos;s bill history.</p>
+      <p>Reconnect an existing authorization to approve the added CRM custom-module and related-list metadata read permissions, along with the Zoho Projects read permissions. Existing grants do not gain new permissions automatically.</p>
+      <p>Reconnecting allows these source checks. A job&apos;s bill links still need to be verified against the source records before its bill history can appear.</p>
     </Card>
     {error && <Notice tone="error" onClose={() => setError("")}>{error}</Notice>}
     {state.loading ? <LoadingPanel /> : state.error || !state.data ? <ErrorState message={state.error ?? "CRM authorization status is unavailable."} retry={state.reload} />
