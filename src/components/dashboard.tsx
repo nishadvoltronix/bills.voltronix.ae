@@ -20,7 +20,7 @@ import {
   Clock3,
   FileCheck2,
 } from "lucide-react";
-import { useApi, money, number, dateTime } from "./api";
+import { useApi, money, number } from "./api";
 import type { Dashboard } from "./types";
 import { useManualEntryOnly, useOcrWorkspaceEnabled, useUser } from "./app-shell";
 import {
@@ -41,7 +41,7 @@ import { CompanySelect } from "./company-select";
 import { DashboardSearch } from "./dashboard-search";
 import { ImportedBillsTable } from "./imported-bills-table";
 import { accountDisplayName } from "./account-display-name";
-import { IncomingSyncStatusPanel } from "./incoming-sync-status";
+import { IncomingSyncRefresh } from "./incoming-sync-status";
 import styles from "./dashboard-overview.module.css";
 
 export function DashboardPage({
@@ -100,6 +100,16 @@ export function DashboardPage({
         )}
       </PageHeader>
       <DashboardSearch companyId={companyId} />
+      {!management && canCreate && (
+        <div className={styles.entryActions}>
+          <Button asChild className={styles.entryButton}>
+            <Link href="/bills/manual">
+              <PenLine size={24} />
+              Manual entry
+            </Link>
+          </Button>
+        </div>
+      )}
       {filtersOpen && (
         <Card className="filter-panel dashboard-filters">
           <CompanySelect
@@ -147,27 +157,11 @@ export function DashboardPage({
           </p>
         </Card>
       )}
-      {!ownScope && !manualEntryOnly && <IncomingSyncStatusPanel companyId={companyId} onUpdated={state.reload} />}
+      {!ownScope && !manualEntryOnly && <IncomingSyncRefresh companyId={companyId} onUpdated={state.reload} />}
       {state.error ? (
         <ErrorState message={state.error} retry={state.reload} />
       ) : (
         <>
-          {d?.source && !ownScope && <Card className={styles.source} aria-label="Financial data sources">
-            <div className={styles.sourceHeading}>
-              <h2>Recorded financial data · {currency}</h2>
-              <Link href="/bills/books" className="text-link">View Zoho Books history <ArrowRight size={14} /></Link>
-            </div>
-            <p>{number(d.source.booksBillCount)} Zoho Books bills and {number(d.source.nativeBillCount)} workspace bills in this view.
-              {d.source.excludedDuplicateNativeCount > 0 && ` ${number(d.source.excludedDuplicateNativeCount)} linked workspace ${d.source.excludedDuplicateNativeCount === 1 ? "bill is" : "bills are"} already counted in Books and excluded from duplicate totals.`}
-            </p>
-            {d.source.crmJobCount !== undefined && <p>{number(d.source.crmJobCount)} imported CRM records with a job reference in the selected companies.
-              {d.source.crmReviewJobCount !== undefined && d.source.crmReviewJobCount > 0 && ` ${number(d.source.crmReviewJobCount)} ${d.source.crmReviewJobCount === 1 ? "record requires review and is" : "records require review and are"} excluded from the contract total.`}
-            </p>}
-            <p>{d.source.booksLatestImportAt ? `Latest Books import: ${dateTime(d.source.booksLatestImportAt)} Dubai.` : "No Books import time is available."}
-              {" "}{d.source.booksListingComplete ? "The imported bill listing is complete." : "The Books bill listing is incomplete; totals may not cover all invoices."}
-            </p>
-            {d.source.notes.length > 0 && <ul>{d.source.notes.map(note => <li key={note}>{note}</li>)}</ul>}
-          </Card>}
           <div className={`metrics-grid ${styles.metrics}`}>
             {state.loading || !m ? (
               [1, 2, 3, 4, 5, 6].map((i) => (
@@ -247,34 +241,14 @@ export function DashboardPage({
               unavailable until all selected jobs have valid values.
             </Notice>
           )}
-          {!management && canCreate && (
+          {!management && canCreate && ocrWorkspaceEnabled && (
             <section className="entry-section">
               <div className="section-label">
                 <h2>Start with a bill</h2>
                 <span>Choose how you’d like to add it</span>
               </div>
               <div className="entry-grid">
-                <Link
-                  className="entry-card entry-card-primary"
-                  href="/bills/manual"
-                >
-                  <div className="entry-icon">
-                    <PenLine size={22} />
-                  </div>
-                  <div>
-                    <h3>Manual entry</h3>
-                    <p>
-                      Add invoice details and allocate
-                      <br className="desktop-break" /> expenses to the right
-                      job.
-                    </p>
-                  </div>
-                  <span className="entry-arrow">
-                    <ArrowUpRight size={19} />
-                  </span>
-                  <span className="entry-card-tag">READY TO USE</span>
-                </Link>
-                {ocrWorkspaceEnabled && <><Link className="entry-card" href="/ocr">
+                <Link className="entry-card" href="/ocr">
                   <div className="entry-icon">
                     <ScanLine size={22} />
                   </div>
@@ -301,7 +275,7 @@ export function DashboardPage({
                   </div>
                   <ArrowUpRight className="entry-arrow" size={19} />
                   <span className="entry-card-tag muted">SETUP REQUIRED</span>
-                </Link></>}
+                </Link>
               </div>
             </section>
           )}
@@ -341,7 +315,7 @@ export function DashboardPage({
                   href="/bills?status=READY"
                   className="attention-row"
                 >
-                  <span className="attention-icon amber">
+                  <span className="attention-icon attention-warning">
                     <FileCheck2 size={18} />
                   </span>
                   <div>

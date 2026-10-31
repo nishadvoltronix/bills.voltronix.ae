@@ -8,7 +8,7 @@ import { api, errorMessage, money, useApi } from "./api";
 import { useManualEntryOnly, useUser } from "./app-shell";
 import type { Company, DashboardSearchResult, Job } from "./types";
 import { Button, Card, EmptyState, Field, Input, LoadingPanel, Notice, PageHeader, Table } from "./ui";
-import searchStyles from "./dashboard-search.module.css";
+import styles from "./manual-bill-entry.module.css";
 
 type CrmJobSuggestion = {
   id: string | null;
@@ -131,7 +131,7 @@ export function ManualBillEntry() {
     <PageHeader eyebrow="MANUAL ENTRY" title="Manual bill entry"
       description="Find a job by its ID, name or an existing bill number. Review its bill history and attachments, then add your invoice." />
     <Card className="manual-job-search-card">
-      <form className="manual-job-search" onSubmit={(event) => {
+      <form className={`manual-job-search ${styles.searchForm}`} onSubmit={(event) => {
         event.preventDefault();
         const next = query.trim();
         if (next.length < 2) return;
@@ -139,14 +139,15 @@ export function ManualBillEntry() {
         if (next === submittedQuery) { matches.reload(); crm.reload(); }
         else setSubmittedQuery(next);
       }}>
-        <Field label="Job ID, bill number or job name" htmlFor="manual-job-query" required hint="Enter at least 2 characters, for example 5383, JOB-5383, an invoice number or a project name.">
+        <Field label="Job ID, bill number or job name" htmlFor="manual-job-query" required>
           <Input id="manual-job-query" value={query} onChange={(event) => { cancelSelection(); setQuery(event.target.value); }}
-            required minLength={2} maxLength={100} autoComplete="off" placeholder="Search a job or existing bill" />
+            required minLength={2} maxLength={100} autoComplete="off" placeholder="Search a job or existing bill" aria-describedby="manual-job-query-hint" />
         </Field>
         <Button type="submit" disabled={query.trim().length < 2 || companies.loading || !!companies.error || !visibleCompanies.length || matches.loading}>
           <Search size={17} />Search
         </Button>
       </form>
+      <p id="manual-job-query-hint" className={styles.searchHint}>Enter at least 2 characters, for example 5383, JOB-5383, an invoice number or a project name.</p>
       <p className="manual-job-search-note">Search saved jobs and bills across your authorized companies. Choose the exact job and company to review its history; an unlinked bill cannot select a job.</p>
       {manualEntryOnly && user.role === "ADMIN" && <Link className="text-link" href="/jobs">Add or manage jobs</Link>}
     </Card>
@@ -155,7 +156,7 @@ export function ManualBillEntry() {
       <Button type="button" variant="secondary" onClick={companies.reload}>Retry companies</Button>
     </Notice>}
     {!companies.loading && companies.data && !visibleCompanies.length && <Notice>No active companies are available for this account.</Notice>}
-    {!hideEmptySavedResults && <Card className="manual-job-results">
+    {!hideEmptySavedResults && <Card className={`manual-job-results ${styles.resultsCard}`}>
       {!searchReady ? <EmptyState title="Find the job before adding a bill"
         description="Search its ID, name or an existing bill number. Choose a matching job to review bills with verified links and their original files." />
         : matches.loading ? <LoadingPanel />
@@ -164,7 +165,9 @@ export function ManualBillEntry() {
             <Button type="button" variant="secondary" onClick={matches.reload}>Retry job search</Button>
           </Notice></div>
             : jobs.length || bills.length ? <>
-              {jobs.length > 0 && <Table>
+              {jobs.length > 0 && <>
+              <div className={`panel-heading ${styles.sectionHeading}`}><h2>{jobs.some(job => job.referenceKind === "CRM_DEAL") ? "Matching jobs and CRM deals" : "Matching jobs"}</h2></div>
+              <Table>
               <caption className="sr-only">{jobs.some(job => job.referenceKind === "CRM_DEAL") ? "Matching jobs and CRM deals" : "Matching jobs"}</caption>
               <thead><tr><th>Reference</th><th>Name</th><th>Company</th><th>Customer</th><th><span className="sr-only">Open history</span></th></tr></thead>
               <tbody>{jobs.map((job) => <tr key={job.id}>
@@ -179,22 +182,22 @@ export function ManualBillEntry() {
                   {job.referenceKind === "CRM_DEAL" ? "View CRM deal history" : job.canonicalJobId ? "View job history" : "Review job"}<ArrowRight size={15} />
                 </Link></Button></td>
               </tr>)}</tbody>
-            </Table>}
-              {bills.length > 0 && <section className={searchStyles.group} aria-label="Matching bills">
-                <h3>Matching bills</h3>
+            </Table></>}
+              {bills.length > 0 && <section className={styles.billResults} aria-label="Matching bills">
+                <div className={`panel-heading ${styles.sectionHeading}`}><h2>Matching bills</h2></div>
                 {bills.map(bill => {
                   const relatedJobs = bill.relatedJobs?.length ? bill.relatedJobs : bill.jobId ? [{ id: bill.jobId,
                     jobNumber: bill.jobNumber || bill.jobId, companyId: bill.companyId, companyName: bill.companyName,
                     canonicalJobId: bill.jobId, href: `/jobs/${encodeURIComponent(bill.jobId)}` }] : [];
-                  return <article key={`${bill.source}:${bill.id}`} className={searchStyles.row} style={{ flexWrap: "wrap" }}>
-                    <div className={searchStyles.identity}><strong>{bill.billNumber}</strong><span>{bill.vendorName}</span>
+                  return <article key={`${bill.source}:${bill.id}`} className={styles.billRow}>
+                    <div className={styles.billIdentity}><strong>{bill.billNumber}</strong><span>{bill.vendorName}</span>
                       <small>{companyNames.get(bill.companyId)} · {bill.source === "BOOKS" ? "Zoho Books" : "Workspace bill"}</small>
                       {!relatedJobs.length && <small>No verified job link</small>}
                       {relatedJobs.some(job => job.canonicalJobId === null) && <small>Verified CRM deal history · Read only</small>}
                       {relatedJobs.length > 1 && <small>Related to multiple {relatedJobs.some(job => job.canonicalJobId === null) ? "source records" : "jobs"}. Choose the history to review.</small>}
                     </div>
-                    <strong className={searchStyles.amount}>{money(bill.total, bill.currency)}</strong>
-                    <div className={searchStyles.actions}>
+                    <strong className={styles.billAmount}>{money(bill.total, bill.currency)}</strong>
+                    <div className={styles.billActions}>
                       <Button asChild variant="secondary" size="sm"><Link href={bill.href}
                         aria-label={`View bill ${bill.billNumber} for ${companyNames.get(bill.companyId)}`}>View bill</Link></Button>
                       {relatedJobs.map(job => <Button key={job.id} asChild variant="secondary" size="sm">
@@ -207,12 +210,12 @@ export function ManualBillEntry() {
                   </article>;
                 })}
               </section>}
-              {matches.data?.hasMore && <p className="manual-job-search-note">More matches are available. Enter a more specific job reference, bill number or name.</p>}
+              {matches.data?.hasMore && <p className={`manual-job-search-note ${styles.resultsNote}`}>More matches are available. Enter a more specific job reference, bill number or name.</p>}
             </> : <EmptyState title="No saved matching job or bill"
                 description={manualEntryOnly ? "Check the reference or name, or ask an administrator to add the job." : "Check the reference or name. You can also review the Zoho CRM results below."} />}
     </Card>}
-    {!manualEntryOnly && <Card className="manual-crm-results" role="region" aria-label="Zoho CRM job search">
-      <div className="panel-heading">
+    {!manualEntryOnly && <Card className={`manual-crm-results ${styles.resultsCard}`} role="region" aria-label="Zoho CRM job search">
+      <div className={`panel-heading ${styles.sectionHeading}`}>
         <div><h2>Zoho CRM matches</h2><p>Choose a CRM job to review its amounts and bills.</p></div>
         {user.role === "ADMIN" && <Button asChild variant="secondary" size="sm"><Link href="/account/crm-authorization">Connect Zoho CRM</Link></Button>}
       </div>
@@ -232,10 +235,10 @@ export function ManualBillEntry() {
               </Notice></div>}
               {crmJobs.length ? <Table>
                 <caption className="sr-only">Zoho CRM matches</caption>
-                <thead><tr><th>Job ID</th><th>Job name</th><th>Company</th><th>Customer</th><th>CRM stage</th><th>Contract value</th><th><span className="sr-only">Use job</span></th></tr></thead>
+                <thead><tr><th>Job ID</th><th>Job name</th><th>Company</th><th>Customer</th><th>CRM stage</th><th className={styles.numericCell}>Contract value</th><th><span className="sr-only">Use job</span></th></tr></thead>
                 <tbody>{crmJobs.map((job) => <tr key={`${job.companyId}:${job.sourceId}:${job.externalCrmId}`}>
                   <td><strong>{job.jobNumber}</strong></td><td>{job.name}</td><td>{companyNames.get(job.companyId)}</td><td>{job.customer}</td>
-                  <td>{job.stage || "Not provided"}</td><td>{money(job.contractValue, job.currency)}</td>
+                  <td>{job.stage || "Not provided"}</td><td className={styles.numericCell}>{money(job.contractValue, job.currency)}</td>
                   <td><Button type="button" variant="secondary" size="sm" disabled={!!currentSelection?.pending}
                     aria-label={`Use CRM job ${job.jobNumber} for ${companyNames.get(job.companyId)}`}
                     onClick={() => void selectCrmJob(job)}>Use CRM job<ArrowRight size={15} /></Button></td>

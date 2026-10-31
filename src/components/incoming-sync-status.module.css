@@ -15,10 +15,10 @@
 .heading button { flex-shrink: 0; }
 .overview, .badges { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; }
 .overview { margin-top: 12px; }
-.warning { color: #985f23; margin-top: 8px; }
+.warning { color: var(--accent-strong); margin-top: 8px; }
 .details { margin-top: 12px; }
 .details summary { cursor: pointer; font-weight: 600; color: #465163; width: fit-content; }
-.details summary:focus-visible { outline: 2px solid #df743e; outline-offset: 4px; }
+.details summary:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: 4px; }
 .sources { margin-top: 12px; display: grid; gap: 10px; }
 .source { border: 1px solid #e6ebf1; border-radius: 7px; padding: 14px; min-width: 0; }
 .source h3 { font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }

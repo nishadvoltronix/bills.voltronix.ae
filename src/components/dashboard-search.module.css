@@ -1,6 +1,6 @@
-.card { padding: 23px; margin-bottom: 25px; border-color: #e4d7c9; background: linear-gradient(105deg, #fffaf4, #fff 55%); }
+.card { padding: 23px; margin-bottom: 25px; border-color: var(--accent-border); background: linear-gradient(105deg, var(--accent-soft), #fff 55%); }
 .heading { display: flex; align-items: flex-start; gap: 13px; margin-bottom: 18px; }
-.icon { display: grid; place-items: center; width: 41px; height: 41px; flex-shrink: 0; border-radius: 10px; color: #ac6a36; background: #f7ead9; }
+.icon { display: grid; place-items: center; width: 41px; height: 41px; flex-shrink: 0; border-radius: 10px; color: var(--accent-hover); background: var(--accent-tint); }
 .heading h2 { font-size: 16px; font-weight: 650; color: #29394b; margin: 0 0 5px; }
 .heading p, .message { font-size: 12px; line-height: 1.7; color: #748091; }
 .heading p { margin: 0; }

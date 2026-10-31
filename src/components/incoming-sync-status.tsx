@@ -36,10 +36,12 @@ function nextCheck(source: IncomingSyncSourceStatus) {
   return "Not scheduled";
 }
 
-export function IncomingSyncStatusPanel({ companyId = "", onUpdated }: {
+type IncomingSyncProps = {
   companyId?: string;
   onUpdated?: () => void;
-}) {
+};
+
+function useIncomingSync({ companyId = "", onUpdated }: IncomingSyncProps) {
   const query = companyId ? `?${new URLSearchParams({ companyId })}` : "";
   const state = useApi<IncomingSyncStatus>(`/api/integrations/incoming-status${query}`, { keepPreviousData: true });
   const { reload } = state;
@@ -68,6 +70,17 @@ export function IncomingSyncStatusPanel({ companyId = "", onUpdated }: {
     if (previous?.companyId === companyId && previous.fingerprint !== fingerprint) onUpdated?.();
   }, [companyId, fingerprint, onUpdated]);
 
+  return state;
+}
+
+export function IncomingSyncRefresh(props: IncomingSyncProps) {
+  useIncomingSync(props);
+  return null;
+}
+
+export function IncomingSyncStatusPanel(props: IncomingSyncProps) {
+  const state = useIncomingSync(props);
+  const { reload } = state;
   const data = state.data;
   const delayed = data?.sources.filter(source => ["RETRY", "WAITING_QUOTA", "BLOCKED"].includes(source.status)).length;
   const stale = data?.sources.filter(source => source.isStale).length;

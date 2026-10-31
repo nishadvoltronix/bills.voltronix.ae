@@ -77,27 +77,7 @@ test.afterEach(async ({ page, baseURL }) => {
   if (baseURL) await page.request.post(`${baseURL}/api/auth/logout`, { headers: { Origin: baseURL } });
 });
 
-test("incoming status distinguishes quota waiting, pending checks and separate original files on mobile", async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.route("**/api/integrations/incoming-status*", route => route.fulfill({ json: incoming }));
-  await page.goto("/dashboard");
-  const panel = page.getByLabel("Incoming Zoho updates", { exact: true });
-  await expect(panel.getByText("Automatic checks active", { exact: true })).toBeVisible();
-  await expect(panel).toContainText("1 source needs attention");
-  await expect(panel).toContainText("2 sources are stale");
-  await panel.locator("summary").click();
-  const books = panel.getByRole("region", { name: `${companies[0].name} Books bills`, exact: true });
-  await expect(books).toContainText("Waiting for Zoho quota");
-  await expect(books).toContainText("30 Oct 2026, 00:02:01 Dubai");
-  const crm = panel.getByRole("region", { name: `${companies[1].name} CRM jobs`, exact: true });
-  await expect(crm).toContainText("Check pending");
-  await expect(crm).toContainText("No successful automatic check yet");
-  await expect(panel).toContainText("A successful bill check does not mean all originals are downloaded.");
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await panel.screenshot({ path: ".local/screenshots/incoming-sync-fixture-mobile.png", animations: "disabled" });
-});
-
-test("incoming status polls every five seconds while visible and reloads dashboard only after a new success", async ({ page }) => {
+test("silent incoming refresh polls every five seconds while visible and recovers after a failed poll", async ({ page }) => {
   await page.clock.install();
   let statusReads = 0, dashboardReads = 0, fail = false;
   let lastSuccessAt = "2026-10-29T10:00:00Z";
@@ -109,11 +89,10 @@ test("incoming status polls every five seconds while visible and reloads dashboa
       backoffUntil: null, lastSuccessAt, message: "The latest source check completed." }] } });
   });
   await page.goto("/dashboard");
-  const panel = page.getByLabel("Incoming Zoho updates", { exact: true });
-  await expect(panel.getByText("Automatic checks active", { exact: true })).toBeVisible();
-  await expect(panel).toContainText("This view refreshes every 5 seconds while visible.");
   await expect.poll(() => dashboardReads).toBe(1);
-  expect(statusReads).toBe(1);
+  await expect.poll(() => statusReads).toBe(1);
+  await expect(metric(page, "Recorded invoice total")).toHaveText("AED 1,200.80");
+  await expect(page.getByLabel("Incoming Zoho updates", { exact: true })).toHaveCount(0);
   lastSuccessAt = "2026-10-29T12:01:00Z";
   await page.clock.fastForward(5_000);
   await expect.poll(() => statusReads).toBe(2);
@@ -129,44 +108,24 @@ test("incoming status polls every five seconds while visible and reloads dashboa
     document.dispatchEvent(new Event("visibilitychange"));
   });
   await expect.poll(() => statusReads).toBe(3);
-  await expect(panel.getByRole("button", { name: "Refresh status", exact: true })).toBeEnabled();
   expect(dashboardReads).toBe(2);
   fail = true;
-  await panel.getByRole("button", { name: "Refresh status", exact: true }).click();
-  await expect(panel.getByText("Status refresh failed", { exact: true })).toBeVisible();
-  await expect(panel).toContainText("Showing the last saved status; current progress is unconfirmed.");
-  await panel.locator("summary").click();
-  await expect(panel).toContainText(companies[0].name);
+  const failedPoll = page.waitForResponse(response => new URL(response.url()).pathname === "/api/integrations/incoming-status" && response.status() === 503);
+  await page.clock.fastForward(5_000);
+  await failedPoll;
+  await expect.poll(() => statusReads).toBe(4);
+  await expect(metric(page, "Recorded invoice total")).toHaveText("AED 1,200.80");
   expect(dashboardReads).toBe(2);
+  fail = false;
+  lastSuccessAt = "2026-10-29T12:02:00Z";
+  await page.clock.fastForward(5_000);
+  await expect.poll(() => statusReads).toBe(5);
+  await expect.poll(() => dashboardReads).toBe(3);
+  await expect(metric(page, "Recorded invoice total")).toHaveText("AED 1,200.80");
+  await expect(page.getByLabel("Incoming Zoho updates", { exact: true })).toHaveCount(0);
 });
 
-test("incoming status clears prior company data on a scope denial and can recover", async ({ page }) => {
-  let allowBeta = false;
-  await page.route("**/api/integrations/incoming-status*", route => {
-    const companyId = new URL(route.request().url()).searchParams.get("companyId");
-    if (companyId === companies[1].id && !allowBeta)
-      return route.fulfill({ status: 403, json: { error: "Company access denied." } });
-    return route.fulfill({ json: { ...incoming, workerAlive: false,
-      sources: [incoming.sources[companyId === companies[1].id ? 1 : 0]] } });
-  });
-  await page.goto("/dashboard");
-  const panel = page.getByLabel("Incoming Zoho updates", { exact: true });
-  await expect(panel.getByText("Worker not reporting", { exact: true })).toBeVisible();
-  await panel.locator("summary").click();
-  await expect(panel).toContainText(companies[0].name);
-  await page.getByRole("button", { name: "Filters", exact: true }).click();
-  await page.getByRole("combobox", { name: "Company", exact: true }).selectOption(companies[1].id);
-  await expect(panel).toContainText("Company access denied.");
-  await expect(panel).not.toContainText(companies[0].name);
-  allowBeta = true;
-  await panel.getByRole("button", { name: "Refresh status", exact: true }).click();
-  await expect(panel.getByText("Worker not reporting", { exact: true })).toBeVisible();
-  await panel.locator("summary").click();
-  await expect(panel).toContainText(companies[1].name);
-  await expect(panel).not.toContainText(companies[0].name);
-});
-
-test("dashboard displays imported totals and provenance while withholding incomplete profit", async ({ page }) => {
+test("dashboard displays imported totals while withholding incomplete profit", async ({ page }) => {
   await page.goto("/dashboard");
   await expect(metric(page, "Recorded contract value")).toHaveText("AED 10,000.00");
   await expect(metric(page, "Recorded invoice total")).toHaveText("AED 1,200.80");
@@ -174,12 +133,7 @@ test("dashboard displays imported totals and provenance while withholding incomp
   await expect(metric(page, "Outstanding bills")).toHaveText("AED 750.55");
   await expect(metric(page, "Estimated job profit")).toHaveText("—");
   await expect(page.getByText("Historical job costs are incomplete", { exact: true })).toBeVisible();
-  const sources = page.getByLabel("Financial data sources");
-  await expect(sources).toContainText("7 Zoho Books bills and 2 workspace bills");
-  await expect(sources).toContainText("1 linked workspace bill is already counted in Books");
-  await expect(sources).toContainText("Three imported bills have no verified job allocation.");
-  await expect(sources).toContainText("3 imported CRM records with a job reference");
-  await expect(sources).toContainText("1 record requires review and is excluded from the contract total.");
+  await expect(page.getByLabel("Financial data sources")).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Recent Zoho Books bills" })).toBeVisible();
   await expect(page.getByRole("link", { name: imported.billNumber, exact: true })).toHaveAttribute("href", imported.href);
   await expect(page.getByText("Figures below cover bills entered in this app.", { exact: false })).toHaveCount(0);

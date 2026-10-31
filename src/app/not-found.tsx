@@ -8,7 +8,7 @@ export default function NotFound() {
           The page may have moved, or the record is unavailable.
         </p>
         <Link
-          className="font-medium text-orange-700 underline"
+          className="font-medium text-[var(--accent-hover)] underline"
           href="/dashboard"
         >
           Return to dashboard

@@ -1,0 +1,133 @@
+.searchForm:global(.manual-job-search) {
+  align-items: end;
+}
+
+.searchForm:global(.manual-job-search) > :global(.button) {
+  min-height: 42px;
+  margin-top: 0;
+}
+
+.searchForm :global(.input) {
+  min-height: 42px;
+}
+
+.searchHint {
+  margin: 8px 0 0;
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.resultsCard {
+  --result-gutter: 24px;
+}
+
+.sectionHeading:global(.panel-heading) {
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 20px var(--result-gutter);
+}
+
+.resultsCard th,
+.resultsCard td {
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+.resultsCard th:first-child,
+.resultsCard td:first-child {
+  padding-left: var(--result-gutter);
+}
+
+.resultsCard th:last-child,
+.resultsCard td:last-child {
+  width: 1%;
+  padding-right: var(--result-gutter);
+  text-align: right;
+}
+
+.resultsCard td:nth-child(n + 2):nth-child(-n + 4) {
+  min-width: 150px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.numericCell {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+:global(.table-scroll) + .billResults {
+  border-top: 1px solid #edf0f3;
+}
+
+.billRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 32%);
+  align-items: center;
+  gap: 16px 24px;
+  padding: 20px var(--result-gutter);
+  border-top: 1px solid #edf0f3;
+}
+
+.billIdentity {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+  overflow-wrap: anywhere;
+}
+
+.billIdentity strong { font-size: 13px; color: #354256; }
+.billIdentity span { font-size: 12px; color: #667386; }
+.billIdentity small { font-size: 11px; line-height: 1.5; color: #85909e; }
+
+.billAmount {
+  color: #3c485c;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.billActions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  margin-left: auto;
+}
+
+.billActions :global(.button) {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.resultsCard .resultsNote {
+  margin: 0;
+  padding: 18px var(--result-gutter);
+}
+
+@media (max-width: 760px) {
+  .searchForm:global(.manual-job-search) > :global(.button) {
+    justify-self: stretch;
+  }
+
+  .billRow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .billAmount {
+    text-align: left;
+  }
+
+  .billActions {
+    justify-content: flex-start;
+    margin-left: 0;
+  }
+}
