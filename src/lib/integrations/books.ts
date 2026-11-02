@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import Decimal from "decimal.js";
 import { z } from "zod";
 import { calculateBill } from "@/lib/finance";
-import { BOOKS_PURCHASE_ACCOUNT_TYPES, booksSelectionSchema } from "@/lib/books-selection";
+import { BOOKS_NO_VAT, BOOKS_PURCHASE_ACCOUNT_TYPES, booksSelectionSchema } from "@/lib/books-selection";
 import { IntegrationError, type ZohoConfig } from "./config";
 import type { ZohoTransport } from "./transport";
 
@@ -215,7 +215,7 @@ export function buildBooksPayload(snapshot: BillSnapshot, config: ZohoConfig) {
       description: line.description,
       quantity: wireNumber(line.quantity),
       rate: wireNumber(line.unitPrice),
-      tax_id: line.booksSelection?.taxId ?? tax!.id,
+      ...(line.booksSelection?.taxId === BOOKS_NO_VAT ? {} : { tax_id: line.booksSelection?.taxId ?? tax!.id }),
       ...(line.booksSelection ? { is_billable: false,
         ...(line.booksSelection.customerId ? { customer_id: line.booksSelection.customerId } : {}) } : {}),
     })),
@@ -234,7 +234,7 @@ const remoteBill = z.object({
   line_items: z.unknown().optional(),
 });
 const selectedRemoteLines = z.array(z.object({
-  account_id: z.string(), tax_id: z.string(), customer_id: z.string().nullable().optional(),
+  account_id: z.string(), tax_id: z.string().nullish(), customer_id: z.string().nullable().optional(),
   is_billable: z.boolean(), description: z.string(), quantity: z.union([z.number(), z.string()]),
   rate: z.union([z.number(), z.string()]),
 }));
@@ -254,7 +254,7 @@ export async function verifySelectedLineMetadata(transport: ZohoTransport, snaps
   const taxSchema = z.object({ tax_id: z.string(), tax_type: z.literal("tax"),
     tax_percentage: z.union([z.number().finite(), z.string().regex(/^\d+(\.\d+)?$/)]),
     is_active: z.literal(true).optional(), status: z.string().toLowerCase().pipe(z.literal("active")).optional(), tax_factor: z.literal("rate").optional() });
-  for (const taxId of new Set(selections.map((selection) => selection.taxId))) tasks.push(async () => {
+  for (const taxId of new Set(selections.filter(selection => selection.taxId !== BOOKS_NO_VAT).map((selection) => selection.taxId))) tasks.push(async () => {
     const result = z.object({ code: z.literal(0), tax: z.union([taxSchema, z.array(taxSchema).min(1).max(100)]) }).safeParse(
       await transport.request(`/books/v3/settings/taxes/${taxId}`, { method: "GET" }));
     if (!result.success) throw fail();
@@ -312,7 +312,8 @@ export class BooksAdapter implements SupplierBillAdapter {
       selectedLines.success && selectedLines.data.length === snapshot.lines.length && snapshot.lines.every((line, index) => {
         const selection = line.booksSelection;
         const actual = selectedLines.data[index];
-        return !!selection && !!actual && actual.account_id === selection.accountId && actual.tax_id === selection.taxId &&
+        return !!selection && !!actual && actual.account_id === selection.accountId &&
+          (selection.taxId === BOOKS_NO_VAT ? !actual.tax_id : actual.tax_id === selection.taxId) &&
           (actual.customer_id || null) === selection.customerId && actual.is_billable === false && actual.description === line.description &&
           new Decimal(actual.quantity).equals(line.quantity) && new Decimal(actual.rate).equals(line.unitPrice);
       })

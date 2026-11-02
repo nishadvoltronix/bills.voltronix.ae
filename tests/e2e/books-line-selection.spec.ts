@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import type { Bill, Job, Vendor } from "../../src/components/types";
-import type { BooksSelection } from "../../src/lib/books-selection";
+import { BOOKS_NO_VAT, BOOKS_NO_VAT_NAME, type BooksSelection } from "../../src/lib/books-selection";
 
 // Every business/provider response is a fictional fixture. Authentication alone
 // uses the local test account; these checks never create bills or contact Zoho.
@@ -24,6 +24,7 @@ function options(company = companies[0]) {
     taxes: [
       { id: `${company.prefix}11`, name: `Fictional VAT 5 ${company.suffix}`, rate: "5.00", selectable: true },
       { id: `${company.prefix}12`, name: `Fictional VAT 0 ${company.suffix}`, rate: "0.00", selectable: true },
+      { id: BOOKS_NO_VAT, name: BOOKS_NO_VAT_NAME, rate: "0.00", selectable: true },
     ],
     customers: [{ id: `${company.prefix}21`, name: `Fictional Customer ${company.suffix}`, currency: "AED" }],
     warning: null as string | null, hasMoreCustomers: false,
@@ -136,6 +137,61 @@ test("mixed VAT rates preview and save with their own tax IDs", async ({ page })
     { booksSelection: { taxId: "7111", taxRate: "5.00", customerId: null } },
     { booksSelection: { taxId: "7112", taxRate: "0.00", customerId: null } },
   ] });
+});
+
+test("No VAT remains distinct from a zero-rated Books tax", async ({ page }) => {
+  const saves = await captureSaves(page);
+  await open(page);
+  await choose(page, "account", options().accounts[0].name);
+  await control(page, "tax").click();
+  const noVat = page.getByRole("option", { name: /^No VAT/ });
+  await expect(noVat.getByText("No tax applied", { exact: true })).toBeVisible();
+  await expect(page.getByRole("option", { name: /^Fictional VAT 0 Alpha/ })
+    .getByText("0.00% VAT", { exact: true })).toBeVisible();
+  await noVat.click();
+  await expect(control(page, "tax")).toHaveValue(BOOKS_NO_VAT_NAME);
+  await expect(page.getByText("No tax applied", { exact: true })).toBeVisible();
+  await expect(page.getByText("AED 100.00", { exact: true }).first()).toBeVisible();
+  await save(page);
+  expect(saves[0]).toMatchObject({ lines: [{ booksSelection: {
+    taxId: BOOKS_NO_VAT, taxName: BOOKS_NO_VAT_NAME, taxRate: "0.00",
+  } }] });
+
+  await choose(page, "tax", options().taxes[1].name);
+  await save(page);
+  await expect.poll(() => saves.length).toBe(2);
+  expect(saves[1]).toMatchObject({ lines: [{ booksSelection: {
+    taxId: "7112", taxName: options().taxes[1].name, taxRate: "0.00",
+  } }] });
+});
+
+test("saved No VAT renders without a zero-rate suffix and survives editing", async ({ page }) => {
+  const bill = fixtureBill();
+  const noVatSelection: BooksSelection = {
+    ...selection(), taxId: BOOKS_NO_VAT, taxName: BOOKS_NO_VAT_NAME, taxRate: "0.00",
+  };
+  Object.assign(bill, { vatRate: "0.00", vatAmount: "0.00", total: "100.00" });
+  const savedLine = bill.lines?.[0];
+  if (!savedLine) throw new Error("The fictional saved bill must contain its line.");
+  savedLine.booksSelection = noVatSelection;
+  const patches: Record<string, unknown>[] = [];
+  await page.route(`**/api/bills/${bill.id}`, route => {
+    if (route.request().method() === "PATCH") {
+      patches.push(route.request().postDataJSON());
+      return route.fulfill({ status: 409, json: { error: "Fictional No VAT edit inspected." } });
+    }
+    return route.fulfill({ json: { bill } });
+  });
+  await page.goto(`/bills/${bill.id}`);
+  await expect(page.getByText(BOOKS_NO_VAT_NAME, { exact: true })).toBeVisible();
+  await expect(page.getByText(/^No VAT \(0(?:\.00)?%\)$/)).toHaveCount(0);
+  await page.goto(`/bills/${bill.id}/edit`);
+  await expect(control(page, "tax")).toHaveValue(BOOKS_NO_VAT_NAME);
+  await expect(page.getByText("No tax applied", { exact: true })).toBeVisible();
+  await page.getByLabel("Notes", { exact: true }).fill("Preserve the explicit No VAT selection");
+  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect(page.getByText("Fictional No VAT edit inspected.", { exact: true })).toBeVisible();
+  expect(patches[0]).toMatchObject({ lines: [{ booksSelection: noVatSelection }] });
 });
 
 test("customer can be cleared without discarding the account or tax", async ({ page }) => {

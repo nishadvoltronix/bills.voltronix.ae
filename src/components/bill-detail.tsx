@@ -3,6 +3,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import Decimal from "decimal.js";
 import { PAYMENT_TERMS } from "@/lib/payment-terms";
+import { BOOKS_NO_VAT, BOOKS_NO_VAT_NAME } from "@/lib/books-selection";
 import {
   ArrowLeft,
   Download,
@@ -413,7 +414,9 @@ export function BillDetail({
                     </td>
                     {usesLineBooks && <td>
                       {line.booksSelection ? <>
-                        <div>{line.booksSelection.taxName} ({line.booksSelection.taxRate}%)</div>
+                        <div>{line.booksSelection.taxId === BOOKS_NO_VAT
+                          ? BOOKS_NO_VAT_NAME
+                          : `${line.booksSelection.taxName} (${line.booksSelection.taxRate}%)`}</div>
                         {line.booksSelection.customerName && <div className="muted small">{line.booksSelection.customerName}</div>}
                       </> : "—"}
                     </td>}

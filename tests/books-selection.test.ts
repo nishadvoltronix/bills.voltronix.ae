@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertBooksLineTaxMode, booksLineTaxMode, booksSelectionFields, booksSelectionSchema, type BooksSelection } from "@/lib/books-selection";
+import { BOOKS_NO_VAT, BOOKS_NO_VAT_NAME, assertBooksLineTaxMode, booksLineTaxMode, booksSelectionFields, booksSelectionSchema, type BooksSelection } from "@/lib/books-selection";
 import { calculateBill } from "@/lib/finance";
 import { billInputSchema } from "@/lib/validation";
 
@@ -11,6 +11,19 @@ const line = (price: string, booksSelection: BooksSelection | null = selection) 
 });
 
 describe("Books selections and grouped line taxes", () => {
+  it("keeps explicit No VAT distinct from a selected zero-rate provider tax", () => {
+    const noVat = { ...selection, taxId: BOOKS_NO_VAT, taxName: BOOKS_NO_VAT_NAME, taxRate: "0.00" };
+    const zeroRate = { ...selection, taxId: "121", taxName: "Zero Rate", taxRate: "0.00" };
+    const result = calculateBill([line("1.00", noVat), line("1.00", zeroRate)]);
+    expect(result).toMatchObject({ subtotal: "2.00", vatRate: "0.00", vatAmount: "0.00", total: "2.00" });
+    expect(result.lines.map(item => item.booksSelection)).toEqual([noVat, zeroRate]);
+    expect(booksLineTaxMode(result.lines)).toBe(true);
+  });
+  it.each([{ taxRate: "5.00" }, { taxRate: "0" }, { taxName: "Zero Rate" }, { taxId: null }, { taxId: "" }])(
+    "rejects an incomplete or ambiguous No VAT selection %j", override => {
+      expect(booksSelectionSchema.safeParse({ ...selection, taxId: BOOKS_NO_VAT,
+        taxName: BOOKS_NO_VAT_NAME, taxRate: "0.00", ...override }).success).toBe(false);
+    });
   it("derives the tax mode from complete selections and rejects inconsistent saved modes", () => {
     expect(booksLineTaxMode([line("10", null)])).toBe(false);
     expect(booksLineTaxMode([line("10")])).toBe(true);

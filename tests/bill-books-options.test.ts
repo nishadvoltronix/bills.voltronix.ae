@@ -3,6 +3,7 @@ import type { Actor } from "@/lib/auth";
 import { getConfig } from "@/lib/integrations/config";
 import { connectionFingerprint } from "@/lib/integrations/connection-fingerprint";
 import { ZohoTransport, type Fetch } from "@/lib/integrations/transport";
+import { BOOKS_NO_VAT, BOOKS_NO_VAT_NAME } from "@/lib/books-selection";
 
 const store = vi.hoisted(() => ({ user: { findFirst: vi.fn() }, companyIntegrationDestination: { findMany: vi.fn() }, integrationCredential: { findUnique: vi.fn() } }));
 vi.mock("@/lib/db", () => ({ db: store }));
@@ -21,6 +22,7 @@ const account = (overrides: Record<string, unknown> = {}) => ({ account_id: "301
 const tax = (overrides: Record<string, unknown> = {}) => ({ tax_id: "401", tax_name: "VAT", tax_type: "tax", tax_percentage: 5, is_active: true, ...overrides });
 const customer = (overrides: Record<string, unknown> = {}) => ({ contact_id: "501", contact_name: "Customer A", contact_type: "customer", status: "active", currency_code: "AED", email: "private@example.invalid", ...overrides });
 const pageContext = { page: 1, has_more_page: false };
+const noVatOption = { id: BOOKS_NO_VAT, name: BOOKS_NO_VAT_NAME, rate: "0.00", selectable: true };
 function connection(options: { organizationId?: string; accounts?: unknown[]; taxes?: unknown[]; customers?: unknown[]; detail?: unknown; intercept?: (url: URL) => unknown; onRead?: (url: URL) => void } = {}) {
   const organizationId = options.organizationId ?? "1001";
   const fetcher = vi.fn<Fetch>(async (input, init) => {
@@ -71,7 +73,7 @@ describe("company Books dropdown options", () => {
     const result = await getOptions(actor, { companyId: "company-a" }, transport);
     expect(result).toMatchObject({ companyId: "company-a", ...destination, warning: null, hasMoreCustomers: false });
     expect(result.accounts.every(row => row.selectable)).toBe(true);
-    expect(result.taxes).toEqual([{ id: "401", name: "VAT", rate: "5", selectable: true }]);
+    expect(result.taxes).toEqual([noVatOption, { id: "401", name: "VAT", rate: "5", selectable: true }]);
     expect(result.customers).toEqual([{ id: "501", name: "Customer A", currency: "AED" }]);
     expect(fetcher).toHaveBeenCalledTimes(4);
     expect(JSON.stringify(result)).not.toContain("987654321"); expect(JSON.stringify(result)).not.toContain("private@example.invalid");
@@ -82,18 +84,27 @@ describe("company Books dropdown options", () => {
       accounts: [account({ is_active: false }), account({ account_id: "302", account_type: "accounts_payable" })],
       taxes: [tax({ tax_type: "tax_group" }), tax({ tax_id: "402", tax_percentage: "5.125" }), tax({ tax_id: "403", is_active: false })],
     }).transport);
-    expect(result.accounts.every(row => !row.selectable)).toBe(true); expect(result.taxes.every(row => !row.selectable)).toBe(true);
+    expect(result.accounts.every(row => !row.selectable)).toBe(true);
+    expect(result.taxes[0]).toEqual(noVatOption);
+    expect(result.taxes.filter(row => row.id !== BOOKS_NO_VAT).every(row => !row.selectable)).toBe(true);
   });
 
   it("marks an inactive tax status unselectable when is_active is absent", async () => {
     const result = await getOptions(actor, { companyId: "company-a" }, connection({ taxes: [tax({ is_active: undefined, status: "Inactive" })] }).transport);
-    expect(result.taxes).toEqual([{ id: "401", name: "VAT", rate: "5", selectable: false }]);
+    expect(result.taxes).toEqual([noVatOption, { id: "401", name: "VAT", rate: "5", selectable: false }]);
   });
 
   it("accepts the provider's capitalized Active status without is_active", async () => {
     const result = await getOptions(actor, { companyId: "company-a" }, connection({ taxes: [tax({ is_active: undefined, status: "Active" })] }).transport);
     expect(result.warning).toBeNull();
-    expect(result.taxes).toEqual([{ id: "401", name: "VAT", rate: "5", selectable: true }]);
+    expect(result.taxes).toEqual([noVatOption, { id: "401", name: "VAT", rate: "5", selectable: true }]);
+  });
+
+  it("offers explicit No VAT separately from every numeric zero-rate tax", async () => {
+    const result = await getOptions(actor, { companyId: "company-a" }, connection({
+      taxes: [tax({ tax_id: "402", tax_name: "Zero Rate", tax_percentage: 0 })],
+    }).transport);
+    expect(result.taxes).toEqual([noVatOption, { id: "402", name: "Zero Rate", rate: "0", selectable: true }]);
   });
 
   it("filters active customers by supported currency and literal normalized search without mixing vendors", async () => {
@@ -225,6 +236,36 @@ describe("company Books dropdown options", () => {
 
 const selection = { ...destination, accountId: "301", accountName: "Client account label", taxId: "401", taxName: "Client tax label", taxRate: "5", customerId: "501", customerName: "Client customer label" };
 describe("fresh bill Books selection verification", () => {
+  it("verifies No VAT account/customer identities without borrowing a zero-rate tax", async () => {
+    const { transport, fetcher } = connection({ taxes: [tax({ tax_id: "402", tax_name: "Zero Rate", tax_percentage: 0 })] });
+    const noVat = { ...selection, taxId: BOOKS_NO_VAT, taxName: BOOKS_NO_VAT_NAME, taxRate: "0.00" };
+    expect(await verifySelections(actor, "company-a", [noVat], transport)).toEqual([
+      { ...noVat, accountName: "Materials purchase", customerName: "Customer A" },
+    ]);
+    expect(fetcher).toHaveBeenCalledTimes(4);
+    expect(fetcher.mock.calls.every(([url, init]) => init?.method === "GET" && !new URL(url).pathname.includes(BOOKS_NO_VAT))).toBe(true);
+    await expect(verifySelections(actor, "company-a", [noVat], connection({ accounts: [account({ is_active: false })] }).transport))
+      .rejects.toMatchObject({ status: 422 });
+  });
+
+  it("does not bypass destination, authorization or customer checks for No VAT", async () => {
+    const noVat = { ...selection, taxId: BOOKS_NO_VAT, taxName: BOOKS_NO_VAT_NAME, taxRate: "0.00" };
+    const wrong = connection();
+    await expect(verifySelections(actor, "company-b", [noVat], wrong.transport)).rejects.toMatchObject({ status: 409 });
+    expect(wrong.fetcher).not.toHaveBeenCalled();
+    await expect(verifySelections(actor, "company-a", [noVat], connection({ detail: customer({ status: "inactive" }) }).transport))
+      .rejects.toThrow("could not be verified");
+    const revoked = connection({ onRead: url => { if (url.pathname.endsWith("/501")) grantRevoked = true; } });
+    await expect(verifySelections(actor, "company-a", [noVat], revoked.transport)).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("rejects a nonzero or relabelled No VAT marker before provider reads", async () => {
+    const { transport, fetcher } = connection();
+    for (const override of [{ taxRate: "5.00" }, { taxName: "Zero Rate" }])
+      await expect(verifySelections(actor, "company-a", [{ ...selection, taxId: BOOKS_NO_VAT,
+        taxName: BOOKS_NO_VAT_NAME, taxRate: "0.00", ...override }], transport)).rejects.toThrow();
+    expect(fetcher).not.toHaveBeenCalled();
+  });
   it("normalizes provider labels/rates and deduplicates exact customer reads", async () => {
     const { transport, fetcher } = connection({ accounts: [account({ account_type: "fixed_asset" })] });
     const result = await verifySelections(actor, "company-a", [selection, { ...selection, customerId: null, customerName: null }, selection], transport);

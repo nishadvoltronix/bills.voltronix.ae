@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import Decimal from "decimal.js";
 import { z } from "zod";
 import type { Actor } from "@/lib/auth";
-import { BOOKS_PURCHASE_ACCOUNT_TYPES, booksSelectionSchema, type BooksSelection } from "@/lib/books-selection";
+import { BOOKS_NO_VAT, BOOKS_NO_VAT_NAME, BOOKS_PURCHASE_ACCOUNT_TYPES, booksSelectionSchema, type BooksSelection } from "@/lib/books-selection";
 import { db } from "@/lib/db";
 import { HttpError } from "@/lib/http";
 import { canCreateBill } from "@/lib/permissions";
@@ -155,10 +155,10 @@ async function readCatalog(transport: ZohoTransport): Promise<Catalog> {
   const taxes = await read("taxes", "/books/v3/settings/taxes");
   return {
     accounts: accounts.map(row => ({ id: row.id, name: row.label, type: row.type!, selectable: row.active === true && billAccountTypes.has(row.type!) })),
-    taxes: taxes.map(row => {
+    taxes: [{ id: BOOKS_NO_VAT, name: BOOKS_NO_VAT_NAME, rate: "0.00", selectable: true }, ...taxes.map(row => {
       const rate = new Decimal(row.percentage!);
       return { id: row.id, name: row.label, rate: rate.toFixed(), selectable: row.supported && rate.decimalPlaces() <= 2 };
-    }),
+    })],
   };
 }
 
@@ -246,6 +246,7 @@ export async function verifyBillBooksSelections(
   for (const selection of selected) {
     if (!catalog.accounts.some(account => account.id === selection.accountId && account.selectable))
       throw new HttpError(422, "A selected Books account is unavailable or unsupported. Choose a current purchase, expense or asset account.");
+    if (selection.taxId === BOOKS_NO_VAT) continue;
     const tax = catalog.taxes.find(tax => tax.id === selection.taxId && tax.selectable);
     if (!tax)
       throw new HttpError(422, "A selected Books tax is unavailable or unsupported. Choose a current simple percentage tax.");
@@ -264,7 +265,9 @@ export async function verifyBillBooksSelections(
   return input.selections.map(selection => {
     if (!selection) return null;
     const account = catalog.accounts.find(row => row.id === selection.accountId)!;
-    const tax = catalog.taxes.find(row => row.id === selection.taxId)!;
+    const tax = selection.taxId === BOOKS_NO_VAT
+      ? { id: BOOKS_NO_VAT, name: BOOKS_NO_VAT_NAME, rate: "0.00" }
+      : catalog.taxes.find(row => row.id === selection.taxId)!;
     const customer = selection.customerId ? customers.get(selection.customerId)! : null;
     return { organizationId: config.organizationId, dataCenter: config.dataCenter, environment: config.environment,
       accountId: account.id, accountName: account.name, taxId: tax.id, taxName: tax.name, taxRate: new Decimal(tax.rate).toFixed(2),

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { BooksSelection } from "@/lib/books-selection";
+import { BOOKS_NO_VAT, BOOKS_NO_VAT_NAME, type BooksSelection } from "@/lib/books-selection";
 import { calculateBill } from "@/lib/finance";
 import { BooksAdapter, buildBooksPayload, snapshotHash, type BillSnapshot } from "@/lib/integrations/books";
 import { booksTestConfigurationHash, type ZohoConfig } from "@/lib/integrations/config";
@@ -26,6 +26,18 @@ function snapshot(): BillSnapshot {
     discount: "0.00", vatRate: "5.00", subtotal: "100.00", vatAmount: "5.00", total: "105.00", vendorId: "local-vendor",
     externalVendorId: "104", jobId: "job", jobNumber: "FICTIONAL-JOB", externalCrmJobId: null,
     lines: [{ description: "Reviewed line", quantity: "1", unitPrice: "100.00", booksSelection: selected }], documents: [] };
+}
+function noVatSnapshot(): BillSnapshot {
+  const value = snapshot();
+  value.lines[0].booksSelection = { ...selected, taxId: BOOKS_NO_VAT, taxName: BOOKS_NO_VAT_NAME, taxRate: "0.00" };
+  return { ...value, vatRate: "0.00", vatAmount: "0.00", total: "100.00" };
+}
+function noVatRemote(taxId?: string | null) {
+  const value = noVatSnapshot();
+  return { code: 0, bill: { bill_id: "999", bill_number: value.invoiceNumber, vendor_id: value.externalVendorId,
+    reference_number: "VX-BILL-selected-fixture", currency_code: "AED", total: "100.00", tax_total: "0.00",
+    line_items: [{ account_id: "110", ...(taxId === undefined ? {} : { tax_id: taxId }), customer_id: "130",
+      is_billable: false, description: "Reviewed line", quantity: 1, rate: 100 }] } };
 }
 function adapter(overrides: Record<string, unknown> = {}, requireSelections = false) {
   const read = snapshot();
@@ -56,6 +68,55 @@ function adapter(overrides: Record<string, unknown> = {}, requireSelections = fa
 }
 
 describe("explicit Books line payload and metadata changes", () => {
+  it("retains the exact pre-No-VAT numeric-selection snapshot hash", () => {
+    expect(snapshotHash(snapshot())).toBe("9d38df5211c666433636310758fb92fb0d935e8d291c90ff539c4364d90ee4d2");
+  });
+
+  it.each([undefined, null, ""])("confirms explicit No VAT with an absent provider tax %j", async taxId => {
+    const fixture = adapter({ "/books/v3/bills/999": noVatRemote(taxId) }, true);
+    await expect(fixture.adapter.create(noVatSnapshot())).resolves.toMatchObject({ externalId: "999" });
+    const posts = fixture.fetcher.mock.calls.filter((call) => call[1]?.method === "POST");
+    expect(posts).toHaveLength(1);
+    const line = JSON.parse(posts[0][1]!.body as string).line_items[0];
+    expect(line).toMatchObject({ account_id: "110", customer_id: "130", is_billable: false, quantity: 1, rate: 100 });
+    expect(line).not.toHaveProperty("tax_id");
+    expect(fixture.fetcher.mock.calls.every(([url]) => !new URL(url).pathname.includes("/settings/taxes/"))).toBe(true);
+  });
+
+  it("refuses a real zero-rate tax in place of the explicitly selected No VAT", async () => {
+    const fixture = adapter({ "/books/v3/bills/999": noVatRemote("121") }, true);
+    await expect(fixture.adapter.create(noVatSnapshot())).rejects.toMatchObject({ code: "CREATE_UNCONFIRMED", kind: "UNKNOWN" });
+    expect(fixture.fetcher.mock.calls.filter(call => call[1]?.method === "POST")).toHaveLength(1);
+  });
+
+  it("still verifies and sends a numeric zero-rate tax without translating it to No VAT", async () => {
+    const value = noVatSnapshot();
+    value.lines[0].booksSelection = { ...selected, taxId: "121", taxName: "Zero Rate", taxRate: "0.00" };
+    const fixture = adapter({ "/books/v3/settings/taxes/121": {
+      code: 0, tax: { tax_id: "121", tax_type: "tax", tax_percentage: 0, status: "Active" },
+    }, "/books/v3/bills/999": noVatRemote("121") }, true);
+    await expect(fixture.adapter.create(value)).resolves.toMatchObject({ externalId: "999" });
+    const post = fixture.fetcher.mock.calls.find(call => call[1]?.method === "POST")!;
+    expect(JSON.parse(post[1]!.body as string).line_items[0].tax_id).toBe("121");
+    expect(fixture.fetcher.mock.calls.some(([url]) => new URL(url).pathname.endsWith("/settings/taxes/121"))).toBe(true);
+  });
+
+  it("still requires the selected No VAT account, customer and exact remote amounts", async () => {
+    for (const failure of ["account", "customer", "amount"] as const) {
+      const remote = noVatRemote();
+      if (failure === "amount") remote.bill.total = "101.00";
+      const overrides = { "/books/v3/bills/999": remote, ...(failure === "account" ? {
+        "/books/v3/chartofaccounts/110": { code: 0, chart_of_account: { account_id: "110", account_type: "expense", is_active: false } },
+      } : failure === "customer" ? {
+        "/books/v3/contacts/130": { code: 0, contact: { contact_id: "130", contact_type: "customer", status: "inactive", currency_code: "AED" } },
+      } : {}) };
+      const fixture = adapter(overrides, true);
+      await expect(fixture.adapter.create(noVatSnapshot())).rejects.toMatchObject({
+        code: failure === "amount" ? "CREATE_UNCONFIRMED" : "LINE_SELECTION_CHANGED",
+      });
+      expect(fixture.fetcher.mock.calls.filter(call => call[1]?.method === "POST")).toHaveLength(failure === "amount" ? 1 : 0);
+    }
+  });
   it.each(["missing", "mixed", "empty"])("blocks %s required line selections before any provider request", async kind => {
     const value = snapshot();
     const unselected = { description: "Unselected purchase", quantity: "1", unitPrice: "100.00" };

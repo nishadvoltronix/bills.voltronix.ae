@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
-import type { BooksSelection } from "@/lib/books-selection";
+import { BOOKS_NO_VAT, BOOKS_NO_VAT_NAME, type BooksSelection } from "@/lib/books-selection";
 import { useApi } from "./api";
 import type { BillBooksOptions } from "./types";
 import { Button, Input } from "./ui";
@@ -213,13 +213,16 @@ function ScopedBooksLinePicker({ kind, lineNumber, companyId, draft, catalog, lo
   const selectedId = draft?.[`${kind}Id`];
   const selectedName = draft?.[`${kind}Name`];
   const selected: Option | null = selectedId && selectedName ? {
-    id: selectedId, label: selectedName,
-    ...(kind === "tax" ? { description: `${draft?.taxRate ?? ""}% VAT` } : {}),
+    id: selectedId, label: kind === "tax" && selectedId === BOOKS_NO_VAT ? BOOKS_NO_VAT_NAME : selectedName,
+    ...(kind === "tax" ? { description: selectedId === BOOKS_NO_VAT ? "No tax applied" : `${draft?.taxRate ?? ""}% VAT` } : {}),
   } : null;
   const options: Option[] = kind === "account" ? (catalog?.accounts ?? []).map((account) => ({
     id: account.id, label: account.name, group: account.type, disabled: !account.selectable,
   })).sort((a, b) => a.group.localeCompare(b.group) || a.label.localeCompare(b.label))
-    : kind === "tax" ? (catalog?.taxes ?? []).map((tax) => ({ id: tax.id, label: tax.name, description: `${tax.rate}% VAT`, disabled: !tax.selectable }))
+    : kind === "tax" ? (catalog?.taxes ?? []).map((tax) => ({
+      id: tax.id, label: tax.id === BOOKS_NO_VAT ? BOOKS_NO_VAT_NAME : tax.name,
+      description: tax.id === BOOKS_NO_VAT ? "No tax applied" : `${tax.rate}% VAT`, disabled: !tax.selectable,
+    }))
       : customerRows.map((customer) => ({ id: customer.id, label: customer.name, description: customer.currency }));
 
   function changeText(text: string) {
@@ -245,7 +248,9 @@ function ScopedBooksLinePicker({ kind, lineNumber, companyId, draft, catalog, lo
     } else if (kind === "tax") {
       const tax = catalog.taxes.find((item) => item.id === id && item.selectable);
       if (!tax) return;
-      next.taxId = tax.id; next.taxName = tax.name; next.taxRate = String(tax.rate);
+      next.taxId = tax.id;
+      next.taxName = tax.id === BOOKS_NO_VAT ? BOOKS_NO_VAT_NAME : tax.name;
+      next.taxRate = tax.id === BOOKS_NO_VAT ? "0.00" : String(tax.rate);
     } else {
       const customer = customerRows.find((item) => item.id === id);
       if (!customer) return;

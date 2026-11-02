@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Actor } from "@/lib/auth";
 import type { BooksSelection } from "@/lib/books-selection";
-import { booksSelectionSchema } from "@/lib/books-selection";
+import { BOOKS_NO_VAT, BOOKS_NO_VAT_NAME, booksSelectionSchema } from "@/lib/books-selection";
 import { db } from "@/lib/db";
 import { getConfig } from "@/lib/integrations/config";
 import { connectionFingerprint } from "@/lib/integrations/connection-fingerprint";
@@ -58,7 +58,8 @@ beforeEach(() => {
   verifier.mockImplementation(async (_actor: Actor, selectedCompanyId: string, selections: (BooksSelection | null)[]) => {
     expect(selectedCompanyId).toBe(companyId);
     return selections.map((value) => value ? booksSelectionSchema.parse({ ...value, accountName: "Verified purchase account",
-      taxName: value.taxId === "121" ? "Verified zero rate" : "Verified standard rate", taxRate: value.taxId === "121" ? "0.00" : "5.00",
+      taxName: value.taxId === BOOKS_NO_VAT ? BOOKS_NO_VAT_NAME : value.taxId === "121" ? "Verified zero rate" : "Verified standard rate",
+      taxRate: value.taxId === BOOKS_NO_VAT || value.taxId === "121" ? "0.00" : "5.00",
       customerName: value.customerId ? "Verified customer" : null }) : null);
   });
   vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("No actual provider calls are allowed in persistence fixtures."); }));
@@ -66,6 +67,24 @@ beforeEach(() => {
 afterAll(async () => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); await db.$disconnect(); });
 
 describe("durable verified Books line selections", () => {
+  it("persists and finalizes an explicit AED 1 No VAT selection without converting it to a provider tax", async () => {
+    vi.stubEnv("ZOHO_BOOKS_ORGANIZATIONS_JSON", profiles(true));
+    const noVat = { ...selection(), taxId: BOOKS_NO_VAT, taxName: BOOKS_NO_VAT_NAME, taxRate: "0.00" };
+    const draft = await createBill(actor, input({ vatRate: "5", lines: [{
+      description: "Fictional explicit No VAT", quantity: "1", unitPrice: "1.00", booksSelection: noVat,
+    }] }));
+    expect(draft).toMatchObject({ status: "DRAFT", subtotal: "1.00", vatRate: "0.00", vatAmount: "0.00", total: "1.00", usesBooksLineTaxes: true });
+    const expected = { ...noVat, accountName: "Verified purchase account", customerName: "Verified customer" };
+    expect((await getBill(actor, draft.id)).lines[0].booksSelection).toEqual(expected);
+    expect((await db.billLine.findFirstOrThrow({ where: { billId: draft.id } })).booksSelection).toEqual(expected);
+    const ready = await actOnBill(actor, draft.id, { action: "submit", version: draft.version });
+    expect(ready).toMatchObject({ status: "READY", vatAmount: "0.00", total: "1.00", usesBooksLineTaxes: true });
+    expect(ready.lines[0].booksSelection).toEqual(expected);
+    const source = await db.bill.findUniqueOrThrow({ where: { id: draft.id }, include: sourceInclude });
+    expect(approvedSnapshot(source, "104").lines[0].booksSelection).toEqual(expected);
+    expect(await db.integrationJob.count({ where: { billId: draft.id } })).toBe(0);
+    expect(fetch).not.toHaveBeenCalled();
+  });
   it("keeps an incomplete bill editable after Save and sync and permits finalization after explicit selections", async () => {
     vi.stubEnv("ZOHO_BOOKS_ORGANIZATIONS_JSON", profiles(true));
     const unselected = { description: "Fictional draft purchase", quantity: "1", unitPrice: "100.00" };

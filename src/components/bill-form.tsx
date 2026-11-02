@@ -15,7 +15,7 @@ import {
   X,
 } from "lucide-react";
 import { calculateBill } from "@/lib/finance";
-import type { BooksSelection } from "@/lib/books-selection";
+import { BOOKS_NO_VAT_NAME, type BooksSelection } from "@/lib/books-selection";
 import {
   PAYMENT_TERMS,
   resolveDueDate,
@@ -821,7 +821,7 @@ function BillForm({
                 {companyId && <Button type="button" variant="secondary" disabled={booksOptions.loading} onClick={booksOptions.reload}>
                   {booksOptionsError || booksCatalog?.warning ? "Retry Books options" : "Reload Books options"}
                 </Button>}
-                <p>For Books line selections, choose an account and tax on every line. Customer attribution is optional; the local job remains required.</p>
+                <p>For Books line selections, choose an account and either a tax or {BOOKS_NO_VAT_NAME} on every line. Customer attribution is optional; the local job remains required.</p>
                 </>}
                 {usesLineBooks && <Button type="button" variant="ghost" onClick={clearBooksLines}>Clear all Books selections</Button>}
               </div>}
@@ -1072,7 +1072,7 @@ function BillForm({
                   </p>
                 )}
                 <p className="books-tax-note">
-                  {usesLineBooks ? "VAT uses the selected tax on each line. Books line selections require a zero discount." : "Discount is applied before VAT."}
+                  {usesLineBooks ? `VAT follows each line's tax or ${BOOKS_NO_VAT_NAME} choice. Books line selections require a zero discount.` : "Discount is applied before VAT."}
                 </p>
                 {Number(discount) > 0 && !usesLineBooks && !manualEntryOnly && (
                   <Notice>

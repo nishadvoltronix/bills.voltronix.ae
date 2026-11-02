@@ -3,6 +3,9 @@ import { z } from "zod";
 const externalId = z.string().regex(/^\d{1,30}$/);
 const name = z.string().trim().min(1).max(200).regex(/^[^\u0000-\u001f\u007f]+$/);
 export const BOOKS_PURCHASE_ACCOUNT_TYPES = ["expense", "cost_of_goods_sold", "other_expense", "other_asset", "other_current_asset", "fixed_asset"] as const;
+// An explicit absence of VAT is distinct from every provider tax, including 0%.
+export const BOOKS_NO_VAT = "NO_VAT" as const;
+export const BOOKS_NO_VAT_NAME = "No VAT" as const;
 
 /** Server-normalized provider metadata. Parsing alone does not establish provider identity. */
 export const booksSelectionSchema = z.object({
@@ -11,13 +14,17 @@ export const booksSelectionSchema = z.object({
   environment: z.enum(["sandbox", "production"]),
   accountId: externalId,
   accountName: name,
-  taxId: externalId,
+  taxId: z.union([externalId, z.literal(BOOKS_NO_VAT)]),
   taxName: name,
   taxRate: z.string().regex(/^\d{1,3}(\.\d{1,2})?$/).refine((value) => Number(value) <= 100),
   customerId: externalId.nullable(),
   customerName: name.nullable(),
 }).strict().refine((value) => (value.customerId === null) === (value.customerName === null), {
   message: "Customer identity and label must be selected together.",
+}).refine((value) => value.taxId !== BOOKS_NO_VAT ||
+  (value.taxName === BOOKS_NO_VAT_NAME && value.taxRate === "0.00"), {
+  message: "No VAT requires its explicit label and zero tax rate.",
+  path: ["taxId"],
 });
 
 export type BooksSelection = z.infer<typeof booksSelectionSchema>;
