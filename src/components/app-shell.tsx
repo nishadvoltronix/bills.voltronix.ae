@@ -11,7 +11,6 @@ import {
   BriefcaseBusiness,
   Building2,
   ChartNoAxesCombined,
-  ShieldCheck,
   History,
   ScanLine,
   Layers3,
@@ -214,14 +213,6 @@ export function AppShell({
               <X size={20} />
             </button>
           </div>
-          <div className="workspace-label">
-            <span className="workspace-avatar">V</span>
-            <div>
-              <strong>Voltronix workspace</strong>
-              <span>Finance operations</span>
-            </div>
-            <LockKeyhole size={13} />
-          </div>
           <nav>
             {nav.map((item) => {
               const Icon = item.icon;
@@ -246,13 +237,6 @@ export function AppShell({
             })}
           </nav>
           <div className="sidebar-bottom">
-            <div className="secure-workspace">
-              <ShieldCheck size={17} />
-              <div>
-                <strong>Secure workspace</strong>
-                <span>Access controlled. Changes tracked.</span>
-              </div>
-            </div>
             <button
               className="user-profile"
               onClick={logout}

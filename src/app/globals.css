@@ -647,45 +647,6 @@ summary:focus-visible {
   border-radius: 6px;
   background: #fff;
 }
-.workspace-label {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  border: 1px solid #ffffff0d;
-  margin: 0 17px 22px;
-  padding: 11px 10px;
-  border-radius: 7px;
-  background: #ffffff03;
-}
-.workspace-avatar {
-  width: 27px;
-  height: 29px;
-  display: grid;
-  place-items: center;
-  background: #334155;
-  color: #dce3eb;
-  border: 1px solid #47546a;
-  border-radius: 5px;
-  font-size: 12px;
-  font-weight: 600;
-}
-.workspace-label > div {
-  flex: 1;
-}
-.workspace-label strong {
-  display: block;
-  font-size: 10px;
-  font-weight: 600;
-  color: #d2d8e1;
-  margin-bottom: 3px;
-}
-.workspace-label span:not(.workspace-avatar) {
-  font-size: 9px;
-  color: #6e7e94;
-}
-.workspace-label > svg {
-  color: #63738b;
-}
 .sidebar nav {
   padding: 0 13px;
   overflow: auto;
@@ -742,27 +703,6 @@ summary:focus-visible {
 .sidebar-bottom {
   margin-top: auto;
   padding: 23px 17px 15px;
-}
-.secure-workspace {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 14px 4px;
-  color: #5f7592;
-  border-bottom: 1px solid #ffffff09;
-  margin-bottom: 13px;
-}
-.secure-workspace strong {
-  display: block;
-  font-size: 10px;
-  font-weight: 500;
-  color: #9eacc1;
-  margin-bottom: 4px;
-}
-.secure-workspace span {
-  display: block;
-  font-size: 8px;
-  color: #63758e;
 }
 .user-profile {
   display: flex;
@@ -3537,8 +3477,6 @@ tbody tr:hover {
   color: var(--accent-strong);
 }
 .nav-section,
-.workspace-label span:not(.workspace-avatar),
-.secure-workspace span,
 .user-profile-name > span,
 .login-story-footer,
 .login-story-footer > span:last-child,
