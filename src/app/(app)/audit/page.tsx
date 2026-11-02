@@ -1,4 +1,6 @@
 import { AuditPage } from "@/components/audit";
-export default function Page() {
+import { requirePageUser } from "@/lib/auth";
+export default async function Page() {
+  await requirePageUser();
   return <AuditPage />;
 }

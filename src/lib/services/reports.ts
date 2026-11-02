@@ -8,12 +8,13 @@ import { HttpError } from "@/lib/http";
 import { csv, parseReportFilters } from "@/lib/reports";
 import { getPaymentStatus, isRecognizedBillStatus } from "@/lib/finance";
 import { countOcrDuplicateWarnings } from "@/lib/services/ocr";
+import { canViewFinancialSummary, canViewOverview } from "@/lib/permissions";
 
 export async function expenseReport(actor: Actor, params: URLSearchParams) {
-  if (actor.role === "DATA_ENTRY")
+  if (!canViewFinancialSummary(actor))
     throw new HttpError(
       403,
-      "Management reports are restricted to finance and management roles.",
+      "Management reports are restricted to Admin and Management.",
     );
   const filters = parseReportFilters(params);
   const { from, to, ...conditions } = filters;
@@ -153,6 +154,7 @@ export function exportExpenseReport(
 }
 
 export async function operationSummary(actor: Actor) {
+  if (!canViewOverview(actor)) throw new HttpError(403, "Your role cannot view operation summaries.");
   const createdBy = {
     ...(await companyFilter(actor)),
     ...(actor.role === "DATA_ENTRY" ? { createdById: actor.id } : {}),

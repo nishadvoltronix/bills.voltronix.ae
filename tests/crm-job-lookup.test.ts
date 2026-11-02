@@ -434,7 +434,11 @@ describe("production CRM job lookup and selection", () => {
     const result = await searchCrmJobs(writer, { companyId: "company-a", q: "JOB" }, remote.transport);
     expect(result.warning).toBeNull(); expect(result.jobs).toHaveLength(1);
     const resolved = await resolveCrmJob(writer, selection(result.jobs[0]), remote.transport);
-    expect(resolved.job).toMatchObject({ companyId: "company-a", externalCrmId: "5001", isDemo: false, contractValue: "2200.00" });
+    expect(result.jobs[0]).toMatchObject({ contractValue: null, approvedVariations: null });
+    expect(resolved.job).toMatchObject({ companyId: "company-a", externalCrmId: "5001", isDemo: false, contractValue: null,
+      approvedVariations: null, adjustedValue: null, recognizedExpenses: null, paidExpenses: null, outstanding: null,
+      estimatedProfit: null, remainingBudget: null, expensePercentage: null });
+    expect(jobs[0].contractValue?.toFixed(2)).toBe("2200.00");
     expect((await resolveCrmJob(writer, selection(result.jobs[0]), remote.transport)).job.id).toBe(resolved.job.id);
     expect(jobs).toHaveLength(1); expect(audits).toHaveLength(1);
     expect(audits[0]).toMatchObject({ details: { providerFinancialWrites: 0 } });

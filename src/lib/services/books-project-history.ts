@@ -6,7 +6,7 @@ import type { Actor } from "@/lib/auth";
 import { companyIdsForActor, requireCompanyAccess } from "@/lib/company";
 import { db } from "@/lib/db";
 import { HttpError } from "@/lib/http";
-import { canViewFinancialSummary } from "@/lib/permissions";
+import { canViewBooksHistory } from "@/lib/permissions";
 import { crmJobSourceScope } from "@/lib/services/crm-job-access";
 
 const externalId = z.string().regex(/^\d{1,30}$/);
@@ -202,7 +202,7 @@ type ProjectBill = { associationId: string; sourceHash: string; billId: string; 
 export async function loadBooksProjectHistory(actor: Actor, requestedCompanyId?: string): Promise<BooksProjectHistory> {
   const context = await readContext(actor, requestedCompanyId);
   const result: BooksProjectHistory = { relations: [], warnings: [] };
-  if (!canViewFinancialSummary(actor) || !context.companyIds.length) return result;
+  if (!canViewBooksHistory(actor) || !context.companyIds.length) return result;
   const now = new Date();
   const cached = await db.booksProjectAssociation.findMany({ where: { companyId: { in: context.companyIds } },
     orderBy: [{ companyId: "asc" }, { id: "asc" }] });

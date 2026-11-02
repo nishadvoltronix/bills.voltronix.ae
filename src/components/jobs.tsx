@@ -16,6 +16,7 @@ import {
 import { api, dateTime, errorMessage, money, summary, useApi } from "./api";
 import type { Bill, ImportedBillSummary, Job, JobBooksHistory, JobFinancialCompleteness } from "./types";
 import { useUser } from "./app-shell";
+import { roleHomePath } from "@/lib/auth-navigation";
 import {
   Badge,
   Button,
@@ -224,6 +225,7 @@ export function JobsPage() {
 export function JobDetail({ id }: { id: string }) {
   const state = useApi<{ job: Job; bills: Bill[]; booksBills?: ImportedBillSummary[]; booksHistory?: JobBooksHistory; financialCompleteness?: JobFinancialCompleteness }>(`/api/jobs/${encodeURIComponent(id)}`, { keepPreviousData: true });
   const user = useUser();
+  const showJobFinancials = user.role !== "ACCOUNTS";
   const refreshControl = useRef({ busy: true, blocked: false });
   useEffect(() => {
     refreshControl.current = { busy: state.loading || state.refreshing, blocked: !!state.error };
@@ -263,9 +265,9 @@ export function JobDetail({ id }: { id: string }) {
   const s = { ...summary(job), ...(incomplete ? { estimatedProfit: null, remainingBudget: null, expensePercentage: null, budgetStatus: "VALUE_UNAVAILABLE" } : {}) };
   return (
     <>
-      <Link href="/jobs" className="back-link">
+      <Link href={showJobFinancials ? "/jobs" : roleHomePath(user.role)} className="back-link">
         <ArrowLeft size={15} />
-        Back to jobs
+        {showJobFinancials ? "Back to jobs" : "Back to bill entry"}
       </Link>
       <PageHeader
         eyebrow={job.jobNumber}
@@ -273,7 +275,7 @@ export function JobDetail({ id }: { id: string }) {
         description={`${job.customer} · ${job.currency}`}
       >
         {job.stage && <Badge>{job.stage}</Badge>}
-        <StatusBadge status={s.budgetStatus} />
+        {showJobFinancials && <StatusBadge status={s.budgetStatus} />}
         <Button type="button" variant="secondary" disabled={state.refreshing} onClick={refreshJob}>
           <RefreshCw size={16} className={state.refreshing ? "spin" : undefined} />Refresh job
         </Button>
@@ -292,19 +294,21 @@ export function JobDetail({ id }: { id: string }) {
         {job.sourceUpdatedAt && <span>CRM source updated: <strong>{dateTime(job.sourceUpdatedAt)} Dubai</strong></span>}
       </div>
       <p className="job-refresh-status" role="status">
-        {state.refreshing ? "Refreshing job totals and bills…" : "Job totals and bills update automatically while this page is visible."}
+        {showJobFinancials
+          ? state.refreshing ? "Refreshing job totals and bills…" : "Job totals and bills update automatically while this page is visible."
+          : state.refreshing ? "Refreshing bill history…" : "Bill history updates automatically while this page is visible."}
       </p>
       {state.refreshError && <Notice tone="error">
-        <p>Job totals could not be refreshed. Displayed amounts may be out of date. {state.refreshError}</p>
+        <p>{showJobFinancials ? "Job totals could not be refreshed. Displayed amounts may be out of date." : "Bill history could not be refreshed."} {state.refreshError}</p>
         <Button type="button" variant="secondary" disabled={state.refreshing} onClick={refreshJob}>Retry job refresh</Button>
       </Notice>}
-      {incomplete && <Notice>
+      {showJobFinancials && incomplete && <Notice>
         <strong>Historical job costs are incomplete</strong>
         <p>Profit and budget usage remain unavailable until the imported invoice history can be assigned reliably.</p>
         {financialCompleteness.notes.map(note => <p key={note}>{note}</p>)}
         <Link className="text-link" href={`/bills/books?companyId=${encodeURIComponent(job.companyId)}`}>Review this company&apos;s Books bills</Link>
       </Notice>}
-      {s.budgetStatus === "OVER_BUDGET" && (
+      {showJobFinancials && s.budgetStatus === "OVER_BUDGET" && (
         <Notice tone="error">
           Over budget: recognized expenses exceed the adjusted job value.
           Estimated loss:{" "}
@@ -315,13 +319,13 @@ export function JobDetail({ id }: { id: string }) {
           .
         </Notice>
       )}
-      {s.adjustedValue === null && (
+      {showJobFinancials && s.adjustedValue === null && (
         <Notice>
           Job value not available. Profit and budget percentages are not
           calculated.
         </Notice>
       )}
-      <div className="metrics-grid">
+      {showJobFinancials && <div className="metrics-grid">
         <Metric
           label="Recorded contract value"
           value={money(job.contractValue, job.currency)}
@@ -348,8 +352,8 @@ export function JobDetail({ id }: { id: string }) {
           accent
           negative={Number(s.estimatedProfit) < 0}
         />
-      </div>
-      <Card className="job-detail-summary">
+      </div>}
+      {showJobFinancials && <Card className="job-detail-summary">
         <div>
           <span>Adjusted job value</span>
           <strong>{money(s.adjustedValue, job.currency)}</strong>
@@ -374,7 +378,7 @@ export function JobDetail({ id }: { id: string }) {
               : `${Number(s.expensePercentage).toFixed(1)}%`}
           </strong>
         </div>
-      </Card>
+      </Card>}
       {booksBills && <Card className={styles.history}>
         <div className="panel-heading"><div><h2>Linked Zoho Books bills</h2><p>Related invoices and their original files for this job and company. Amounts are full invoice totals; job cost allocation may be unverified.</p></div><Badge>{historyPending && !booksBills.length ? "Verification pending" : `${booksBills.length} bills`}</Badge></div>
         {historyPending && <Notice>
@@ -396,11 +400,11 @@ export function JobDetail({ id }: { id: string }) {
         </div>
         <BillTable bills={bills} showJob={false} showAttachments />
       </Card>
-      <p className="page-footnote">
+      {showJobFinancials && <p className="page-footnote">
         Recognized expenses include finalized invoices only. Paid and outstanding
         amounts include VAT. Estimated profit remains provisional until all
         relevant costs and revenue are recorded.
-      </p>
+      </p>}
     </>
   );
 }

@@ -31,7 +31,7 @@ import {
   addTestMemberships,
 } from "./company-fixtures";
 
-let staff: Actor, other: Actor, accounts: Actor, management: Actor;
+let staff: Actor, other: Actor, accounts: Actor, management: Actor, admin: Actor;
 let vendorId: string, jobId: string, companyId: string;
 const tag = randomUUID().slice(0, 8);
 const file = (name = "fictional.pdf") =>
@@ -81,8 +81,8 @@ beforeAll(async () => {
   assertMySqlTestDatabase();
   vi.stubEnv("OCR_PROVIDER", "disabled");
   vi.stubEnv("UPLOAD_DIR", path.resolve(".local", `test-ocr-${tag}`));
-  [staff, other, accounts, management] = await Promise.all(
-    (["DATA_ENTRY", "DATA_ENTRY", "ACCOUNTS", "MANAGEMENT"] as const).map(
+  [staff, other, accounts, management, admin] = await Promise.all(
+    (["DATA_ENTRY", "DATA_ENTRY", "ACCOUNTS", "MANAGEMENT", "ADMIN"] as const).map(
       (role, index) =>
         db.user.create({
           data: {
@@ -99,6 +99,7 @@ beforeAll(async () => {
     other,
     accounts,
     management,
+    admin,
   ]);
   companyId = company.id;
   vendorId = (
@@ -194,18 +195,24 @@ describe("persisted OCR workflows on real MySQL with mocked provider", () => {
         mappings: {},
       }),
     ).rejects.toMatchObject({ status: 403 });
-    const first = await createOcrTemplate(accounts, {
+    const before = await db.ocrTemplate.count();
+    await expect(createOcrTemplate(accounts, {
+      vendorId, name: "Excluded Accounts template", mappings: {},
+    })).rejects.toMatchObject({ status: 403 });
+    await expect(listOcrTemplates(accounts)).rejects.toMatchObject({ status: 403 });
+    expect(await db.ocrTemplate.count()).toBe(before);
+    const first = await createOcrTemplate(admin, {
       vendorId,
       name: "Fictional mapping v1",
       mappings: { jobNumber: "CustomerId", category: "MATERIALS" },
     });
-    const second = await createOcrTemplate(accounts, {
+    const second = await createOcrTemplate(admin, {
       vendorId,
       name: "Fictional mapping v2",
       mappings: { orderNumber: "CustomerId", category: "EQUIPMENT" },
     });
     expect(second.version).toBe(first.version + 1);
-    const templates = await listOcrTemplates(accounts);
+    const templates = await listOcrTemplates(admin);
     expect(templates.find((template) => template.id === first.id)?.active).toBe(
       false,
     );

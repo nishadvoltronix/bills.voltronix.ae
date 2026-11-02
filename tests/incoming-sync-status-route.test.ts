@@ -19,7 +19,7 @@ describe("incoming synchronization status route", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("Cache-Control")).toBe("private, no-store");
     expect(await response.json()).toEqual(status);
-    expect(mocks.requireUser).toHaveBeenCalledWith(["ADMIN", "ACCOUNTS", "MANAGEMENT"]);
+    expect(mocks.requireUser).toHaveBeenCalledWith(["ADMIN", "MANAGEMENT"]);
     expect(mocks.getIncomingSyncStatus).toHaveBeenCalledWith(actor, "company-beta");
   });
   it("leaves accessible-source enumeration to the status service when no company is selected", async () => {

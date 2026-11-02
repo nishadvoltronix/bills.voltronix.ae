@@ -324,7 +324,7 @@ export async function listIntegrationJobs(
   actor: Actor,
   organizationId?: string,
 ) {
-  if (!["ADMIN", "ACCOUNTS", "MANAGEMENT"].includes(actor.role))
+  if (!["ADMIN", "MANAGEMENT"].includes(actor.role))
     throw new HttpError(
       403,
       "Your role cannot view the integration reconciliation queue.",

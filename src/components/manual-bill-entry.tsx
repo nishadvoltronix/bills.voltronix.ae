@@ -18,7 +18,7 @@ type CrmJobSuggestion = {
   customer: string;
   currency: string;
   contractValue: string | null;
-  approvedVariations: string;
+  approvedVariations: string | null;
   externalCrmId: string;
   stage: string | null;
   crmOrganizationId: string;
@@ -41,6 +41,7 @@ function historyReference(job: { id: string; jobNumber: string | null; displayRe
 export function ManualBillEntry() {
   const router = useRouter();
   const user = useUser();
+  const showJobFinancials = user.role !== "ACCOUNTS";
   const manualEntryOnly = useManualEntryOnly();
   const canEnter = user.role !== "MANAGEMENT";
   const [query, setQuery] = useState("");
@@ -216,7 +217,7 @@ export function ManualBillEntry() {
     </Card>}
     {!manualEntryOnly && <Card className={`manual-crm-results ${styles.resultsCard}`} role="region" aria-label="Zoho CRM job search">
       <div className={`panel-heading ${styles.sectionHeading}`}>
-        <div><h2>Zoho CRM matches</h2><p>Choose a CRM job to review its amounts and bills.</p></div>
+        <div><h2>Zoho CRM matches</h2><p>{showJobFinancials ? "Choose a CRM job to review its amounts and bills." : "Choose a CRM job to review its bill history."}</p></div>
         {user.role === "ADMIN" && <Button asChild variant="secondary" size="sm"><Link href="/account/crm-authorization">Connect Zoho CRM</Link></Button>}
       </div>
       {!searchReady ? <p className="manual-crm-message">Enter a job reference and select Search to search Zoho CRM.</p>
@@ -235,10 +236,10 @@ export function ManualBillEntry() {
               </Notice></div>}
               {crmJobs.length ? <Table>
                 <caption className="sr-only">Zoho CRM matches</caption>
-                <thead><tr><th>Job ID</th><th>Job name</th><th>Company</th><th>Customer</th><th>CRM stage</th><th className={styles.numericCell}>Contract value</th><th><span className="sr-only">Use job</span></th></tr></thead>
+                <thead><tr><th>Job ID</th><th>Job name</th><th>Company</th><th>Customer</th><th>CRM stage</th>{showJobFinancials && <th className={styles.numericCell}>Contract value</th>}<th><span className="sr-only">Use job</span></th></tr></thead>
                 <tbody>{crmJobs.map((job) => <tr key={`${job.companyId}:${job.sourceId}:${job.externalCrmId}`}>
                   <td><strong>{job.jobNumber}</strong></td><td>{job.name}</td><td>{companyNames.get(job.companyId)}</td><td>{job.customer}</td>
-                  <td>{job.stage || "Not provided"}</td><td className={styles.numericCell}>{money(job.contractValue, job.currency)}</td>
+                  <td>{job.stage || "Not provided"}</td>{showJobFinancials && <td className={styles.numericCell}>{money(job.contractValue, job.currency)}</td>}
                   <td><Button type="button" variant="secondary" size="sm" disabled={!!currentSelection?.pending}
                     aria-label={`Use CRM job ${job.jobNumber} for ${companyNames.get(job.companyId)}`}
                     onClick={() => void selectCrmJob(job)}>Use CRM job<ArrowRight size={15} /></Button></td>
@@ -246,7 +247,7 @@ export function ManualBillEntry() {
               </Table> : !crmError && !crm.data?.warning ? <EmptyState title="No matching CRM job"
                 description="Try the exact job ID or a different reference." /> : null}
               {crm.data?.hasMore && !crmError && <p className="manual-crm-message">Refine the job reference to narrow the CRM results.</p>}
-              {crmJobs.length > 0 && <p className="manual-crm-message">CRM stage comes from Zoho. Job expenses and bill statuses are calculated here.</p>}
+              {crmJobs.length > 0 && <p className="manual-crm-message">{showJobFinancials ? "CRM stage comes from Zoho. Job expenses and bill statuses are calculated here." : "CRM stage comes from Zoho. Open the job to review its bill history."}</p>}
             </>}
     </Card>}
   </>;

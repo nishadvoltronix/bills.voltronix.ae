@@ -48,11 +48,19 @@ export const MAX_OCR_FILES = 10;
 const MAX_BATCH_BYTES = 40 * 1024 * 1024;
 const MAX_ATTEMPTS = 5;
 const MAX_POLLS = 60;
-const scope = async (actor: Actor) => ({
-  ...(await companyFilter(actor)),
-  ...(actor.role === "DATA_ENTRY" ? { createdById: actor.id } : {}),
-});
+function assertAutomationAccess(actor: Actor) {
+  if (actor.role === "ACCOUNTS")
+    throw new HttpError(403, "This account is restricted to manual bill entry, bills and vendors.");
+}
+const scope = async (actor: Actor) => {
+  assertAutomationAccess(actor);
+  return {
+    ...(await companyFilter(actor)),
+    ...(actor.role === "DATA_ENTRY" ? { createdById: actor.id } : {}),
+  };
+};
 const writer = (actor: Actor) => {
+  assertAutomationAccess(actor);
   if (!canCreateBill(actor))
     throw new HttpError(403, "Your role cannot upload or review OCR invoices.");
 };
@@ -699,6 +707,7 @@ export async function listOcrTemplates(actor: Actor) {
   });
 }
 export async function createOcrTemplate(actor: Actor, payload: unknown) {
+  assertAutomationAccess(actor);
   if (!canManageVendors(actor))
     throw new HttpError(
       403,
@@ -814,7 +823,7 @@ export async function processOcrQueue(
           "ACCOUNT_INACTIVE",
           "The upload owner's account is inactive. Processing requires administrator review.",
         );
-      if (!canCreateBill(owner.createdBy))
+      if (owner.createdBy.role === "ACCOUNTS" || !canCreateBill(owner.createdBy))
         throw new OcrProviderError(
           "OCR_PERMISSION_REVOKED",
           "The upload owner's current role cannot process OCR invoices. An administrator must review access before processing can continue.",
@@ -975,6 +984,7 @@ export async function approveOcrBatch(
   id: string,
   payload: unknown,
 ) {
+  assertAutomationAccess(actor);
   if (!["ADMIN", "ACCOUNTS"].includes(actor.role))
     throw new HttpError(
       403,

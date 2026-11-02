@@ -16,6 +16,7 @@ import {
   canManageVendors,
   canViewAuditLog,
   canViewFinancialSummary,
+  canViewOverview,
 } from "@/lib/permissions";
 import { jobSchema, vendorSchema } from "@/lib/validation";
 import { billInclude, serializeBill } from "@/lib/services/bills";
@@ -75,8 +76,9 @@ export function serializeJob(actor: Actor, job: JobWithBills) {
       : null,
     approvedVariations: canViewFinancialSummary(actor)
       ? job.approvedVariations.toFixed(2)
-      : "0.00",
+      : actor.role === "ACCOUNTS" ? null : "0.00",
     ...summary,
+    ...(actor.role === "ACCOUNTS" ? { recognizedExpenses: null, paidExpenses: null, outstanding: null } : {}),
     billCount: visibleBills.length,
     financialScope: actor.role === "DATA_ENTRY" ? "YOUR_BILLS" : "ORGANIZATION",
   };
@@ -364,9 +366,9 @@ function ledgerJobDto(
     adjustedValue,
     contractValue,
     approvedVariations,
-    recognizedExpenses: expenses,
-    paidExpenses: complete ? totals.paidExpenses : null,
-    outstanding: complete ? totals.outstanding : null,
+    recognizedExpenses: ledger.actor.role === "ACCOUNTS" ? null : expenses,
+    paidExpenses: ledger.actor.role !== "ACCOUNTS" && complete ? totals.paidExpenses : null,
+    outstanding: ledger.actor.role !== "ACCOUNTS" && complete ? totals.outstanding : null,
     estimatedProfit: profit,
     remainingBudget: profit,
     expensePercentage: ratio?.toFixed(2) ?? null,
@@ -387,6 +389,7 @@ function ledgerJobDto(
 }
 
 export async function dashboard(actor: Actor, params: URLSearchParams) {
+  if (!canViewOverview(actor)) throw new HttpError(403, "Your role cannot view the overview.");
   const currency = (params.get("currency") || "AED").trim().toUpperCase();
   if (!/^[A-Z]{3}$/.test(currency))
     throw new HttpError(422, "Select a valid currency.");
@@ -399,6 +402,7 @@ export async function dashboard(actor: Actor, params: URLSearchParams) {
     currency,
   );
   actor = ledger.actor;
+  if (!canViewOverview(actor)) throw new HttpError(403, "Your role cannot view the overview.");
   if (jobId && !ledger.jobs.some((job) => job.id === jobId))
     throw new HttpError(404, "Job not found in this currency and company.");
   const selectedJobs = ledger.jobs.filter((job) => !jobId || job.id === jobId);
@@ -580,7 +584,7 @@ export async function auditEvents(actor: Actor) {
   if (!canViewAuditLog(actor))
     throw new HttpError(
       403,
-      "Only Admin and Accounts may view the organization audit log.",
+      "Only Admin may view the organization audit log.",
     );
   return db.auditLog.findMany({
     where: await companyFilter(actor),

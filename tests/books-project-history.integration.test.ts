@@ -15,7 +15,7 @@ import { assertMySqlTestDatabase, bindTestDestination, createTestCompany } from 
 
 const tag = randomUUID().slice(0, 8), prefix = `97${BigInt(`0x${tag}`).toString()}`;
 const booksA = `${prefix}1`, booksB = `${prefix}2`, crmOrganizationId = `${prefix}3`;
-let admin: Actor, manager: Actor, entry: Actor, outsider: Actor;
+let admin: Actor, manager: Actor, entry: Actor, outsider: Actor, accounts: Actor;
 let companyA: string, companyB: string, crmRun: string, runA: string, runB: string;
 let snapshotA: string, snapshotB: string, billA: string, billB: string, sameNamedJob: string;
 const verifiedAt = new Date(Date.now() - 60_000).toISOString();
@@ -46,10 +46,10 @@ beforeAll(async () => {
   vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("Project history cache must not contact a provider"); }));
   vi.stubEnv("ZOHO_BOOKS_WRITE_ENABLED", "true");
   vi.stubEnv("ALLOW_PRODUCTION_ACCOUNTING_WRITES", "true");
-  [admin, manager, entry, outsider] = await Promise.all((["ADMIN", "MANAGEMENT", "DATA_ENTRY", "ADMIN"] as const).map((role, index) =>
+  [admin, manager, entry, outsider, accounts] = await Promise.all((["ADMIN", "MANAGEMENT", "DATA_ENTRY", "ADMIN", "ACCOUNTS"] as const).map((role, index) =>
     db.user.create({ data: { email: `project-history-${index}-${tag}@example.invalid`, name: "Fictional history actor", role, passwordHash: "unusable" } })));
-  companyA = (await createTestCompany(`project history A ${tag}`, [admin, manager, entry])).id;
-  companyB = (await createTestCompany(`project history B ${tag}`, [admin, outsider])).id;
+  companyA = (await createTestCompany(`project history A ${tag}`, [admin, manager, entry, accounts])).id;
+  companyB = (await createTestCompany(`project history B ${tag}`, [admin, outsider, accounts])).id;
   for (const [companyId, organizationId] of [[companyA, booksA], [companyB, booksB]]) {
     await bindTestDestination(companyId, { target: "ZOHO", organizationId, environment: "production" });
     await db.companyCrmSource.create({ data: { companyId, organizationId: crmOrganizationId, dataCenter: "US", environment: "production" } });
@@ -109,6 +109,24 @@ describe("source-verified project history on disposable MySQL", () => {
     expect(ledger.links.linkedJobs.size).toBe(0);
     expect((await getJob(admin, sameNamedJob)).booksBills).toEqual([]);
     expect(await financialCounts()).toEqual(before);
+  });
+
+  it("preserves Accounts company-authorized bill history while withholding CRM contract values", async () => {
+    const original = await db.crmJobSnapshot.findUniqueOrThrow({ where: { id: snapshotA } });
+    // An assigned profile without a canonical Job remains pending; READY requires both links.
+    await db.crmJobSnapshot.update({ where: { id: snapshotA }, data: { companyId: companyA, linkStatus: "PENDING" } });
+    try {
+      const history = await loadBooksProjectHistory(accounts, companyA);
+      expect(history.relations).toEqual(expect.arrayContaining([expect.objectContaining({ billId: billA, companyId: companyA, snapshotId: snapshotA })]));
+      const profile = await getCrmJobSnapshot(accounts, snapshotA);
+      expect(profile).toMatchObject({ amount: null, approvedVariations: null });
+      expect(profile.booksBills).toEqual(expect.arrayContaining([expect.objectContaining({ id: billA, total: "50", href: `/bills/books/${billA}` })]));
+      expect((await loadBooksProjectHistory(entry, companyA)).relations).toEqual([]);
+      await expect(loadBooksProjectHistory(accounts, `unassigned-${tag}`)).rejects.toMatchObject({ status: 404 });
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      await db.crmJobSnapshot.update({ where: { id: snapshotA }, data: { companyId: original.companyId, linkStatus: original.linkStatus } });
+    }
   });
 
   it("returns complete legacy profile history with only safe original metadata and unknown allocation", async () => {

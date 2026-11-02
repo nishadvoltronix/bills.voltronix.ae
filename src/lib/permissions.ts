@@ -44,11 +44,20 @@ export function canManageJobs(actor: Actor): boolean {
 }
 
 export function canViewFinancialSummary(actor: Actor): boolean {
-  return actor.role !== "DATA_ENTRY";
+  return ["ADMIN", "MANAGEMENT"].includes(actor.role);
+}
+
+/** Data Entry retains its own scoped statistics; Accounts uses bill entry and history. */
+export function canViewOverview(actor: Actor): boolean {
+  return actor.role !== "ACCOUNTS";
+}
+
+export function canViewBooksHistory(actor: Actor): boolean {
+  return ["ADMIN", "ACCOUNTS", "MANAGEMENT"].includes(actor.role);
 }
 
 export function canViewAuditLog(actor: Actor): boolean {
-  return ["ADMIN", "ACCOUNTS"].includes(actor.role);
+  return actor.role === "ADMIN";
 }
 
 /** Ownership restriction only. Every database query must also apply current company membership. */

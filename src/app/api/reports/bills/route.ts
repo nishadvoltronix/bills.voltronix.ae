@@ -3,7 +3,7 @@ import { handle, json } from "@/lib/http";
 import { expenseReport, exportExpenseReport } from "@/lib/services/reports";
 export async function GET(request: Request) {
   return handle(async () => {
-    const actor = await requireUser(["ADMIN", "ACCOUNTS", "MANAGEMENT"]);
+    const actor = await requireUser(["ADMIN", "MANAGEMENT"]);
     const params = new URL(request.url).searchParams;
     const format = params.get("format");
     params.delete("format");

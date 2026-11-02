@@ -4,7 +4,7 @@ import { dashboard } from "@/lib/services/catalog";
 export async function GET(request: Request) {
   return handle(async () =>
     json(
-      await dashboard(await requireUser(), new URL(request.url).searchParams),
+      await dashboard(await requireUser(["ADMIN", "MANAGEMENT", "DATA_ENTRY"]), new URL(request.url).searchParams),
     ),
   );
 }

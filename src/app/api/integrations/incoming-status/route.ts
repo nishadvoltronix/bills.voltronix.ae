@@ -4,7 +4,7 @@ import { getIncomingSyncStatus } from "@/lib/services/incoming-sync-status";
 
 export async function GET(request: Request) {
   return handle(async () => {
-    const actor = await requireUser(["ADMIN", "ACCOUNTS", "MANAGEMENT"]);
+    const actor = await requireUser(["ADMIN", "MANAGEMENT"]);
     const params = new URL(request.url).searchParams;
     const companyId = params.get("companyId") ?? undefined;
     if ([...params.keys()].some(key => key !== "companyId") ||

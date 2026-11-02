@@ -7,7 +7,8 @@ import { db } from "@/lib/db";
 import { HttpError } from "@/lib/http";
 import { hashPassword, verifyPassword } from "@/lib/password";
 import { reserveAuthenticationAttempt } from "@/lib/security/authentication-attempts";
-import { AUTH_RETURN_PATH_HEADER, loginUrl } from "@/lib/auth-navigation";
+import { AUTH_RETURN_PATH_HEADER, canAccessRolePath, loginUrl, roleHomePath } from "@/lib/auth-navigation";
+import { AUTH_RESOURCE_PATH_HEADER, canAccessRoleApiPath } from "@/lib/route-access";
 
 export type Actor = { id: string; email: string; name: string; role: Role };
 export const SESSION_COOKIE = "voltronix_session";
@@ -62,6 +63,9 @@ export async function requireUser(roles?: readonly Role[]): Promise<Actor> {
       403,
       "You do not have permission to perform this action.",
     );
+  if (actor.role === "ACCOUNTS" &&
+    !canAccessRoleApiPath(actor.role, (await headers()).get(AUTH_RESOURCE_PATH_HEADER)))
+    throw new HttpError(403, "This account is restricted to bill entry, bills and vendors.");
   return actor;
 }
 
@@ -69,6 +73,11 @@ export async function requirePageUser(): Promise<Actor> {
   const actor = await getCurrentUser();
   if (!actor)
     redirect(loginUrl((await headers()).get(AUTH_RETURN_PATH_HEADER)));
+  if (actor.role === "ACCOUNTS") {
+    const requestHeaders = await headers();
+    const pathname = requestHeaders.get(AUTH_RESOURCE_PATH_HEADER) ?? "";
+    if (!canAccessRolePath(actor.role, pathname)) redirect(roleHomePath(actor.role));
+  }
   return actor;
 }
 

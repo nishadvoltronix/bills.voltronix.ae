@@ -39,7 +39,8 @@ type Context = {
   authorized: boolean;
   warning: string | null;
 };
-export type CrmJobSuggestion = ReturnType<typeof mapCrmJob> & {
+export type CrmJobSuggestion = Omit<ReturnType<typeof mapCrmJob>, "approvedVariations"> & {
+  approvedVariations: string | null;
   id: string | null; companyId: string; stage: string | null; sourceId: string;
   crmOrganizationId: string; dataCenter: DataCenter; environment: "production" | "sandbox"; booksOrganizationId: string;
 };
@@ -209,7 +210,7 @@ async function searchCompanyCrmJobs(actor: Actor, input: { companyId: string; q:
       const locals = matches.length ? await db.job.findMany({ where: { companyId: input.companyId, externalCrmId: { in: matches.map(job => job.externalCrmId) } }, select: { id: true, externalCrmId: true } }) : [];
       result.jobs = matches.slice(0, 25).map(job => ({ ...job, ...selection(before),
         contractValue: canViewFinancialSummary(actor) ? job.contractValue : null,
-        approvedVariations: canViewFinancialSummary(actor) ? job.approvedVariations : "0.00",
+        approvedVariations: canViewFinancialSummary(actor) ? job.approvedVariations : actor.role === "ACCOUNTS" ? null : "0.00",
         id: locals.find(local => local.externalCrmId === job.externalCrmId)?.id ?? null }));
       result.hasMore = response.more || matches.length > 25;
     } catch {

@@ -6,7 +6,7 @@ export async function GET(request?: Request) {
   return integrationHandle(async () =>
     json(
       await listIntegrationJobs(
-        await requireUser(["ADMIN", "ACCOUNTS", "MANAGEMENT"]),
+        await requireUser(["ADMIN", "MANAGEMENT"]),
         request
           ? (new URL(request.url).searchParams.get("organizationId") ??
               undefined)

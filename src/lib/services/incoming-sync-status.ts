@@ -6,7 +6,7 @@ import { HttpError } from "@/lib/http";
 import type { IncomingSyncStatus, IncomingSyncSourceStatus } from "@/lib/incoming-sync-types";
 import { incomingSyncSettings } from "./incoming-sync-config";
 
-const roles = ["ADMIN", "ACCOUNTS", "MANAGEMENT"] as const;
+const roles = ["ADMIN", "MANAGEMENT"] as const;
 const label = (value: string) => value.replace(/^\[CONNECTION CHECK\]\s*/i, "");
 export async function getIncomingSyncStatus(actor: Actor, companyId?: string): Promise<IncomingSyncStatus> {
   if (!(roles as readonly string[]).includes(actor.role) || !await db.user.findFirst({ where: { id: actor.id, active: true, role: actor.role }, select: { id: true } }))

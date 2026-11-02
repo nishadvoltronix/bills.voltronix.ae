@@ -189,7 +189,10 @@ describe("core bill workflow on real MySQL", () => {
       expect(saved.syncRecords.every(record => record.status === "NOT_CONFIGURED" && !record.lastError)).toBe(true);
       expect(await db.integrationJob.count({ where: { billId: saved.id } })).toBe(0);
       expect(await db.auditLog.count({ where: { entityId: saved.id, action: "SYNC_CONFIGURATION_BLOCKED" } })).toBe(0);
-      expect((await getJob(accounts, job.id)).job).toMatchObject({ recognizedExpenses: "190.00", outstanding: "199.50" });
+      const accountHistory = await getJob(accounts, job.id);
+      expect(accountHistory.job).toMatchObject({ recognizedExpenses: null, outstanding: null, contractValue: null });
+      expect(accountHistory.bills).toEqual(expect.arrayContaining([expect.objectContaining({ id: saved.id, total: "199.50" })]));
+      expect((await getJob(admin, job.id)).job).toMatchObject({ recognizedExpenses: "190.00", outstanding: "199.50" });
       await actOnBill(accounts, saved.id, { action: "payment", version: saved.version, amount: "50.00", reference: `MANUAL-PAY-${tag}` });
       expect((await getBill(staff, saved.id))).toMatchObject({ status: "READY", paidAmount: "50.00", outstanding: "149.50" });
       expect((await expenseReport(management, new URLSearchParams({ jobId: job.id, currency: "AED" }))).totals)
@@ -477,18 +480,22 @@ describe("core bill workflow on real MySQL", () => {
   });
 
   it("recognizes finalized net costs immediately and removes cancelled costs", async () => {
-    const before = (await getJob(accounts, jobId)).job.recognizedExpenses;
+    const before = (await getJob(admin, jobId)).job.recognizedExpenses;
     const bill = await createBill(staff, input({ submit: true }));
-    expect(Number((await getJob(accounts, jobId)).job.recognizedExpenses)).toBe(
+    expect(Number((await getJob(management, jobId)).job.recognizedExpenses)).toBe(
       Number(before) + 190,
     );
+    const accountHistory = await getJob(accounts, jobId);
+    expect(accountHistory.job.recognizedExpenses).toBeNull();
+    expect(accountHistory.bills).toEqual(expect.arrayContaining([expect.objectContaining({ id: bill.id, total: "199.50" })]));
     const cancelled = await actOnBill(accounts, bill.id, {
       action: "cancel",
       version: bill.version,
       reason: "Fictional cancellation",
     });
     expect(cancelled.outstanding).toBe("0.00");
-    expect((await getJob(accounts, jobId)).job.recognizedExpenses).toBe(before);
+    expect((await getJob(admin, jobId)).job.recognizedExpenses).toBe(before);
+    expect((await getJob(accounts, jobId)).job.recognizedExpenses).toBeNull();
   });
 
   it("rejects unknown jobs, mixed currencies, invalid totals, and untrusted calculated fields", async () => {

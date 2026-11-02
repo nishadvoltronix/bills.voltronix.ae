@@ -44,7 +44,8 @@ let owner: Actor,
   otherOwner: Actor,
   ownerB: Actor,
   human: Actor,
-  reviewer: Actor;
+  reviewer: Actor,
+  ocrAdmin: Actor;
 const tokenA = randomBytes(32).toString("hex"),
   tokenA2 = randomBytes(32).toString("hex"),
   tokenB = randomBytes(32).toString("hex");
@@ -109,7 +110,7 @@ beforeAll(async () => {
       );
     }),
   );
-  [owner, otherOwner, ownerB, human, reviewer] = await Promise.all(
+  [owner, otherOwner, ownerB, human, reviewer, ocrAdmin] = await Promise.all(
     (
       [
         "DATA_ENTRY",
@@ -117,6 +118,7 @@ beforeAll(async () => {
         "DATA_ENTRY",
         "DATA_ENTRY",
         "ACCOUNTS",
+        "ADMIN",
       ] as const
     ).map((role, index) =>
       db.user.create({
@@ -135,6 +137,7 @@ beforeAll(async () => {
       otherOwner,
       human,
       reviewer,
+      ocrAdmin,
     ])
   ).id;
   companyB = (await createTestCompany(`scanner B ${tag}`, [ownerB])).id;
@@ -209,7 +212,9 @@ describe("scanner intake on real MySQL with no live provider calls", () => {
       byteSize: bytes.length,
       ocrDocumentId: result.ocrDocumentId,
     });
-    const document = await getOcrDocument(reviewer, result.ocrDocumentId);
+    await expect(getOcrDocument(reviewer, result.ocrDocumentId)).rejects.toMatchObject({ status: 403 });
+    await expect(downloadOcrDocument(reviewer, result.ocrDocumentId)).rejects.toMatchObject({ status: 403 });
+    const document = await getOcrDocument(ocrAdmin, result.ocrDocumentId);
     expect(document.failureCode).toBe("NOT_CONFIGURED");
     expect(document.scannerSourceName).toBe("DEMO scanner source 0");
     expect(document).not.toHaveProperty("scannerImports");
@@ -449,8 +454,9 @@ describe("scanner intake on real MySQL with no live provider calls", () => {
     const b = await (await POST(request(bytes, sourceB, tokenB))).json();
     expect(a.ocrDocumentId).not.toBe(b.ocrDocumentId);
     await expect(
-      getOcrDocument(reviewer, b.ocrDocumentId),
+      getOcrDocument(ocrAdmin, b.ocrDocumentId),
     ).rejects.toMatchObject({ status: 404 });
+    await expect(getOcrDocument(reviewer, b.ocrDocumentId)).rejects.toMatchObject({ status: 403 });
     await expect(
       downloadOcrDocument(ownerB, a.ocrDocumentId),
     ).rejects.toMatchObject({ status: 404 });
@@ -664,14 +670,18 @@ describe("scanner intake on real MySQL with no live provider calls", () => {
     }));
     await processOcrQueue(1, adapter);
     expect(adapter.start).toHaveBeenCalledTimes(1);
-    const document = await getOcrDocument(reviewer, imported.ocrDocumentId);
+    const document = await getOcrDocument(ocrAdmin, imported.ocrDocumentId);
     expect(document.status).toBe("REVIEW_REQUIRED");
     expect(document.billId).toBeNull();
-    const draft = await reviewOcrDocument(reviewer, document.id, {
+    const review = {
       version: document.version,
       confirmed: true,
       bill: input(invoiceNumber),
-    });
+    };
+    const beforeReview = await db.bill.count();
+    await expect(reviewOcrDocument(reviewer, document.id, review)).rejects.toMatchObject({ status: 403 });
+    expect(await db.bill.count()).toBe(beforeReview);
+    const draft = await reviewOcrDocument(ocrAdmin, document.id, review);
     expect(draft).toMatchObject({
       status: "DRAFT",
       paidAmount: "0.00",
@@ -682,7 +692,7 @@ describe("scanner intake on real MySQL with no live provider calls", () => {
       0,
     );
     expect(
-      (await downloadOcrDocument(reviewer, document.id)).bytes.equals(bytes),
+      (await downloadOcrDocument(ocrAdmin, document.id)).bytes.equals(bytes),
     ).toBe(true);
     vi.stubEnv("OCR_PROVIDER", "disabled");
   });

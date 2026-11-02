@@ -14,7 +14,7 @@ const stateIds = { booksA: `incoming-status-${tag}-books-a`, booksB: `incoming-s
   booksC: `incoming-status-${tag}-books-c`, crm: `incoming-status-${tag}-crm`, otherDc: `incoming-status-${tag}-crm-eu` };
 const privateValues = { scopeHash: "d".repeat(64), leaseToken: `fictional-private-lease-${tag}`,
   providerError: `FICTIONAL_PRIVATE_PROVIDER_ERROR_${tag}`, cursor: `fictional-private-cursor-${tag}` };
-let admin: Actor, reader: Actor, accounts: Actor, entry: Actor, outsider: Actor;
+let admin: Actor, reader: Actor, accounts: Actor, entry: Actor, outsider: Actor, betaReader: Actor;
 let companyA: Awaited<ReturnType<typeof createTestCompany>>,
   companyB: Awaited<ReturnType<typeof createTestCompany>>,
   companyC: Awaited<ReturnType<typeof createTestCompany>>;
@@ -28,12 +28,12 @@ beforeAll(async () => {
   vi.stubEnv("INCOMING_SYNC_RECONCILE_SECONDS", "86400");
   vi.stubEnv("INCOMING_SYNC_MAX_REQUESTS", "40");
   vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("Status reads must not contact a provider."); }));
-  [admin, reader, accounts, entry, outsider] = await Promise.all(
-    (["ADMIN", "MANAGEMENT", "ACCOUNTS", "DATA_ENTRY", "ADMIN"] as const).map((role, index) =>
+  [admin, reader, accounts, entry, outsider, betaReader] = await Promise.all(
+    (["ADMIN", "MANAGEMENT", "ACCOUNTS", "DATA_ENTRY", "ADMIN", "MANAGEMENT"] as const).map((role, index) =>
       db.user.create({ data: { name: `Fictional incoming status reader ${index}`, role,
         email: `incoming-status-${tag}-${index}@example.invalid`, passwordHash: "unusable-status-fixture" } })));
   companyA = await createTestCompany(`incoming status Alpha ${tag}`, [admin, reader, entry]);
-  companyB = await createTestCompany(`incoming status Beta ${tag}`, [admin, accounts]);
+  companyB = await createTestCompany(`incoming status Beta ${tag}`, [admin, accounts, betaReader]);
   companyC = await createTestCompany(`incoming status Private ${tag}`, [outsider]);
   for (const [companyId, organizationId] of [[companyA.id, booksA], [companyB.id, booksB], [companyC.id, booksC]])
     await bindTestDestination(companyId, { target: "ZOHO", organizationId, environment: "production" });
@@ -94,7 +94,8 @@ describe("saved incoming synchronization status on disposable MySQL", () => {
     expect(alpha.sources.find(source => source.kind === "CRM")).toMatchObject({ companyId: null,
       companyName: companyA.name, processedCount: null });
     expect(JSON.stringify(alpha)).not.toContain(companyB.name);
-    const beta = await getIncomingSyncStatus(accounts);
+    await expect(getIncomingSyncStatus(accounts)).rejects.toMatchObject({ status: 403 });
+    const beta = await getIncomingSyncStatus(betaReader);
     expect(ids(beta)).toEqual([stateIds.booksB, stateIds.crm].sort());
     expect(beta.sources.find(source => source.kind === "CRM")).toMatchObject({ companyName: companyB.name, processedCount: null });
     expect(JSON.stringify(beta)).not.toContain(companyA.name);
@@ -128,6 +129,7 @@ describe("saved incoming synchronization status on disposable MySQL", () => {
   });
 
   it("denies Data Entry and stale or forged role claims even with current company membership", async () => {
+    await expect(getIncomingSyncStatus(accounts)).rejects.toMatchObject({ status: 403 });
     await expect(getIncomingSyncStatus(entry)).rejects.toMatchObject({ status: 403 });
     await expect(getIncomingSyncStatus({ ...entry, role: "MANAGEMENT" })).rejects.toMatchObject({ status: 403 });
     await expect(getIncomingSyncStatus({ ...reader, role: "ADMIN" })).rejects.toMatchObject({ status: 403 });

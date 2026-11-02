@@ -26,6 +26,7 @@ import { api, errorMessage } from "./api";
 import { Notice } from "./ui";
 import { ManualEntryContext, OcrWorkspaceContext } from "./application-mode";
 import { accountDisplayName } from "./account-display-name";
+import { canAccessRolePath, roleHomePath } from "@/lib/auth-navigation";
 import voltronixLogo from "@/assets/voltronix-logo.png";
 export { useManualEntryOnly, useOcrWorkspaceEnabled } from "./application-mode";
 
@@ -118,6 +119,7 @@ export function AppShell({
   const path = usePathname();
   const router = useRouter();
   const displayName = accountDisplayName(user.name) || user.email;
+  const home = roleHomePath(user.role);
   const [open, setOpen] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -158,8 +160,13 @@ export function AppShell({
       previous?.focus();
     };
   }, [open]);
-  const showOcr = ocrWorkspaceEnabled && !manualEntryOnly;
-  const nav = navigation.filter((item) => item.roles.includes(user.role) &&
+  const showOcr = user.role !== "ACCOUNTS" && ocrWorkspaceEnabled && !manualEntryOnly;
+  const scopedNavigation = user.role === "ACCOUNTS" ? [
+    { label: "Bill entry", href: "/bills/manual", icon: ReceiptText, roles: ["ACCOUNTS"], section: "WORKSPACE" },
+    ...navigation.filter((item) => ["/bills", "/vendors", "/account"].includes(item.href))
+      .map((item) => item.href === "/bills" ? { ...item, label: "Bills" } : item),
+  ] : navigation;
+  const nav = scopedNavigation.filter((item) => item.roles.includes(user.role) && canAccessRolePath(user.role, item.href) &&
     (showOcr || !item.href.startsWith("/ocr")));
   const active = [...nav]
     .sort((a, b) => b.href.length - a.href.length)
@@ -196,7 +203,7 @@ export function AppShell({
           aria-label="Main navigation"
         >
           <div className="sidebar-brand">
-            <Link href="/dashboard" aria-label="Voltronix dashboard">
+            <Link href={home} aria-label="Voltronix workspace">
               <Brand light />
             </Link>
             <button
@@ -275,7 +282,7 @@ export function AppShell({
               >
                 <Menu size={22} />
               </button>
-              <span className="breadcrumb-workspace">Workspace</span>
+              <Link href={home} className="breadcrumb-workspace">Workspace</Link>
               <ChevronRight size={13} />
               <strong>{active?.label ?? "Bills & finance"}</strong>
             </div>

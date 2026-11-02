@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import { NextRequest } from "next/server";
 import {
   AUTH_RETURN_PATH_HEADER,
+  canAccessRolePath,
   loginDestination,
   loginUrl,
+  roleHomePath,
   safeReturnPath,
 } from "@/lib/auth-navigation";
 import { proxy } from "@/proxy";
@@ -18,6 +20,41 @@ describe("post-login navigation", () => {
     );
     expect(loginDestination("MANAGEMENT", null)).toBe("/management");
     expect(loginDestination("ADMIN", null)).toBe("/dashboard");
+    expect(loginDestination("DATA_ENTRY", null)).toBe("/dashboard");
+    expect(loginDestination("ACCOUNTS", null)).toBe("/bills/manual");
+  });
+
+  it.each([
+    "/bills", "/bills/", "/bills/manual", "/bills/new",
+    "/bills/example-bill_123", "/bills/example-bill_123/edit",
+    "/bills/books", "/bills/books/books-bill_123",
+    "/vendors", "/account", "/account/",
+    "/jobs/job_123", "/jobs/crm/snapshot_123",
+  ])("retains an accounts bill-entry or history destination: %s", path => {
+    expect(canAccessRolePath("ACCOUNTS", path)).toBe(true);
+    expect(safeReturnPath(path, "ACCOUNTS")).toBe(path);
+    expect(loginDestination("ACCOUNTS", path)).toBe(path);
+  });
+
+  it.each([
+    "/dashboard", "/dashboard/", "/management", "/audit", "/approvals",
+    "/integrations", "/ocr", "/ocr/batch", "/ocr/documents/document_123",
+    "/jobs", "/jobs/", "/account/books-authorization", "/account/crm-authorization",
+    "/bills/books/example/edit", "/vendors/example", "/jobs/job_123/edit",
+  ])("blocks an accounts return to a restricted page: %s", path => {
+    expect(canAccessRolePath("ACCOUNTS", path)).toBe(false);
+    expect(safeReturnPath(path, "ACCOUNTS")).toBeNull();
+    expect(loginDestination("ACCOUNTS", path)).toBe("/bills/manual");
+  });
+
+  it("leaves other roles' home and supported page policies unchanged", () => {
+    expect(roleHomePath("ADMIN")).toBe("/dashboard");
+    expect(roleHomePath("DATA_ENTRY")).toBe("/dashboard");
+    expect(roleHomePath("MANAGEMENT")).toBe("/management");
+    for (const role of ["ADMIN", "DATA_ENTRY", "MANAGEMENT"]) {
+      expect(canAccessRolePath(role, "/dashboard")).toBe(true);
+      expect(loginDestination(role, "/jobs")).toBe("/jobs");
+    }
   });
 
   it.each([
@@ -40,6 +77,9 @@ describe("post-login navigation", () => {
     expect(safeReturnPath(value)).toBeNull();
     expect(loginUrl(value)).toBe("/login");
     expect(loginDestination("ADMIN", value)).toBe("/dashboard");
+    expect(canAccessRolePath("ACCOUNTS", value)).toBe(false);
+    expect(safeReturnPath(value, "ACCOUNTS")).toBeNull();
+    expect(loginDestination("ACCOUNTS", value)).toBe("/bills/manual");
   });
 
   it("overwrites a spoofed return header with the actual page pathname", () => {

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Role } from "@prisma/client";
 
 const state = vi.hoisted(() => ({
+  resourcePath: "",
   cookie: undefined as string | undefined,
   session: null as null | {
     expiresAt: Date;
@@ -24,6 +25,7 @@ const state = vi.hoisted(() => ({
   cookieDelete: vi.fn(),
 }));
 vi.mock("next/headers", () => ({
+  headers: async () => new Headers({ "x-voltronix-resource-path": state.resourcePath }),
   cookies: async () => ({
     get: () => (state.cookie ? { value: state.cookie } : undefined),
     delete: state.cookieDelete,
@@ -162,6 +164,7 @@ const calls = routes.flatMap(([route, load, methods]) =>
   methods.map((method) => ({ route, load, method })),
 );
 async function call(route: string, method = "GET", body: unknown = {}) {
+  state.resourcePath = `/api/${route}`;
   const entry = calls.find(
     (item) => item.route === route && item.method === method,
   )!;
@@ -254,6 +257,19 @@ describe("protected endpoint authentication", () => {
       },
       include: { user: true },
     });
+  });
+  it("limits Accounts API access using the trusted request path", async () => {
+    login("ACCOUNTS");
+    state.resourcePath = "/api/bills";
+    expect((await requireUser()).role).toBe("ACCOUNTS");
+    state.resourcePath = "/api/dashboard";
+    await expect(requireUser()).rejects.toMatchObject({ status: 403 });
+    state.resourcePath = "/api/integrations/jobs";
+    await expect(requireUser()).rejects.toMatchObject({ status: 403 });
+    state.resourcePath = "/api/integrations/jobs/exact-bill-operation";
+    expect((await requireUser()).role).toBe("ACCOUNTS");
+    state.resourcePath = "";
+    await expect(requireUser()).rejects.toMatchObject({ status: 403 });
   });
   it("fails closed for production authentication without HTTPS", async () => {
     vi.stubEnv("APP_ENV", "production");

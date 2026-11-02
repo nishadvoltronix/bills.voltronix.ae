@@ -8,9 +8,13 @@ import { Metric } from "./records";
 import { ImportedBillsTable } from "./imported-bills-table";
 import type { ImportedBillSummary } from "./types";
 import type { CrmJobSnapshotDto } from "@/lib/services/crm-job-import";
+import { useUser } from "./app-shell";
+import { roleHomePath } from "@/lib/auth-navigation";
 import styles from "./dashboard-overview.module.css";
 
 export function CrmJobProfile({ id }: { id: string }) {
+  const user = useUser();
+  const showJobFinancials = user.role !== "ACCOUNTS";
   const state = useApi<{ job: CrmJobSnapshotDto & { displayReference?: string | null;
     historyCompanies?: { id: string; name: string }[]; booksBills?: ImportedBillSummary[]; historyWarnings?: string[] } }>(`/api/jobs/crm/${encodeURIComponent(id)}`);
   if (state.loading) return <LoadingPanel />;
@@ -25,7 +29,7 @@ export function CrmJobProfile({ id }: { id: string }) {
   const isDeal = !job.jobNumber && !job.canonicalJobId;
   const value = (amount: string | null) => job.currencyCode ? money(amount, job.currencyCode) : "Not available";
   return <>
-    <Link className="back-link" href="/dashboard"><ArrowLeft size={15} />Back to dashboard</Link>
+    <Link className="back-link" href={showJobFinancials ? "/dashboard" : roleHomePath(user.role)}><ArrowLeft size={15} />{showJobFinancials ? "Back to dashboard" : "Back to bill entry"}</Link>
     <PageHeader eyebrow={job.jobNumber || (job.displayReference ? `CRM DEAL · ${job.displayReference}` : "CRM DEAL")}
       title={job.name || job.jobNumber || job.displayReference || "CRM deal"} description={job.customerName || "Customer not provided"}>
       <Badge>{job.stage || "Stage not provided"}</Badge>
@@ -43,10 +47,10 @@ export function CrmJobProfile({ id }: { id: string }) {
           : "This CRM record is available for reference. Its job number and company routing must be verified before bills can be entered against it."}
       {job.isStale && <p>This record was not present in the latest completed CRM import. Review its source before using it.</p>}
     </Notice>
-    <div className="metrics-grid">
+    {showJobFinancials && <div className="metrics-grid">
       <Metric label={isDeal ? "CRM deal amount" : "CRM contract value"} value={value(job.amount)} note="Recorded source amount" icon={<BriefcaseBusiness size={18} />} />
       <Metric label="Approved variations" value={value(job.approvedVariations)} note="Recorded source amount" icon={<BriefcaseBusiness size={18} />} />
-    </div>
+    </div>}
     {job.historyWarnings?.length ? <Notice>{job.historyWarnings.map(warning => <p key={warning}>{warning}</p>)}</Notice> : null}
     {job.booksBills && <Card className={styles.history}>
       <div className="panel-heading"><div><h2>Linked Zoho Books history</h2>
@@ -57,7 +61,7 @@ export function CrmJobProfile({ id }: { id: string }) {
       <div className={styles.sourceHeading}><h2>CRM source record</h2><Badge>{job.linkStatus.toLowerCase().replaceAll("_", " ")}</Badge></div>
       <p>Last imported: {dateTime(job.lastSeenAt)} Dubai.</p>
       {job.sourceModifiedAt && <p>Source modified: {dateTime(job.sourceModifiedAt)} Dubai.</p>}
-      <p>Invoice costs and profit are unavailable until this record is linked to a verified billing job.</p>
+      {showJobFinancials && <p>Invoice costs and profit are unavailable until this record is linked to a verified billing job.</p>}
     </Card>
   </>;
 }
