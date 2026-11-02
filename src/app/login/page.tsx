@@ -1,31 +1,52 @@
 "use client";
-import { useState } from "react";
+
+import Image from "next/image";
+import { useState, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
-import {
-  ArrowRight,
-  Eye,
-  EyeOff,
-  FileCheck2,
-  LoaderCircle,
-  LockKeyhole,
-  ShieldCheck,
-  TrendingUp,
-} from "lucide-react";
-import { Brand } from "@/components/app-shell";
-import { Button, Field, Input, Notice } from "@/components/ui";
+import { Eye, EyeOff, LoaderCircle } from "lucide-react";
+import { Button, Input, Notice } from "@/components/ui";
 import { api, errorMessage } from "@/components/api";
 import type { User } from "@/components/types";
 import { loginDestination } from "@/lib/auth-navigation";
+import loginLogo from "@/assets/login-logo.png";
+import styles from "./login.module.css";
+
+const rememberedEmailKey = "voltronix-bills:login-email";
+
+function readRememberedEmail() {
+  try {
+    return window.localStorage.getItem(rememberedEmailKey)?.slice(0, 254) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function subscribeToRememberedEmail(update: () => void) {
+  window.addEventListener("storage", update);
+  return () => window.removeEventListener("storage", update);
+}
+
+const emptyEmail = () => "";
 
 export default function LoginPage() {
   const router = useRouter();
-  const [email, setEmail] = useState("");
+  const rememberedEmail = useSyncExternalStore(
+    subscribeToRememberedEmail,
+    readRememberedEmail,
+    emptyEmail,
+  );
+  const [editedEmail, setEmail] = useState<string | null>(null);
+  const email = editedEmail ?? rememberedEmail;
   const [password, setPassword] = useState("");
+  const [rememberEmail, setRememberEmail] = useState(true);
   const [visible, setVisible] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (loading) return;
+    setEmail(email);
     setLoading(true);
     setError("");
     try {
@@ -33,6 +54,15 @@ export default function LoginPage() {
         method: "POST",
         body: JSON.stringify({ email, password }),
       });
+      try {
+        if (rememberEmail) {
+          window.localStorage.setItem(rememberedEmailKey, email.trim());
+        } else {
+          window.localStorage.removeItem(rememberedEmailKey);
+        }
+      } catch {
+        // Browser storage preferences must never prevent a successful sign-in.
+      }
       router.replace(
         loginDestination(
           result.user.role,
@@ -45,132 +75,117 @@ export default function LoginPage() {
       setLoading(false);
     }
   }
+
   return (
-    <div className="login-page">
-      <section className="login-story">
-        <Brand light />
-        <div className="login-story-content">
-          <div className="login-eyebrow">
-            <span />
-            FINANCE, WITH CLARITY
+    <main className={styles.page}>
+      <section className={styles.card} aria-labelledby="login-heading">
+        <Image
+          src={loginLogo}
+          alt="VOLTRONIX"
+          className={styles.logo}
+          loading="eager"
+          unoptimized
+        />
+        <h1 id="login-heading" className={styles.heading}>
+          Login to your Workspace
+        </h1>
+        {error && (
+          <div className={styles.error}>
+            <Notice tone="error">{error}</Notice>
           </div>
-          <h1>
-            Every bill.
-            <br />
-            Every job.
-            <br />
-            <span>In one place.</span>
-          </h1>
-          <p>
-            Bring confidence to your financial operations, from the first
-            invoice to the final job review.
-          </p>
-          <div className="login-features">
-            <div>
-              <span>
-                <FileCheck2 size={19} />
-              </span>
-              <section>
-                <strong>Simple bill management</strong>
-                <p>Capture, review, and approve with a clear trail.</p>
-              </section>
-            </div>
-            <div>
-              <span>
-                <TrendingUp size={19} />
-              </span>
-              <section>
-                <strong>See the full job picture</strong>
-                <p>Understand your costs and estimated profitability.</p>
-              </section>
-            </div>
-            <div>
-              <span>
-                <ShieldCheck size={19} />
-              </span>
-              <section>
-                <strong>The right access for every role</strong>
-                <p>Secure financial records and accountable changes.</p>
-              </section>
-            </div>
+        )}
+        <form onSubmit={submit} className={styles.form} aria-busy={loading}>
+          <div className={styles.field}>
+            <label className="sr-only" htmlFor="email">
+              Work email
+            </label>
+            <Input
+              className={styles.input}
+              id="email"
+              name="email"
+              type="email"
+              autoComplete="username"
+              placeholder="Email Address"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              maxLength={254}
+              disabled={loading}
+              required
+            />
           </div>
-        </div>
-        <div className="login-story-footer">
-          <span>BUILT FOR VOLTRONIX</span>
-          <span>United Arab Emirates</span>
-        </div>
-        <div className="login-orbit orbit-one" />
-        <div className="login-orbit orbit-two" />
-      </section>
-      <section className="login-form-side">
-        <div className="login-mobile-brand">
-          <Brand />
-        </div>
-        <div className="login-form-wrap">
-          <div className="login-lock">
-            <LockKeyhole size={23} />
+          <div className={[styles.field, styles.password].join(" ")}>
+            <label className="sr-only" htmlFor="password">
+              Password
+            </label>
+            <Input
+              className={styles.input}
+              id="password"
+              name="password"
+              type={visible ? "text" : "password"}
+              autoComplete="current-password"
+              placeholder="Password"
+              value={password}
+              onChange={(event) => {
+                setEmail(email);
+                setPassword(event.target.value);
+              }}
+              disabled={loading}
+              required
+            />
+            <button
+              className={styles.visibility}
+              type="button"
+              onClick={() => setVisible(!visible)}
+              aria-label={visible ? "Hide password" : "Show password"}
+              aria-pressed={visible}
+              disabled={loading}
+            >
+              {visible ? <EyeOff size={16} /> : <Eye size={16} />}
+            </button>
           </div>
-          <div className="eyebrow">VOLTRONIX BILLS & FINANCE</div>
-          <h2>Welcome back</h2>
-          <p className="login-description">
-            Sign in to your financial workspace.
-          </p>
-          {error && <Notice tone="error">{error}</Notice>}
-          <form onSubmit={submit}>
-            <Field label="Work email" htmlFor="email">
-              <Input
-                id="email"
-                name="email"
-                type="email"
-                autoComplete="username"
-                placeholder="you@voltronix.ae"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-                autoFocus
-              />
-            </Field>
-            <Field label="Password" htmlFor="password">
-              <div className="password-field">
-                <Input
-                  id="password"
-                  name="password"
-                  type={visible ? "text" : "password"}
-                  autoComplete="current-password"
-                  placeholder="Enter your password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  required
-                />
-                <button
-                  type="button"
-                  onClick={() => setVisible(!visible)}
-                  aria-label={visible ? "Hide password" : "Show password"}
-                >
-                  {visible ? <EyeOff size={18} /> : <Eye size={18} />}
-                </button>
-              </div>
-            </Field>
-            <Button className="login-submit" type="submit" disabled={loading}>
-              {loading ? <LoaderCircle className="spin" size={17} /> : null}
-              {loading ? "Signing in…" : "Sign in to workspace"}
-              {!loading && <ArrowRight size={17} />}
+          <label
+            className={styles.remember}
+            title="Remember my email on this device"
+          >
+            <input
+              type="checkbox"
+              name="rememberEmail"
+              checked={rememberEmail}
+              aria-describedby="remember-email-help"
+              disabled={loading}
+              onChange={(event) => {
+                setRememberEmail(event.target.checked);
+                if (!event.target.checked) {
+                  setEmail(email);
+                  try {
+                    window.localStorage.removeItem(rememberedEmailKey);
+                  } catch {
+                    // Sign-in also works when browser storage is unavailable.
+                  }
+                }
+              }}
+            />
+            <span>Remember me?</span>
+          </label>
+          <span className="sr-only" id="remember-email-help">
+            Remember your email address on this device. Your password is never
+            saved.
+          </span>
+          <div className={styles.actions}>
+            <Button
+              className={styles.submit}
+              type="submit"
+              disabled={loading}
+              aria-label={
+                loading ? "Signing in…" : "Login — Sign in to workspace"
+              }
+            >
+              {loading && <LoaderCircle className="spin" size={15} />}
+              {loading ? "Signing in…" : "Login"}
             </Button>
-          </form>
-          <div className="login-help">
-            Need access or help signing in?
-            <br />
-            <strong>Contact your workspace administrator.</strong>
           </div>
-          <div className="login-security">
-            <ShieldCheck size={15} />
-            Authorized personnel only · Secure session
-          </div>
-        </div>
-        <footer className="login-footer">
-          © VOLTRONIX. All rights reserved.
-        </footer>
+        </form>
       </section>
-    </div>
+    </main>
   );
 }
