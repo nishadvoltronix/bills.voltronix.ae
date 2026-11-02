@@ -135,9 +135,9 @@ export function BillsList({ approvals = false }: { approvals?: boolean }) {
         </Button>
         {!approvals && user.role !== "MANAGEMENT" && (
           <Button asChild>
-            <Link href="/bills/new">
+            <Link href="/bills/manual">
               <Plus size={17} />
-              Create bill
+              Manual entry
             </Link>
           </Button>
         )}

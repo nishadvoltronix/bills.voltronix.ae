@@ -44,6 +44,7 @@ export function ManualBillEntry() {
   const showJobFinancials = user.role !== "ACCOUNTS";
   const manualEntryOnly = useManualEntryOnly();
   const canEnter = user.role !== "MANAGEMENT";
+  const jobSearchInput = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState("");
   const [submittedQuery, setSubmittedQuery] = useState("");
   const companies = useApi<{ companies: Company[] }>(canEnter ? "/api/companies" : null);
@@ -131,8 +132,8 @@ export function ManualBillEntry() {
   return <>
     <PageHeader eyebrow="MANUAL ENTRY" title="Manual bill entry"
       description="Find a job by its ID, name or an existing bill number. Review its bill history and attachments, then add your invoice.">
-      <Button asChild>
-        <Link href="/bills/new"><Plus size={16} />Manual entry</Link>
+      <Button type="button" onClick={() => jobSearchInput.current?.focus()}>
+        <Plus size={16} />Manual entry
       </Button>
     </PageHeader>
     <Card className="manual-job-search-card">
@@ -145,7 +146,7 @@ export function ManualBillEntry() {
         else setSubmittedQuery(next);
       }}>
         <Field label="Job ID, bill number or job name" htmlFor="manual-job-query" required>
-          <Input id="manual-job-query" value={query} onChange={(event) => { cancelSelection(); setQuery(event.target.value); }}
+          <Input ref={jobSearchInput} id="manual-job-query" value={query} onChange={(event) => { cancelSelection(); setQuery(event.target.value); }}
             required minLength={2} maxLength={100} autoComplete="off" placeholder="Search a job or existing bill" aria-describedby="manual-job-query-hint" />
         </Field>
         <Button type="submit" disabled={query.trim().length < 2 || companies.loading || !!companies.error || !visibleCompanies.length || matches.loading}>
