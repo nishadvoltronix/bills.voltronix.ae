@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useLayoutEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowRight, LoaderCircle, Search } from "lucide-react";
+import { ArrowRight, LoaderCircle, Plus, Search } from "lucide-react";
 import { api, errorMessage, money, useApi } from "./api";
 import { useManualEntryOnly, useUser } from "./app-shell";
 import type { Company, DashboardSearchResult, Job } from "./types";
@@ -130,7 +130,11 @@ export function ManualBillEntry() {
 
   return <>
     <PageHeader eyebrow="MANUAL ENTRY" title="Manual bill entry"
-      description="Find a job by its ID, name or an existing bill number. Review its bill history and attachments, then add your invoice." />
+      description="Find a job by its ID, name or an existing bill number. Review its bill history and attachments, then add your invoice.">
+      <Button asChild>
+        <Link href="/bills/new"><Plus size={16} />Manual entry</Link>
+      </Button>
+    </PageHeader>
     <Card className="manual-job-search-card">
       <form className={`manual-job-search ${styles.searchForm}`} onSubmit={(event) => {
         event.preventDefault();
