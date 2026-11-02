@@ -3,7 +3,7 @@
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
-import { createContext, useContext, useEffect, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useId, useRef, useState } from "react";
 import {
   LayoutDashboard,
   ReceiptText,
@@ -92,12 +92,24 @@ const navigation = [
   },
 ];
 export function Brand({ light = false }: { light?: boolean }) {
+  const filterId = useId();
   return (
     <div className={`brand ${light ? "brand-light" : ""}`}>
+      {light && (
+        <svg width="0" height="0" aria-hidden="true" focusable="false" style={{ position: "absolute" }}>
+          <defs>
+            <filter id={filterId} colorInterpolationFilters="sRGB">
+              {/* Lighten the lettering while preserving the red mark and original alpha. */}
+              <feColorMatrix type="matrix" values="0 0 0 0 1 -1 1 0 0 1 -1 0 1 0 1 0 0 0 1 0" />
+            </filter>
+          </defs>
+        </svg>
+      )}
       <Image
         src={voltronixLogo}
         alt="VOLTRONIX"
         className="brand-logo"
+        style={light ? { filter: `url(#${filterId})` } : undefined}
         loading="eager"
         unoptimized
       />
