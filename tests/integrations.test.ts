@@ -331,12 +331,12 @@ describe("supplier bill accounting contract", () => {
     ).rejects.toMatchObject({ code: "REMOTE_ATTACHMENT_DIFFERS" });
     expect(different).toHaveBeenCalledTimes(1);
   });
-  it("accepts an empty attachment201 only after verifying the stored bytes", async () => {
+  it.each([404, 400])("uploads after missing attachment HTTP %s and accepts an empty 201 only after verifying stored bytes", async status => {
     const bytes = new TextEncoder().encode("fictional original document");
     const sha256 = createHash("sha256").update(bytes).digest("hex");
     const fetcher = vi
       .fn()
-      .mockResolvedValueOnce(response({}, 404))
+      .mockResolvedValueOnce(response({ code: 33003, message: "Attachment not found." }, status))
       .mockResolvedValueOnce(new Response(null, { status: 201 }))
       .mockResolvedValueOnce(new Response(bytes));
     expect(
@@ -352,10 +352,60 @@ describe("supplier bill accounting contract", () => {
       "POST",
       "GET",
     ]);
+    expect(fetcher.mock.calls.every(([url]) => new URL(url).pathname === "/books/v3/bills/999/attachment")).toBe(true);
+    const form = fetcher.mock.calls[1][1].body as FormData;
+    const uploaded = form.get("attachment") as File;
+    expect(uploaded.name).toBe("source.pdf");
+    expect(new Uint8Array(await uploaded.arrayBuffer())).toEqual(bytes);
   });
 });
 
 describe("safe transport and retry boundaries", () => {
+  it.each([undefined, "GET"] as const)("recognizes exact Books binary attachment error 33003 with method %s", async method => {
+    const fetcher = vi.fn().mockResolvedValue(response({ code: 33003, message: "Attachment not found." }, 400));
+    const transport = new ZohoTransport(config(), async () => "fictional", fetcher);
+    await expect(transport.request("/books/v3/bills/999/attachment", { binary: true, method }))
+      .rejects.toMatchObject({ code: "REMOTE_NOT_FOUND", kind: "FAILED" });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0][1].method).toBe("GET");
+  });
+
+  it.each([
+    { path: "/books/v3/bills/999/attachment", binary: false },
+    { path: "/books/v3/bills/999" },
+    { path: "/books/v3/bills" },
+    { path: "/books/v3/bills/999/attachment/" },
+    { path: "/books/v3/bills/999/attachment/extra" },
+    { path: "/books/v3/bills/not_numeric/attachment" },
+    { path: "/books/v3/invoices/999/attachment" },
+    { path: "/books/v3/bills/999/attachment", method: "POST" as const },
+    { path: "/books/v3/bills/999/attachment", status: 422 },
+    { path: "/books/v3/bills/999/attachment", code: 33002 },
+    { path: "/books/v3/bills/999/attachment", code: 71538 },
+    { path: "/books/v3/bills/999/attachment", code: "33003" },
+    { path: "/books/v3/bills/999/attachment", code: null },
+    { path: "/crm/v8/Bills/999/attachment", target: "CRM" as const },
+  ])("keeps other attachment-like errors rejected: %j", async fixture => {
+    const fetcher = vi.fn().mockImplementation(async (url: string | URL) => new URL(url).pathname === "/books/v3/organizations/100"
+      ? response({ code: 0, organization })
+      : response({ code: "code" in fixture ? fixture.code : 33003, message: "Attachment not found." }, fixture.status ?? 400));
+    const transport = new ZohoTransport(config(fixture.target ? { target: fixture.target } : {}), async () => "fictional", fetcher);
+    const failure = await transport.request(fixture.path, { binary: fixture.binary ?? true, method: fixture.method }).catch(error => error);
+    expect(failure).toMatchObject({ code: "REMOTE_REJECTED", kind: "FAILED",
+      message: "Zoho rejected the request. Verify mappings, mandatory fields, and organization settings." });
+  });
+
+  it.each(["malformed", "oversized", "declared oversized", "message only"])("keeps an unreadable or unrecognized attachment error rejected: %s", async kind => {
+    const value = kind === "message only" ? { message: "Attachment not found." }
+      : { code: 33003, message: "private fixture text", padding: "x".repeat(8 * 1024) };
+    const fetcher = vi.fn().mockImplementation(async () => new Response(kind === "malformed" ? "{private fixture text" : JSON.stringify(value), {
+      status: 400, headers: kind === "declared oversized" ? { "content-length": String(10 * 1024 * 1024) } : {},
+    }));
+    const transport = new ZohoTransport(config(), async () => "fictional", fetcher);
+    const failure = await transport.request("/books/v3/bills/999/attachment", { binary: true }).catch(error => error);
+    expect(failure).toMatchObject({ code: "REMOTE_REJECTED", kind: "FAILED",
+      message: "Zoho rejected the request. Verify mappings, mandatory fields, and organization settings." });
+  });
   it.each([
     { ...organization, organization_id: "999" },
     { ...organization, is_org_active: false },

@@ -203,6 +203,19 @@ export class ZohoTransport {
         "The referenced external record was not found.",
         "FAILED",
       );
+    // Books uses this exact error for an absent bill attachment. Treat only the
+    // binary read as missing so reconciliation can reach the guarded upload.
+    if (response.status === 400 && this.config.target === "ZOHO" && method === "GET" &&
+      options.binary === true && /^\/books\/v3\/bills\/\d+\/attachment$/.test(path)) {
+      let missingAttachment = false;
+      try {
+        missingAttachment = z.object({ code: z.literal(33003) }).safeParse(await boundedJson(response, 8 * 1024)).success;
+      } catch {
+        // Unreadable or oversized error bodies retain the generic rejection.
+      }
+      if (missingAttachment)
+        throw new IntegrationError("REMOTE_NOT_FOUND", "The referenced external record was not found.", "FAILED");
+    }
     if (!response.ok)
       throw new IntegrationError(
         "REMOTE_REJECTED",
