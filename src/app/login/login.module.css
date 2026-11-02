@@ -5,8 +5,7 @@
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: #000 url("../../assets/login-background.jpg") center / cover
-    no-repeat;
+  background: #000;
   font-family: Arial, Helvetica, sans-serif;
   font-size: 14px;
   line-height: 1.5;
