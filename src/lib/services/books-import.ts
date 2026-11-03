@@ -10,6 +10,7 @@ import { HttpError } from "@/lib/http";
 import { IntegrationError } from "@/lib/integrations/config";
 import { assertBooksImportContext as importContext, assertBooksBillReader as assertReader } from "@/lib/services/books-import-access";
 import { describeBooksAttachments } from "@/lib/services/books-attachments";
+import { loadBooksEntryAuthors } from "@/lib/services/financial-ledger";
 
 const externalId = z.string().regex(/^\d{1,30}$/);
 const text = (limit: number) => z.string().max(limit);
@@ -238,10 +239,11 @@ export async function listBooksBills(actor: Actor, payload: unknown = {}) {
     db.booksBill.findMany({ where: scope, distinct: ["currencyCode"], select: { currencyCode: true }, orderBy: { currencyCode: "asc" } }),
   ]);
   // Membership revocation during a long query must not release the captured rows.
+  const authors = await loadBooksEntryAuthors(actor, bills);
   await assertReader(actor);
   const currentScope = await companyFilter(actor, input.companyId);
   if (JSON.stringify(currentScope) !== JSON.stringify(scope)) throw new HttpError(403, "Company access changed. Reload the page.");
-  return { bills: bills.map(serializeBill), total, page: input.page, pageSize: input.pageSize, runs: runs.map(serializeRun),
+  return { bills: bills.map((bill) => ({ ...serializeBill(bill), ...(actor.role === "ADMIN" ? { enteredBy: authors.get(bill.id) ?? null } : {}) })), total, page: input.page, pageSize: input.pageSize, runs: runs.map(serializeRun),
     filters: { statuses: statuses.map((row) => row.status), currencies: currencies.map((row) => row.currencyCode) } };
 }
 export type BooksBillListResult = Awaited<ReturnType<typeof listBooksBills>>;
@@ -267,9 +269,11 @@ export async function getBooksBill(actor: Actor, id: string) {
   const full = hasCurrentDetail(bill) ? record(bill.sourceDetail ?? undefined) : {};
   const summary = record(bill.sourceSummary);
   const attachmentDetails = describeBooksAttachments(bill, bill.attachments);
+  const authors = await loadBooksEntryAuthors(actor, [bill]);
   await assertReader(actor);
   await requireCompanyAccess(actor, bill.companyId);
   return { ...serializeBill(bill), sourceModifiedAt: bill.sourceModifiedAt,
+    ...(actor.role === "ADMIN" ? { enteredBy: authors.get(bill.id) ?? null } : {}),
     referenceNumber: stringField(full.reference_number) ?? stringField(summary.reference_number),
     notes: stringField(full.notes), terms: stringField(full.terms),
     ...attachmentDetails,

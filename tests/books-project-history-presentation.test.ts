@@ -6,7 +6,7 @@ import type { BooksProjectHistoryRelation } from "@/lib/services/books-project-h
 const mocks = vi.hoisted(() => ({ bills: vi.fn(), scope: vi.fn(), actor: vi.fn(), history: vi.fn() }));
 vi.mock("@/lib/db", () => ({ db: { booksBill: { findMany: mocks.bills } } }));
 vi.mock("@/lib/company", () => ({ companyFilter: mocks.scope }));
-vi.mock("@/lib/services/financial-ledger", () => ({ freshFinancialActor: mocks.actor }));
+vi.mock("@/lib/services/financial-ledger", () => ({ freshFinancialActor: mocks.actor, loadBooksEntryAuthors: async () => new Map() }));
 vi.mock("@/lib/services/books-project-history", () => ({ loadBooksProjectHistory: mocks.history }));
 vi.mock("@/lib/services/books-attachments", () => ({ describeBooksAttachments: () => ({ documents: [{ attachmentId: "file-a", status: "AVAILABLE", fileName: "original.pdf" }], attachmentCount: 1, downloadedAttachmentCount: 1, attachmentStatus: "COMPLETE" }) }));
 const actor = { id: "admin-a", role: "ADMIN" } as Actor;

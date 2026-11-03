@@ -44,11 +44,13 @@ export function BillTable({
   showJob = true,
   compact = false,
   showAttachments = false,
+  showEnteredBy = false,
 }: {
   bills: Bill[];
   showJob?: boolean;
   compact?: boolean;
   showAttachments?: boolean;
+  showEnteredBy?: boolean;
 }) {
   if (!bills.length)
     return (
@@ -63,6 +65,7 @@ export function BillTable({
         <tr>
           <th>Invoice / vendor</th>
           {showJob && !compact && <th>Job reference</th>}
+          {showEnteredBy && <th>Entered by</th>}
           <th>Invoice date</th>
           <th>Bill status</th>
           {!compact && <th>Payment</th>}
@@ -94,6 +97,7 @@ export function BillTable({
                 </Link>
               </td>
             )}
+            {showEnteredBy && <td>{bill.createdBy?.name || "Not recorded"}</td>}
             <td className="muted">{date(bill.invoiceDate)}</td>
             <td>
               <StatusBadge status={bill.status} />

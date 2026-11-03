@@ -198,6 +198,7 @@ export function ManualBillEntry() {
                   return <article key={`${bill.source}:${bill.id}`} className={styles.billRow}>
                     <div className={styles.billIdentity}><strong>{bill.billNumber}</strong><span>{bill.vendorName}</span>
                       <small>{companyNames.get(bill.companyId)} · {bill.source === "BOOKS" ? "Zoho Books" : "Workspace bill"}</small>
+                      {user.role === "ADMIN" && <small>Entered by: {bill.enteredBy?.name || (bill.source === "BOOKS" ? "Not recorded locally" : "Not recorded")}</small>}
                       {!relatedJobs.length && <small>No verified job link</small>}
                       {relatedJobs.some(job => job.canonicalJobId === null) && <small>Verified CRM deal history · Read only</small>}
                       {relatedJobs.length > 1 && <small>Related to multiple {relatedJobs.some(job => job.canonicalJobId === null) ? "source records" : "jobs"}. Choose the history to review.</small>}

@@ -6,6 +6,8 @@ import { db } from "@/lib/db";
 import { getJob } from "@/lib/services/catalog";
 import { booksAttachmentMetadataHash } from "@/lib/services/books-attachments";
 import { searchDashboard } from "@/lib/services/dashboard-search";
+import { createBill, getBill, listBills, updateBill } from "@/lib/services/bills";
+import { getBooksBill, listBooksBills } from "@/lib/services/books-import";
 import {
   assertMySqlTestDatabase,
   bindTestDestination,
@@ -254,6 +256,52 @@ afterAll(async () => {
 });
 
 describe("manual job lookup through confirmed bill identity", () => {
+  it("retains three original entrants under one job through edits, lists, search and a synchronized Books mirror", async () => {
+    const writers = await Promise.all(["One", "Two", "Three"].map(async (name, index) => {
+      const user = await db.user.create({ data: { email: `entry-author-${index}-${tag}@example.invalid`,
+        name: `Fictional entrant ${name}`, role: "ACCOUNTS", passwordHash: "unusable" } });
+      await db.userCompanyMembership.create({ data: { userId: user.id, companyId: companyA } });
+      return user;
+    }));
+    const sharedJob = await job(companyA, "JOB-THREE-ENTRANTS");
+    const input = (index: number) => ({ companyId: companyA, vendorId: vendors.get(companyA)!, jobId: sharedJob.id,
+      invoiceNumber: `ATTRIBUTION-${index}`, invoiceDate: "2026-01-01", category: "MATERIALS", currency: "AED", vatRate: "0",
+      lines: [{ description: "Fictional entry", quantity: "1", unitPrice: "10" }] });
+    const bills = [];
+    for (let index = 0; index < writers.length; index++) bills.push(await createBill(writers[index], input(index)));
+    const edited = await updateBill(admin, bills[0].id, { ...input(0), version: bills[0].version, notes: "Edited by another user" });
+    expect(edited.createdBy).toEqual({ id: writers[0].id, name: writers[0].name });
+    await db.syncRecord.create({ data: { billId: bills[2].id, target: "ZOHO", status: "SYNCED",
+      externalId: "90070", organizationId: organizationA } });
+    const imported = await mirror(companyA, "90070", "ATTRIBUTION-2");
+    const expected = new Map(bills.map((bill, index) => [bill.id, { id: writers[index].id, name: writers[index].name }]));
+    const history = await getJob(admin, sharedJob.id);
+    expect(history.bills).toHaveLength(3);
+    for (const bill of history.bills) expect(bill.createdBy).toEqual(expected.get(bill.id));
+    const list = await listBills(admin, new URLSearchParams({ companyId: companyA, jobId: sharedJob.id }));
+    expect(list.bills).toHaveLength(3);
+    for (const bill of list.bills) {
+      expect(bill.createdBy).toEqual(expected.get(bill.id));
+      expect(Object.keys(bill.createdBy).sort()).toEqual(["id", "name"]);
+    }
+    expect((await getBill(admin, bills[0].id)).createdBy).toEqual(expected.get(bills[0].id));
+    const search = await searchDashboard(admin, query("attribution-", companyA));
+    expect(search.bills).toHaveLength(3);
+    for (const row of search.bills) expect(row.enteredBy).toEqual(expected.get(row.id === imported.id ? bills[2].id : row.id));
+    expect(history.booksBills.find(row => row.id === imported.id)?.enteredBy).toEqual(expected.get(bills[2].id));
+    expect((await getBooksBill(admin, imported.id)).enteredBy).toEqual(expected.get(bills[2].id));
+    expect((await listBooksBills(admin, { companyId: companyA, q: "ATTRIBUTION-2" })).bills[0].enteredBy).toEqual(expected.get(bills[2].id));
+    const externalOnly = await mirror(companyA, "90071", "ATTRIBUTION-EXTERNAL");
+    expect((await getBooksBill(admin, externalOnly.id)).enteredBy).toBeNull();
+    expect((await searchDashboard(admin, query("attribution-external", companyA))).bills[0].enteredBy).toBeNull();
+    expect((await searchDashboard(manager, query("attribution-", companyA))).bills.every(row => !("enteredBy" in row))).toBe(true);
+    expect((await searchDashboard(entry, query("attribution-", companyA))).bills).toEqual([]);
+    const restricted = await getJob(writers[0], sharedJob.id);
+    expect(restricted.job).toMatchObject({ contractValue: null, recognizedExpenses: null, estimatedProfit: null });
+    expect(restricted.booksBills.every(row => !("enteredBy" in row))).toBe(true);
+    expect(JSON.stringify(search)).not.toMatch(/passwordHash|entry-author-.*@example|"email"/);
+    expect(fetch).not.toHaveBeenCalled();
+  });
   it("returns a native bill's real job for a bill-number-only query and keeps job-name lookup", async () => {
     const result = await searchDashboard(
       admin,

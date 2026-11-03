@@ -177,7 +177,7 @@ export type Bill = {
   createdAt: string;
   vendor?: Vendor;
   job?: Job;
-  createdBy?: User;
+  createdBy?: Pick<User, "id" | "name">;
   lines?: BillLine[];
   lineItems?: BillLine[];
   documents?: Document[];
@@ -260,6 +260,7 @@ export type Dashboard = {
 };
 
 export type ImportedBillSummary = {
+  enteredBy?: Pick<User, "id" | "name"> | null;
   id: string;
   billNumber: string;
   companyId: string;
@@ -329,6 +330,7 @@ export type DashboardSearchResult = {
     historyCompanies?: { id: string; name: string }[];
   }[];
   bills: {
+    enteredBy?: Pick<User, "id" | "name"> | null;
     id: string;
     billNumber: string;
     source: "BOOKS" | "NATIVE";

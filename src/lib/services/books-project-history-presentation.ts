@@ -4,7 +4,7 @@ import { companyFilter } from "@/lib/company";
 import { db } from "@/lib/db";
 import { HttpError } from "@/lib/http";
 import { describeBooksAttachments } from "./books-attachments";
-import { freshFinancialActor } from "./financial-ledger";
+import { freshFinancialActor, loadBooksEntryAuthors } from "./financial-ledger";
 import { loadBooksProjectHistory, type BooksProjectHistoryRelation } from "./books-project-history";
 
 const relationIdentity = (relation: BooksProjectHistoryRelation) => JSON.stringify([
@@ -38,6 +38,7 @@ export async function presentProjectHistory(actor: Actor, relations: BooksProjec
   });
   const historyCompanies = [...new Map(current.map(({ row }) => [row.companyId,
     { id: row.companyId, name: row.company.name.replace(/^\[CONNECTION CHECK\]\s*/, "") }])).values()];
+  const authors = await loadBooksEntryAuthors(actor, current.map(({ row }) => row));
   const booksBills = current.map(({ row, matching }) => {
     const relation = matching[0];
     const uniqueJob = matching.every((value) => value.canonicalJobId === relation.canonicalJobId && value.jobNumber === relation.jobNumber);
@@ -47,6 +48,7 @@ export async function presentProjectHistory(actor: Actor, relations: BooksProjec
       billDate: row.billDate?.toISOString().slice(0, 10) ?? null,
       jobId: uniqueJob ? relation.canonicalJobId : null, jobNumber: uniqueJob ? relation.jobNumber : null,
       href: `/bills/books/${row.id}`, ...describeBooksAttachments(row, row.attachments),
+      ...(actor.role === "ADMIN" ? { enteredBy: authors.get(row.id) ?? null } : {}),
       relationEvidence: "Verified Books project → Zoho Projects → CRM deal relationship",
       allocationKnown: false,
     };

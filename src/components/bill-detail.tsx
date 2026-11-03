@@ -288,7 +288,7 @@ export function BillDetail({
       <PageHeader
         eyebrow="BILL DETAILS"
         title={bill.invoiceNumber}
-        description={`${bill.vendor?.name ?? "Vendor"} · Created ${date(bill.createdAt)} by ${bill.createdBy?.name ?? "staff"}`}
+        description={`${bill.vendor?.name ?? "Vendor"} · Created ${date(bill.createdAt)}${user.role === "ADMIN" ? ` · Entered by: ${bill.createdBy?.name || "Not recorded"}` : ` by ${bill.createdBy?.name ?? "staff"}`}`}
       >
         <StatusBadge status={bill.status} />
         <StatusBadge status={bill.paymentStatus ?? "UNPAID"} />

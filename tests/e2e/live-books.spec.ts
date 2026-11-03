@@ -37,8 +37,6 @@ function fixtureBill(): Bill & { syncRecords: NonNullable<Bill["syncRecords"]> }
     createdBy: {
       id: "mock-independent-author",
       name: "Fictional Author",
-      email: "fictional@example.invalid",
-      role: "DATA_ENTRY",
     },
     vendor: {
       id: "mock-live-vendor",

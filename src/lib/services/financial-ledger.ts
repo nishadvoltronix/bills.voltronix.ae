@@ -166,6 +166,8 @@ export function nativeMirrorLinks(
 ) {
   const duplicates = new Set<string>();
   const linkedJobs = new Map<string, string>();
+  const nativeCandidates = new Map<string, Set<string>>();
+  const uncertainBills = new Set<string>();
   const conflictingMirrors = new Set<string>();
   let ambiguousCount = 0;
   for (const native of natives) {
@@ -196,6 +198,10 @@ export function nativeMirrorLinks(
               item.companyId === native.companyId &&
               item.organizationId === sync.organizationId,
           );
+      // Context ambiguity must not depend on which page of mirrors was loaded.
+      // SyncRecord alone does not record a data center or environment.
+      const authorContexts = new Set(contexts.map((context) =>
+        JSON.stringify([context.dataCenter, context.environment])));
       const verified = candidates.filter((mirror) =>
         contexts.some(
           (context) =>
@@ -203,6 +209,12 @@ export function nativeMirrorLinks(
             context.environment === mirror.environment,
         ),
       );
+      for (const mirror of verified) {
+        const ids = nativeCandidates.get(mirror.id) ?? new Set<string>();
+        ids.add(native.id);
+        nativeCandidates.set(mirror.id, ids);
+        if (authorContexts.size !== 1) uncertainBills.add(mirror.id);
+      }
       if (
         verified.length === 1 &&
         !conflictingMirrors.has(verified[0].id) &&
@@ -219,7 +231,47 @@ export function nativeMirrorLinks(
       }
     }
   }
-  return { duplicates, linkedJobs, ambiguousCount };
+  // A shared job is not proof of who entered a particular bill. Authorship
+  // requires exactly one native bill, even when competing bills share a job.
+  const linkedBills = new Map([...nativeCandidates].flatMap(([id, natives]) =>
+    natives.size === 1 && !uncertainBills.has(id) ? [[id, [...natives][0]] as const] : []));
+  return { duplicates, linkedJobs, linkedBills, ambiguousCount };
+}
+
+export type BillEntryAuthor = { id: string; name: string };
+
+/** Local entry attribution for imported records, never the provider importer. */
+export async function loadBooksEntryAuthors(actor: Actor, mirrors: MirrorIdentity[]) {
+  const authors = new Map<string, BillEntryAuthor>();
+  // Large histories still return every bill; leave attribution unrecorded when
+  // the additional identity query cannot be kept bounded.
+  if (actor.role !== "ADMIN" || !mirrors.length || mirrors.length > 1000) return authors;
+  actor = await freshFinancialActor(actor);
+  const scope = await companyFilter(actor);
+  const natives = await db.bill.findMany({
+    where: { AND: [scope, { OR: mirrors.map((mirror) => ({ companyId: mirror.companyId,
+      syncRecords: { some: { target: "ZOHO", organizationId: mirror.organizationId, externalId: mirror.externalBillId } } })) }] },
+    select: { id: true, companyId: true, jobId: true, syncRecords: true, createdBy: { select: { id: true, name: true } } },
+    orderBy: { id: "asc" }, take: 1001,
+  });
+  // Incomplete candidates cannot prove a unique local entrant.
+  if (natives.length > 1000) return authors;
+  const [destinations, history] = await Promise.all([
+    db.companyIntegrationDestination.findMany({ where: { ...scope, target: "ZOHO" },
+      select: { companyId: true, organizationId: true, dataCenter: true, environment: true } }),
+    db.integrationJob.findMany({ where: { billId: { in: natives.map((bill) => bill.id) }, target: "ZOHO", operation: "CREATE_BILL" },
+      select: { billId: true, organizationId: true, snapshot: true } }),
+  ]);
+  const links = nativeMirrorLinks(natives, mirrors, destinations, history);
+  const byId = new Map(natives.map((bill) => [bill.id, bill.createdBy]));
+  for (const [mirrorId, nativeId] of links.linkedBills) {
+    const author = byId.get(nativeId);
+    if (author) authors.set(mirrorId, author);
+  }
+  await freshFinancialActor(actor);
+  if (JSON.stringify(scope) !== JSON.stringify(await companyFilter(actor)))
+    throw new HttpError(403, "Your company access changed. Reload this page.");
+  return authors;
 }
 
 export async function loadFinancialLedger(
@@ -386,9 +438,11 @@ export async function loadFinancialLedger(
   const nativeBills = data.nativeBills.filter(
     (bill) => !links.duplicates.has(bill.id),
   );
+  const nativeById = new Map(data.nativeBills.map((bill) => [bill.id, bill]));
   const mirrors = currentMirrors.map((bill) => ({
     ...bill,
     jobId: links.linkedJobs.get(bill.id) ?? null,
+    ...(actor.role === "ADMIN" ? { enteredBy: truncated ? null : nativeById.get(links.linkedBills.get(bill.id) ?? "")?.createdBy ?? null } : {}),
     amounts: booksFinancialAmounts(bill),
   }));
   const latestRuns = new Map<string, (typeof data.runs)[number]>();
@@ -457,6 +511,7 @@ export function importedBillSummary(
     jobId: bill.jobId,
     jobNumber: jobs.find((job) => job.id === bill.jobId)?.jobNumber ?? null,
     href: `/bills/books/${bill.id}`,
+    ...(bill.enteredBy !== undefined ? { enteredBy: bill.enteredBy } : {}),
   };
 }
 export function ledgerJobAmounts(

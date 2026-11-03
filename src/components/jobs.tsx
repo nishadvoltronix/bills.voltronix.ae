@@ -388,7 +388,7 @@ export function JobDetail({ id }: { id: string }) {
         </Notice>}
         {!booksBills.length && historyPending
           ? <EmptyState title="No verified related bills yet" description="A complete history is not available yet. This does not confirm that the job has no bills." />
-          : <ImportedBillsTable bills={booksBills} showJob={false} showAttachments />}
+          : <ImportedBillsTable bills={booksBills} showJob={false} showAttachments showEnteredBy={user.role === "ADMIN"} />}
       </Card>}
       <Card>
         <div className="panel-heading">
@@ -398,7 +398,7 @@ export function JobDetail({ id }: { id: string }) {
           </div>
           <Badge>{bills.length} bills</Badge>
         </div>
-        <BillTable bills={bills} showJob={false} showAttachments />
+        <BillTable bills={bills} showJob={false} showAttachments showEnteredBy={user.role === "ADMIN"} />
       </Card>
       {showJobFinancials && <p className="page-footnote">
         Recognized expenses include finalized invoices only. Paid and outstanding

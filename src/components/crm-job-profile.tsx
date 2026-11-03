@@ -55,7 +55,7 @@ export function CrmJobProfile({ id }: { id: string }) {
     {job.booksBills && <Card className={styles.history}>
       <div className="panel-heading"><div><h2>Linked Zoho Books history</h2>
         <p>Verified source associations and original files. Amounts are full invoice totals.</p></div><Badge>{booksBills.length} bills</Badge></div>
-      <ImportedBillsTable bills={booksBills} showJob={false} showAttachments />
+      <ImportedBillsTable bills={booksBills} showJob={false} showAttachments showEnteredBy={user.role === "ADMIN"} />
     </Card>}
     <Card className={styles.source}>
       <div className={styles.sourceHeading}><h2>CRM source record</h2><Badge>{job.linkStatus.toLowerCase().replaceAll("_", " ")}</Badge></div>

@@ -326,7 +326,7 @@ export function BillsList({ approvals = false }: { approvals?: boolean }) {
         ) : state.loading ? (
           <LoadingPanel />
         ) : (
-          <BillTable bills={state.data?.bills ?? []} />
+          <BillTable bills={state.data?.bills ?? []} showEnteredBy={user.role === "ADMIN"} />
         )}
         <div className="pagination">
           <span>

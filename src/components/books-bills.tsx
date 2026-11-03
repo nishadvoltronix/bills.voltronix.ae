@@ -223,6 +223,7 @@ export function BooksBillsList({ initialCompanyId = "" }: { initialCompanyId?: s
                     <tr>
                       <th>Bill / supplier</th>
                       <th>Company</th>
+                      {result.bills.some(bill => bill.enteredBy !== undefined) && <th>Entered by</th>}
                       <th>Bill date</th>
                       <th>Due date</th>
                       <th>Zoho status</th>
@@ -246,6 +247,7 @@ export function BooksBillsList({ initialCompanyId = "" }: { initialCompanyId?: s
                           </span>
                         </td>
                         <td>{companyName(bill.companyName)}</td>
+                        {result.bills.some(row => row.enteredBy !== undefined) && <td>{bill.enteredBy?.name || "Not recorded locally"}</td>}
                         <td>{date(bill.billDate)}</td>
                         <td>{date(bill.dueDate)}</td>
                         <td>
@@ -362,6 +364,7 @@ export function BooksBillRecord({ bill }: { bill: BooksBillData }) {
           <Card className={styles.section}>
             <h2>Bill details</h2>
             <dl className="detail-grid">
+              {bill.enteredBy !== undefined && <div><dt>Entered by</dt><dd>{bill.enteredBy?.name || "Not recorded locally"}</dd></div>}
               <div>
                 <dt>Zoho status</dt>
                 <dd>

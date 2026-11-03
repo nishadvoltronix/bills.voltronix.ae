@@ -7,6 +7,7 @@ import {
 vi.mock("@/lib/db", () => ({ db: {} }));
 import {
   ledgerJobAmounts,
+  loadBooksEntryAuthors,
   nativeMirrorLinks,
   type FinancialLedger,
 } from "@/lib/services/financial-ledger";
@@ -140,6 +141,7 @@ describe("confirmed Books bill identity", () => {
     const links = nativeMirrorLinks([native], [mirror], [destination], []);
     expect([...links.duplicates]).toEqual(["native"]);
     expect(links.linkedJobs.get("copy")).toBe("job");
+    expect(links.linkedBills.get("copy")).toBe("native");
   });
   it("never links a similarly named or same-number bill without provider identifiers", () => {
     const links = nativeMirrorLinks(
@@ -150,6 +152,7 @@ describe("confirmed Books bill identity", () => {
     );
     expect(links.duplicates.size).toBe(0);
     expect(links.linkedJobs.size).toBe(0);
+    expect(links.linkedBills.size).toBe(0);
   });
   it("isolates the company, organization and environment", () => {
     expect(
@@ -175,6 +178,7 @@ describe("confirmed Books bill identity", () => {
       [],
     );
     expect(ambiguous.linkedJobs.size).toBe(0);
+    expect(ambiguous.linkedBills.size).toBe(0);
     expect(ambiguous.ambiguousCount).toBe(1);
   });
   it("uses the destination captured on the write rather than a later rebound destination", () => {
@@ -203,7 +207,33 @@ describe("confirmed Books bill identity", () => {
     );
     expect(links.duplicates.size).toBe(2);
     expect(links.linkedJobs.size).toBe(0);
+    expect(links.linkedBills.size).toBe(0);
     expect(links.ambiguousCount).toBe(1);
+  });
+  it("does not infer a unique entrant from multiple native bills sharing one job", () => {
+    const links = nativeMirrorLinks([native, { ...native, id: "another-bill" }], [mirror], [destination], []);
+    expect(links.linkedJobs.get("copy")).toBe("job");
+    expect(links.linkedBills.size).toBe(0);
+  });
+  it.each([
+    { companyId: "other-company" }, { organizationId: "other-org" },
+    { dataCenter: "EU" }, { environment: "sandbox" },
+  ])("never copies local authorship across a different provider identity: %j", (changed) => {
+    expect(nativeMirrorLinks([native], [{ ...mirror, ...changed }], [destination], []).linkedBills.size).toBe(0);
+  });
+  it("withholds authorship when a native sync identity matches multiple source contexts", () => {
+    const links = nativeMirrorLinks([native], [mirror, { ...mirror, id: "sandbox-copy", environment: "sandbox" }],
+      [destination, { ...destination, environment: "sandbox" }], []);
+    expect(links.linkedBills.size).toBe(0);
+    // A detail or filtered page must not claim a creator that the full ledger
+    // cannot prove merely because its other possible source was not requested.
+    expect(nativeMirrorLinks([native], [mirror],
+      [destination, { ...destination, environment: "sandbox" }], []).linkedBills.size).toBe(0);
+  });
+  it("bounds the additional attribution query without dropping a large history", async () => {
+    const actor = { id: "admin", name: "Fictional administrator", email: "admin@example.invalid", role: "ADMIN" as const };
+    expect((await loadBooksEntryAuthors(actor,
+      Array.from({ length: 1001 }, (_, index) => ({ ...mirror, id: `mirror-${index}` })))).size).toBe(0);
   });
   it("withholds job totals for a linked foreign-currency bill without an exchange rate", () => {
     const ledger = {

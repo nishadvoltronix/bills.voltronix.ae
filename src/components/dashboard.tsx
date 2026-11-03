@@ -231,7 +231,7 @@ export function DashboardPage({
           {!ownScope && d?.recentBooksBills && d.recentBooksBills.length > 0 && <Card className={styles.history}>
             <div className="panel-heading"><div><h2>Recent Zoho Books bills</h2><p>Imported invoices from the selected companies and currency</p></div>
               <Link href="/bills/books" className="text-link">View all Books bills <ArrowRight size={15} /></Link></div>
-            <ImportedBillsTable bills={d.recentBooksBills} />
+            <ImportedBillsTable bills={d.recentBooksBills} showEnteredBy={user.role === "ADMIN"} />
           </Card>}
           {!state.loading && !ownScope && Boolean(m?.missingJobValues) && (
             <Notice>
@@ -297,7 +297,7 @@ export function DashboardPage({
                   ))}
                 </div>
               ) : (
-                <BillTable bills={d?.recentBills ?? []} compact />
+                <BillTable bills={d?.recentBills ?? []} compact showEnteredBy={user.role === "ADMIN"} />
               )}
             </Card>
             <Card className="attention-card">

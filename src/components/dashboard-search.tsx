@@ -100,6 +100,7 @@ export function DashboardSearch({ companyId = "" }: { companyId?: string }) {
                     <strong>{bill.billNumber}</strong>
                     <span>{bill.vendorName}</span>
                     <small>{bill.companyName} · {bill.source === "BOOKS" ? "Zoho Books" : "Workspace bill"}</small>
+                    {user.role === "ADMIN" && <small>Entered by: {bill.enteredBy?.name || (bill.source === "BOOKS" ? "Not recorded locally" : "Not recorded")}</small>}
                     <small>{relatedJobs.length ? relatedJobs.map(job => `${job.canonicalJobId === null ? "CRM deal" : "Job"} ${historyReference(job)}`).join(", ") : "No verified job link"}</small>
                   </div>
                   <strong className={styles.amount}>{money(bill.total, bill.currency)}</strong>

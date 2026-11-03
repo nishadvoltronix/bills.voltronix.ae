@@ -177,6 +177,7 @@ export async function searchDashboard(actor: Actor, params: URLSearchParams) {
         vendor: { select: { name: true } },
         job: { select: { id: true, jobNumber: true } },
         syncRecords: true,
+        createdBy: { select: { id: true, name: true } },
       },
     });
   const findBooks = async (exact: boolean) =>
@@ -258,7 +259,7 @@ export async function searchDashboard(actor: Actor, params: URLSearchParams) {
             },
           },
         },
-        include: { syncRecords: true, job: { select: { jobNumber: true } } },
+        include: { syncRecords: true, job: { select: { jobNumber: true } }, createdBy: { select: { id: true, name: true } } },
         orderBy: { id: "asc" },
         take: 101,
       })
@@ -288,7 +289,11 @@ export async function searchDashboard(actor: Actor, params: URLSearchParams) {
   // An incomplete candidate set cannot prove that a Books identity has only
   // one job. Ask for a narrower search instead of assigning the first match.
   const linkCandidatesTruncated = linkedNative.length > 100;
-  if (linkCandidatesTruncated) links.linkedJobs.clear();
+  if (linkCandidatesTruncated) {
+    links.linkedJobs.clear();
+    links.linkedBills.clear();
+  }
+  const nativeAuthors = new Map(linkedNative.map((bill) => [bill.id, bill.createdBy]));
   const relatedIds = [
     ...new Set([
       ...natives.map((bill) => bill.jobId),
@@ -402,6 +407,7 @@ export async function searchDashboard(actor: Actor, params: URLSearchParams) {
         id: bill.id,
         billNumber: bill.invoiceNumber,
         source: "NATIVE" as const,
+        ...(actor.role === "ADMIN" ? { enteredBy: bill.createdBy } : {}),
         companyId: bill.companyId,
         companyName: bill.company.name.replace(/^\[CONNECTION CHECK\]\s*/, ""),
         vendorName: bill.vendor.name,
@@ -419,6 +425,7 @@ export async function searchDashboard(actor: Actor, params: URLSearchParams) {
         id: bill.id,
         billNumber: bill.billNumber,
         source: "BOOKS" as const,
+        ...(actor.role === "ADMIN" ? { enteredBy: nativeAuthors.get(links.linkedBills.get(bill.id) ?? "") ?? null } : {}),
         companyId: bill.companyId,
         companyName: bill.company.name.replace(/^\[CONNECTION CHECK\]\s*/, ""),
         vendorName: bill.vendorName,
