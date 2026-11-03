@@ -271,7 +271,7 @@ describe("manual job lookup through confirmed bill identity", () => {
     for (let index = 0; index < writers.length; index++) bills.push(await createBill(writers[index], input(index)));
     const edited = await updateBill(admin, bills[0].id, { ...input(0), version: bills[0].version, notes: "Edited by another user" });
     expect(edited.createdBy).toEqual({ id: writers[0].id, name: writers[0].name });
-    await db.syncRecord.create({ data: { billId: bills[2].id, target: "ZOHO", status: "SYNCED",
+    await db.syncRecord.update({ where: { billId_target: { billId: bills[2].id, target: "ZOHO" } }, data: { status: "SYNCED",
       externalId: "90070", organizationId: organizationA } });
     const imported = await mirror(companyA, "90070", "ATTRIBUTION-2");
     const expected = new Map(bills.map((bill, index) => [bill.id, { id: writers[index].id, name: writers[index].name }]));
