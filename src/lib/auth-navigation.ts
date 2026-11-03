@@ -12,7 +12,7 @@ export function canAccessRolePath(role: string, path: string): boolean {
   if (!path || path.length > 512 || !appPagePath.test(path)) return false;
   if (role !== "ACCOUNTS") return true;
   return /^\/(?:account|vendors)\/?$/.test(path) ||
-    /^\/bills(?:\/(?:books(?:\/[A-Za-z0-9_-]+)?|[A-Za-z0-9_-]+(?:\/edit)?))?\/?$/.test(path) ||
+    /^\/bills(?:\/(?:books(?:\/[A-Za-z0-9_-]+)?|[A-Za-z0-9_-]+(?:\/(?:edit|payment))?))?\/?$/.test(path) ||
     /^\/jobs\/(?:crm\/)?[A-Za-z0-9_-]+\/?$/.test(path);
 }
 

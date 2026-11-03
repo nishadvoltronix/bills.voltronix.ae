@@ -1,0 +1,24 @@
+.corner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 112px;
+  height: 112px;
+  overflow: hidden;
+  pointer-events: none;
+}
+.corner > span {
+  position: absolute;
+  top: 24px;
+  left: -32px;
+  width: 150px;
+  padding: 7px 0;
+  transform: rotate(-45deg);
+  color: #fff;
+  background: #168452;
+  box-shadow: 0 2px 5px #123d2526;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-align: center;
+}

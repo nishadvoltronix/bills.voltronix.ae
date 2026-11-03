@@ -1,0 +1,26 @@
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 310px;
+  gap: 24px;
+  align-items: start;
+}
+.main { display: grid; gap: 22px; min-width: 0; }
+.billCard { position: relative; overflow: hidden; padding: 28px; }
+.billHeading { min-width: 0; }
+.billHeading > span, .identity dt { color: #64748b; font-size: 12px; }
+.billHeading h2 { margin: 7px 0 13px; font-size: 22px; overflow-wrap: anywhere; }
+.identity { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; margin: 28px 0 0; }
+.identity dd { margin: 8px 0 0; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.identity dd span { display: block; color: #64748b; font-size: 12px; font-weight: 400; margin-top: 5px; }
+.entry, .history, .summary { padding: 24px; }
+.entry h2, .summary h2 { margin: 0 0 22px; font-size: 15px; font-weight: 600; }
+.entry form { display: grid; gap: 20px; max-width: 560px; }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; padding-top: 5px; }
+.summary :global(.amount-row) { gap: 15px; }
+.summary :global(.amount-row strong) { white-space: normal; text-align: right; }
+.paidSummary :global(.amount-row-strong strong) { color: #168452; }
+@media (max-width: 1050px) { .layout { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 600px) {
+  .billCard, .entry, .history, .summary { padding: 20px; }
+  .identity { grid-template-columns: minmax(0, 1fr); gap: 17px; }
+}

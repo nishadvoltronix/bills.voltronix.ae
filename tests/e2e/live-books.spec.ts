@@ -215,19 +215,18 @@ test("saved manual bill reports blocked synchronization instead of implying prov
   await expect(page.getByRole("button", { name: "Refresh sync status", exact: true })).toBeEnabled();
 });
 
-test("pending synchronization refreshes to provider confirmation without losing an open payment form", async ({ page }) => {
+test("pending synchronization refreshes to provider confirmation while keeping the payment entry link available", async ({ page }) => {
   const bill = await setup(page);
   bill.syncRecords[0].status = "PENDING";
   bill.syncRecords[0].organizationId = firstOrganization;
   await page.goto(`/bills/${billId}?saved=1`);
   await expect(page.getByText("Bill saved. Zoho Books synchronization queued. Provider confirmation is pending.")).toBeVisible();
-  await page.getByRole("button", { name: "Record payment", exact: true }).click();
-  await page.getByLabel("Payment reference").fill("UNSAVED-REFERENCE");
+  await expect(page.getByRole("link", { name: "Record payment", exact: true })).toHaveAttribute("href", `/bills/${billId}/payment`);
   bill.syncRecords[0].status = "SYNCED";
   bill.syncRecords[0].externalId = "mock-confirmed-books-bill";
   await expect(page.getByText("Bill saved and synchronized with Zoho Books.", { exact: true })).toBeVisible({ timeout: 12000 });
   await expect(page.getByText("mock-confirmed-books-bill", { exact: true })).toBeVisible();
-  await expect(page.getByLabel("Payment reference")).toHaveValue("UNSAVED-REFERENCE");
+  await expect(page.getByRole("link", { name: "Record payment", exact: true })).toHaveAttribute("href", `/bills/${billId}/payment`);
   await expect(page.getByText("Provider confirmation is pending.", { exact: false })).toHaveCount(0);
   expect(bill.payments).toEqual([]);
 });
@@ -260,7 +259,7 @@ test("refresh clears financial details when company access has been revoked", as
   await page.getByRole("button", { name: "Refresh sync status", exact: true }).click();
   await expect(page.getByText("Company access has been revoked.", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: bill.invoiceNumber, exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Record payment", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Record payment", exact: true })).toHaveCount(0);
 });
 
 test("polling lets a slow status request finish before starting another", async ({ page }) => {

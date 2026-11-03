@@ -178,10 +178,10 @@ test("manual draft with private attachment is edited, saved ready and paid only 
   expect(ready.payments).toHaveLength(0);
   expect(ready.documents).toHaveLength(1);
   await expect(
-    page.getByRole("button", { name: "Record payment", exact: true }),
+    page.getByRole("link", { name: "Record payment", exact: true }),
   ).toBeVisible();
   await page
-    .getByRole("button", { name: "Record payment", exact: true })
+    .getByRole("link", { name: "Record payment", exact: true })
     .click();
   await page.getByLabel("Payment reference").fill(`DEMO-RECEIPT-${Date.now()}`);
   await page
@@ -189,8 +189,9 @@ test("manual draft with private attachment is edited, saved ready and paid only 
     .click();
   await expect(page.getByText("Payment recorded successfully.")).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Record payment", exact: true }),
+    page.getByRole("link", { name: "Record payment", exact: true }),
   ).toHaveCount(0);
+  await page.getByRole("link", { name: "Back to bill", exact: true }).click();
   await expect(page.getByText("bill payment", { exact: true })).toBeVisible();
   await page.goto("/bills");
   await page.getByLabel("Search bills").fill(invoiceNumber);

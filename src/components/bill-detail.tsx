@@ -44,6 +44,7 @@ import {
   Textarea,
 } from "./ui";
 import { AmountRow } from "./records";
+import { isNativeBillPaid, NativePaidRibbon } from "./native-paid-ribbon";
 
 function savedBillNotice(bill: Bill, manualEntryOnly: boolean): { tone: "info" | "success" | "error"; message: string } {
   if (manualEntryOnly)
@@ -121,12 +122,10 @@ export function BillDetail({
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [showSaveOutcome, setShowSaveOutcome] = useState(saved);
-  const [action, setAction] = useState<"cancel" | "payment" | null>(
+  const [action, setAction] = useState<"cancel" | null>(
     null,
   );
   const [reason, setReason] = useState("");
-  const [amount, setAmount] = useState("");
-  const [reference, setReference] = useState("");
   const [selectedOrganization, setSelectedOrganization] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const bill = state.data?.bill;
@@ -218,18 +217,13 @@ export function BillDetail({
         body: JSON.stringify({
           action: actionName,
           version: bill.version,
-          ...(actionName === "payment" ? { amount, reference } : {}),
           ...(actionName === "cancel" ? { reason } : {}),
         }),
       });
       setAction(null);
       setReason("");
-      setAmount("");
-      setReference("");
       setSuccess(
-        actionName === "payment"
-          ? "Payment recorded successfully."
-          : actionName === "submit"
+        actionName === "submit"
             ? ""
             : "Bill updated successfully.",
       );
@@ -321,8 +315,9 @@ export function BillDetail({
       )}
       <div className="bill-detail-layout">
         <div className="detail-main">
-          <Card className="form-card">
-            <div className="panel-heading compact">
+          <Card className="form-card" style={{ position: "relative", overflow: "hidden" }}>
+            <NativePaidRibbon bill={bill} />
+            <div className="panel-heading compact" style={isNativeBillPaid(bill) ? { paddingLeft: 76, minHeight: 96, alignItems: "flex-start" } : undefined}>
               <h2>Invoice information</h2>
               <span className="version-label">Version {bill.version}</span>
             </div>
@@ -580,15 +575,8 @@ export function BillDetail({
               {accounts &&
                 financialReady &&
                 new Decimal(remaining).gt(0) && (
-                  <Button
-                    onClick={() => {
-                      setAction("payment");
-                      setAmount(remaining);
-                    }}
-                    disabled={busy}
-                  >
-                    <Wallet size={16} />
-                    Record payment
+                  <Button asChild>
+                    <Link href={`/bills/${encodeURIComponent(id)}/payment`}><Wallet size={16} />Record payment</Link>
                   </Button>
                 )}
               {accounts &&
@@ -607,11 +595,7 @@ export function BillDetail({
           {action && (
             <Card className="summary-card action-card">
               <div className="inline-heading">
-                <h2>
-                  {action === "payment"
-                    ? "Record payment"
-                    : "Cancel bill"}
-                </h2>
+                <h2>Cancel bill</h2>
                 <button
                   className="icon-button"
                   aria-label="Close action"
@@ -626,43 +610,7 @@ export function BillDetail({
                   void apply(action);
                 }}
               >
-                {action === "payment" ? (
-                  <>
-                    <Field
-                      label={`Payment amount (${bill.currency})`}
-                      htmlFor="payment-amount"
-                    >
-                      <Input
-                        id="payment-amount"
-                        type="number"
-                        min="0.01"
-                        max={remaining}
-                        step="0.01"
-                        value={amount}
-                        onChange={(e) => setAmount(e.target.value)}
-                        required
-                      />
-                    </Field>
-                    <Field
-                      label="Payment reference"
-                      htmlFor="payment-reference"
-                    >
-                      <Input
-                        id="payment-reference"
-                        value={reference}
-                        onChange={(e) => setReference(e.target.value)}
-                        placeholder="Transfer or receipt reference"
-                        maxLength={200}
-                        required
-                      />
-                    </Field>
-                    <p className="field-hint">
-                      This records a payment in the ledger. It does not transfer
-                      funds.
-                    </p>
-                  </>
-                ) : (
-                  <Field label="Reason" htmlFor="action-reason">
+                <Field label="Reason" htmlFor="action-reason">
                     <Textarea
                       id="action-reason"
                       rows={3}
@@ -672,17 +620,13 @@ export function BillDetail({
                       minLength={3}
                       maxLength={1000}
                     />
-                  </Field>
-                )}
+                </Field>
                 <Button
                   type="submit"
-                  variant={action === "payment" ? "default" : "destructive"}
+                  variant="destructive"
                   disabled={busy}
                 >
-                  {busy && <LoaderCircle className="spin" size={16} />}Confirm{" "}
-                  {action === "payment"
-                    ? "payment"
-                    : "cancellation"}
+                  {busy && <LoaderCircle className="spin" size={16} />}Confirm cancellation
                 </Button>
               </form>
             </Card>

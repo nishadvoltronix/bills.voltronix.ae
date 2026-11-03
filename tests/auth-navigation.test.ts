@@ -27,6 +27,7 @@ describe("post-login navigation", () => {
   it.each([
     "/bills", "/bills/", "/bills/manual", "/bills/new",
     "/bills/example-bill_123", "/bills/example-bill_123/edit",
+    "/bills/example-bill_123/payment", "/bills/example-bill_123/payment/",
     "/bills/books", "/bills/books/books-bill_123",
     "/vendors", "/account", "/account/",
     "/jobs/job_123", "/jobs/crm/snapshot_123",
@@ -41,6 +42,7 @@ describe("post-login navigation", () => {
     "/integrations", "/ocr", "/ocr/batch", "/ocr/documents/document_123",
     "/jobs", "/jobs/", "/account/books-authorization", "/account/crm-authorization",
     "/bills/books/example/edit", "/vendors/example", "/jobs/job_123/edit",
+    "/bills/books/example/payment", "/bills/example/payment/refund", "/bills/example/payments",
   ])("blocks an accounts return to a restricted page: %s", path => {
     expect(canAccessRolePath("ACCOUNTS", path)).toBe(false);
     expect(safeReturnPath(path, "ACCOUNTS")).toBeNull();

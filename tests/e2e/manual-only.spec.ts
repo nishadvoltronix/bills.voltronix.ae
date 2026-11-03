@@ -83,7 +83,7 @@ test("manual release persists draft, edit, original and payment without provider
   expect(document.ok()).toBe(true);
   expect(await document.body()).toEqual(original);
   await page.reload();
-  await page.getByRole("button", { name: "Record payment", exact: true }).click();
+  await page.getByRole("link", { name: "Record payment", exact: true }).click();
   await page.getByLabel("Payment reference").fill(`${invoice}-PAYMENT`);
   await page.getByRole("button", { name: "Confirm payment", exact: true }).click();
   await expect(page.getByText("Payment recorded successfully.", { exact: true })).toBeVisible();
