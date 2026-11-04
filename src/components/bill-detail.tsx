@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import Decimal from "decimal.js";
 import { PAYMENT_TERMS } from "@/lib/payment-terms";
 import { BOOKS_NO_VAT, BOOKS_NO_VAT_NAME } from "@/lib/books-selection";
+import { savedBillNotice } from "@/lib/bill-save-outcome";
 import {
   ArrowLeft,
   Download,
@@ -45,27 +46,6 @@ import {
 } from "./ui";
 import { AmountRow } from "./records";
 import { isNativeBillPaid, NativePaidRibbon } from "./native-paid-ribbon";
-
-function savedBillNotice(bill: Bill, manualEntryOnly: boolean): { tone: "info" | "success" | "error"; message: string } {
-  if (manualEntryOnly)
-    return { tone: "success", message: ["DRAFT", "REJECTED"].includes(bill.status)
-      ? "Draft saved. Open it again to finish entering the bill."
-      : "Bill saved successfully." };
-  if (["DRAFT", "REJECTED"].includes(bill.status))
-    return { tone: "success", message: "Draft saved. It has not been sent to Zoho Books." };
-  const sync = bill.syncRecords?.find((record) => record.target === "ZOHO");
-  if (sync?.status === "SYNCED" && sync.externalId)
-    return { tone: "success", message: "Bill saved and synchronized with Zoho Books." };
-  if (sync?.status === "PENDING")
-    return { tone: "info", message: sync.externalId
-      ? "Bill created in Zoho Books. Attachment synchronization is still pending."
-      : "Bill saved. Zoho Books synchronization queued. Provider confirmation is pending." };
-  if (sync?.status === "UNKNOWN")
-    return { tone: "error", message: "Bill saved. The Zoho Books result is uncertain. Reconcile this bill before retrying." };
-  if (sync?.externalId)
-    return { tone: "error", message: "Bill created in Zoho Books, but synchronization is incomplete. Check the synchronization details below." };
-  return { tone: "error", message: `Bill saved, but it has not synchronized with Zoho Books. ${sync?.lastError || "Books synchronization is not ready for this bill. Check the synchronization details below."}` };
-}
 
 function auditReason(event: AuditEvent) {
   const details = event.details;

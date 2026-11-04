@@ -63,6 +63,8 @@ export function BooksAuthorization({
         Sign in and accept access on Zoho&apos;s website. You will return here
         to see the updated status and connect the next company. Authorization
         alone does not send a bill or enable live accounting.
+        <p>Supplier access includes creating vendors and correcting existing vendor
+          details, such as the VAT registration shown on an original invoice.</p>
       </Notice>
       {error && (
         <Notice tone="error" onClose={() => setError("")}>

@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { calculateBill } from "@/lib/finance";
 import { matchesExactJobSearch, parseExactJobSearch } from "@/lib/job-search";
+import { savedBillState } from "@/lib/bill-save-outcome";
 import { BOOKS_NO_VAT_NAME, type BooksSelection } from "@/lib/books-selection";
 import {
   PAYMENT_TERMS,
@@ -41,6 +42,7 @@ import {
 import { AmountRow } from "./records";
 import { CompanySelect } from "./company-select";
 import { VendorAutocomplete } from "./vendor-autocomplete";
+import { SavedBillOutcome, type SavedJobBill } from "./saved-bill-outcome";
 import { BooksLinePicker, booksLineSelection, hasBooksLineDraft, type BooksLineDraft } from "./books-line-picker";
 
 type EditableLine = {
@@ -62,7 +64,6 @@ type OcrReviewContext = {
     currency?: string;
   };
 };
-type SavedJobBill = { id: string; invoiceNumber: string; isDraft: boolean };
 function booksSetupSteps(
   connection: NonNullable<BooksConnection["organizations"]>[number],
 ) {
@@ -331,14 +332,15 @@ function BillForm({
     const { bill: current } = await api<{ bill: Bill }>(`/api/bills/${id}`);
     if (current.version !== expectedVersion || !["DRAFT", "REJECTED", "PENDING_APPROVAL"].includes(current.status))
       throw new Error("This saved bill changed. Open it and review its current details before continuing.");
-    await api(`/api/bills/${id}/actions`, {
+    const result = await api<{ bill?: Bill } | null>(`/api/bills/${id}/actions`, {
       method: "POST",
       body: JSON.stringify({ action: "submit", version: expectedVersion }),
     });
+    return result?.bill ?? null;
   }
-  function openSavedBill(id: string, isDraft: boolean) {
+  function openSavedBill(id: string, isDraft: boolean, completedBill?: Bill | null) {
     if (repeatJobEntry && onSaved) {
-      onSaved({ id, invoiceNumber, isDraft });
+      onSaved({ id, invoiceNumber, isDraft, outcome: savedBillState(completedBill, { id, companyId, jobId }) });
       return;
     }
     router.push(`/bills/${id}?saved=1`);
@@ -465,9 +467,10 @@ function BillForm({
       const expectedVersion = attachmentVersion ?? result.bill.version;
       setSavedVersion(expectedVersion);
       setFile(null);
+      let completedBill: Bill | null = result.bill;
       if (submit && !review) {
         try {
-          await finalize(result.bill.id, expectedVersion);
+          completedBill = await finalize(result.bill.id, expectedVersion);
         } catch (e) {
           setRecovery("finalize");
           setError(`Your bill and attachment are saved. ${saveLabel} could not finish: ${errorMessage(e)}`);
@@ -475,7 +478,7 @@ function BillForm({
           return;
         }
       }
-      openSavedBill(result.bill.id, !submit);
+      openSavedBill(result.bill.id, !submit, completedBill);
     } catch (e) {
       setError(errorMessage(e));
       setBusy(false);
@@ -500,8 +503,8 @@ function BillForm({
         nextStep = savedForSync ? "finalize" : null;
         setRecovery(nextStep);
       }
-      if (savedForSync) await finalize(savedId, expectedVersion);
-      openSavedBill(savedId, !savedForSync);
+      const completedBill = savedForSync ? await finalize(savedId, expectedVersion) : null;
+      openSavedBill(savedId, !savedForSync, completedBill);
     } catch (e) {
       setRecovery(nextStep ?? "finalize");
       setError(`Your bill remains saved. ${errorMessage(e)}`);
@@ -553,14 +556,7 @@ function BillForm({
       </header>
       {previousSave && initialJob && <div className="books-form-notice" ref={receiptNotice}
         tabIndex={-1} role="group" aria-label="Saved bill confirmation">
-        <Notice tone="success">
-          <strong>{previousSave.isDraft ? "Draft" : "Bill"} {previousSave.invoiceNumber} saved.</strong>
-          <p>Enter another bill for {initialJob.jobNumber}. The form is ready for a new invoice.</p>
-          <div className="button-row">
-            <Link className="text-link" href={`/bills/${encodeURIComponent(previousSave.id)}?saved=1`}>View saved bill</Link>
-            <Link className="text-link" href={`/jobs/${encodeURIComponent(initialJob.id)}`}>View job history</Link>
-          </div>
-        </Notice>
+        <SavedBillOutcome key={previousSave.id} receipt={previousSave} job={initialJob} manualEntryOnly={manualEntryOnly} />
       </div>}
       {error && (
         <div className="books-form-notice">

@@ -759,11 +759,13 @@ describe("OAuth and verified CRM mapping", () => {
     expect(() => decryptToken(encrypted)).toThrow(/decrypt/);
     const url = new URL(authorizationUrl(config(), "fictional-state"));
     expect(url.searchParams.get("access_type")).toBe("offline");
+    expect(url.searchParams.get("prompt")).toBe("consent");
     expect(url.searchParams.get("scope")?.split(",")).toEqual([
       "ZohoBooks.bills.CREATE",
       "ZohoBooks.bills.READ",
       "ZohoBooks.contacts.READ",
       "ZohoBooks.contacts.CREATE",
+      "ZohoBooks.contacts.UPDATE",
       "ZohoBooks.settings.READ",
       "ZohoBooks.accountants.READ",
       "ZohoBooks.projects.READ",

@@ -108,6 +108,7 @@ export function authorizationUrl(config: ZohoConfig, state: string) {
           "ZohoBooks.bills.READ",
           "ZohoBooks.contacts.READ",
           "ZohoBooks.contacts.CREATE",
+          "ZohoBooks.contacts.UPDATE",
           "ZohoBooks.settings.READ",
           "ZohoBooks.accountants.READ",
           "ZohoBooks.projects.READ",

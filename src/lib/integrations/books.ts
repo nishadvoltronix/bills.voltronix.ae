@@ -5,6 +5,7 @@ import { z } from "zod";
 import { calculateBill } from "@/lib/finance";
 import { BOOKS_NO_VAT, BOOKS_PURCHASE_ACCOUNT_TYPES, booksSelectionSchema } from "@/lib/books-selection";
 import { IntegrationError, type ZohoConfig } from "./config";
+import { hasBooksVendorTaxConflict } from "./books-vendor-tax";
 import type { ZohoTransport } from "./transport";
 
 export const snapshotSchema = z.object({
@@ -386,6 +387,7 @@ export class BooksAdapter implements SupplierBillAdapter {
           contact_type: z.string(),
           currency_code: z.string(),
           status: z.literal("active"),
+          tax_treatment: z.unknown().optional(),
         }),
       })
       .safeParse(vendorResponse);
@@ -398,6 +400,12 @@ export class BooksAdapter implements SupplierBillAdapter {
       throw new IntegrationError(
         "VENDOR_MAPPING_MISMATCH",
         "The external vendor is inactive or does not match the reviewed mapping and currency.",
+        "BLOCKED",
+      );
+    if (hasBooksVendorTaxConflict(vendor.data.contact.tax_treatment, payload.line_items))
+      throw new IntegrationError(
+        "VENDOR_VAT_TREATMENT_MISMATCH",
+        "Books marks this supplier as VAT not registered, but this bill selects a VAT tax; zero rate also counts. The bill remains saved locally. An administrator must verify the correct supplier and VAT registration against the original invoice before retrying. Do not remove valid invoice VAT to bypass this check.",
         "BLOCKED",
       );
     const response = await this.transport.request("/books/v3/bills", {

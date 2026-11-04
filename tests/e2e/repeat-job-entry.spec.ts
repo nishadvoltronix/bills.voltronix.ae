@@ -21,7 +21,7 @@ type Payload = { companyId: string; vendorId: string; jobId: string; invoiceNumb
   discount: string; vatRate: string; notes: string; lines: NonNullable<Bill["lines"]>; submit: boolean; version?: number };
 type Fixture = { creates: Payload[]; updates: Payload[]; attachments: string[]; submits: string[]; searches: number;
   unexpected: string[]; bills: Map<string, Bill>; failCreate: boolean; failAttachment: boolean; failFinalize: boolean;
-  holdAttachment: Promise<void> | null };
+  holdAttachment: Promise<void> | null; finalizedSync: "PENDING" | "FAILED" | "SYNCED" };
 
 function storedBill(id: string, input: Payload): Bill {
   return { ...input, id, paymentTerms: input.paymentTerms as Bill["paymentTerms"], version: input.version ?? 1,
@@ -32,7 +32,7 @@ function storedBill(id: string, input: Payload): Bill {
 
 async function fixture(page: Page): Promise<Fixture> {
   const state: Fixture = { creates: [], updates: [], attachments: [], submits: [], searches: 0,
-    unexpected: [], bills: new Map(), failCreate: false, failAttachment: false, failFinalize: false, holdAttachment: null };
+    unexpected: [], bills: new Map(), failCreate: false, failAttachment: false, failFinalize: false, holdAttachment: null, finalizedSync: "PENDING" };
   await page.route("**/api/**", async route => {
     const request = route.request(), url = new URL(request.url()), path = url.pathname, method = request.method();
     if (method === "GET" && path === "/api/companies") return route.fulfill({ json: { companies: [company,
@@ -99,7 +99,9 @@ async function fixture(page: Page): Promise<Fixture> {
         expect(request.postDataJSON()).toEqual({ action: "submit", version: bill.version });
         if (state.failFinalize) { state.failFinalize = false; return route.fulfill({ status: 503, json: { error: "Fictional finalization interruption." } }); }
         bill.status = "READY"; bill.version++;
-        bill.syncRecords = [{ id: `${bill.id}-sync`, target: "ZOHO", status: "PENDING", organizationId, externalId: null }];
+        bill.syncRecords = [{ id: `${bill.id}-sync`, target: "ZOHO", status: state.finalizedSync, organizationId,
+          externalId: state.finalizedSync === "SYNCED" ? "998899001" : null,
+          lastError: state.finalizedSync === "FAILED" ? "Fictional supplier VAT registration needs review; keep the invoice VAT unchanged." : null }];
         return route.fulfill({ json: { bill } });
       }
     }
@@ -202,6 +204,7 @@ test("two consecutive saves reset every invoice field while retaining the verifi
     await page.getByRole("button", { name: "Save as draft", exact: true }).click();
     await assertFresh(page, today);
     await expect(page.getByRole("group", { name: "Saved bill confirmation", exact: true })).toContainText("FICTIONAL-REPEAT-SECOND");
+    await expect(page.getByRole("group", { name: "Saved bill confirmation", exact: true })).toContainText("Draft saved. It has not been sent to Zoho Books.");
     await expect(page.getByRole("link", { name: "View saved bill", exact: true })).toHaveAttribute("href", "/bills/repeat-created-2?saved=1");
     expect(state.creates.map(value => [value.companyId, value.jobId, value.invoiceNumber])).toEqual([
       [company.id, job.id, "FICTIONAL-REPEAT-FIRST"], [company.id, job.id, "FICTIONAL-REPEAT-SECOND"],
@@ -309,5 +312,152 @@ test("editing an existing bill retains update semantics and its detail redirect"
   expect(state.updates).toMatchObject([{ invoiceNumber: "FICTIONAL-EDIT-UPDATED", version: 7, jobId: job.id }]);
   expect(state.creates).toHaveLength(0);
   expect(state.submits).toHaveLength(0);
+  expect(state.unexpected).toEqual([]);
+});
+
+test("saved outcome shows an immediate Books failure while the next form stays ready", async ({ page }) => {
+  const state = await fixture(page); state.finalizedSync = "FAILED";
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  let savedReadStarted = false;
+  await page.route("**/api/bills/repeat-created-1", async route => {
+    const saved = state.bills.get("repeat-created-1");
+    if (route.request().method() !== "GET" || saved?.status !== "READY") return route.fallback();
+    savedReadStarted = true;
+    await held;
+    await route.fulfill({ json: { bill: saved } }).catch(() => undefined);
+  });
+  try {
+    await page.goto(`/bills/new?jobId=${job.id}`);
+    await fill(page, "FICTIONAL-IMMEDIATE-FAILED");
+    await page.getByRole("button", { name: "Save and sync", exact: true }).click();
+    const outcome = page.getByRole("group", { name: "Saved bill confirmation", exact: true });
+    await expect.poll(() => savedReadStarted).toBe(true);
+    await expect(outcome.getByRole("alert")).toContainText("Fictional supplier VAT registration needs review; keep the invoice VAT unchanged.");
+    await expect(outcome).toContainText("has not synchronized with Zoho Books");
+    await expect(page.getByLabel("Bill#")).toHaveValue("");
+    await expect(page.getByLabel(/^Job \/ project/)).toHaveValue(job.id);
+    await expect(page).toHaveURL(new RegExp(`/bills/new\\?jobId=${job.id}$`));
+    expect([state.creates.length, state.attachments.length, state.submits.length]).toEqual([1, 1, 1]);
+    expect(state.unexpected).toEqual([]);
+  } finally { release(); }
+});
+
+for (const nextStatus of ["FAILED", "SYNCED"] as const) {
+  test(`saved outcome refreshes PENDING to ${nextStatus} without changing the next invoice or file`, async ({ page }) => {
+    await page.clock.install();
+    const state = await fixture(page);
+    let savedReads = 0;
+    await page.route("**/api/bills/repeat-created-1", route => {
+      const saved = state.bills.get("repeat-created-1");
+      if (route.request().method() !== "GET" || saved?.status !== "READY") return route.fallback();
+      savedReads++;
+      return route.fulfill({ json: { bill: saved } });
+    });
+    await page.goto(`/bills/new?jobId=${job.id}`);
+    await fill(page, "FICTIONAL-PENDING-SAVED");
+    await page.getByRole("button", { name: "Save and sync", exact: true }).click();
+    const outcome = page.getByRole("group", { name: "Saved bill confirmation", exact: true });
+    await expect(outcome).toContainText("Provider confirmation is pending");
+    await expect.poll(() => savedReads).toBeGreaterThan(0);
+    await fill(page, "FICTIONAL-NEXT-UNSAVED", true);
+    await page.getByLabel("Bill#").focus();
+    const file = await page.getByLabel("Invoice attachment").elementHandle();
+    const record = state.bills.get("repeat-created-1")!.syncRecords![0];
+    record.status = nextStatus;
+    record.externalId = nextStatus === "SYNCED" ? "998899002" : null;
+    record.lastError = nextStatus === "FAILED" ? "Fictional supplier VAT registration needs review." : null;
+    await page.clock.fastForward(5000);
+    await expect(outcome).toContainText(nextStatus === "FAILED"
+      ? "Fictional supplier VAT registration needs review."
+      : "Bill saved and synchronized with Zoho Books.");
+    await expect(page.getByLabel("Bill#")).toHaveValue("FICTIONAL-NEXT-UNSAVED");
+    await expect(page.getByLabel("Bill#")).toBeFocused();
+    await expect(page.getByLabel("Order Number")).toHaveValue("FICTIONAL-PREVIOUS-ORDER");
+    await expect(page.getByRole("combobox", { name: "Line 1 account", exact: true })).toHaveValue(options.accounts[0].name);
+    expect(await file?.evaluate(element => element.isConnected)).toBe(true);
+    expect(await page.getByLabel("Invoice attachment").evaluate((element: HTMLInputElement) => element.files?.length)).toBe(1);
+    const terminalReads = savedReads;
+    await page.clock.fastForward(10000);
+    expect(savedReads).toBe(terminalReads);
+    expect([state.creates.length, state.attachments.length, state.submits.length]).toEqual([1, 1, 1]);
+    expect(state.unexpected).toEqual([]);
+  });
+}
+
+test("a stale saved-outcome response cannot replace a newer bill receipt or its next form", async ({ page }) => {
+  const state = await fixture(page);
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  let firstReadStarted = false, firstReadFinished = false;
+  await page.route("**/api/bills/repeat-created-1", async route => {
+    const saved = state.bills.get("repeat-created-1");
+    if (route.request().method() !== "GET" || saved?.status !== "READY") return route.fallback();
+    firstReadStarted = true;
+    await held;
+    await route.fulfill({ json: { bill: { ...saved, syncRecords: [{ target: "ZOHO", status: "FAILED",
+      externalId: null, lastError: "Fictional stale first-bill failure." }] } } }).catch(() => undefined);
+    firstReadFinished = true;
+  });
+  try {
+    await page.goto(`/bills/new?jobId=${job.id}`);
+    await fill(page, "FICTIONAL-FIRST-PENDING");
+    await page.getByRole("button", { name: "Save and sync", exact: true }).click();
+    await expect.poll(() => firstReadStarted).toBe(true);
+    await fill(page, "FICTIONAL-SECOND-SYNCED");
+    state.finalizedSync = "SYNCED";
+    await page.getByRole("button", { name: "Save and sync", exact: true }).click();
+    const outcome = page.getByRole("group", { name: "Saved bill confirmation", exact: true });
+    await expect(outcome).toContainText("FICTIONAL-SECOND-SYNCED");
+    await expect(outcome).toContainText("Bill saved and synchronized with Zoho Books.");
+    await fill(page, "FICTIONAL-THIRD-UNSAVED");
+    await page.getByLabel("Bill#").focus();
+    release();
+    await expect.poll(() => firstReadFinished).toBe(true);
+    await expect(outcome).not.toContainText("Fictional stale first-bill failure.");
+    await expect(outcome).toContainText("FICTIONAL-SECOND-SYNCED");
+    await expect(page.getByLabel("Bill#")).toHaveValue("FICTIONAL-THIRD-UNSAVED");
+    await expect(page.getByLabel("Bill#")).toBeFocused();
+    expect(await page.getByLabel("Invoice attachment").evaluate((element: HTMLInputElement) => element.files?.length)).toBe(1);
+    expect([state.creates.length, state.attachments.length, state.submits.length]).toEqual([2, 2, 2]);
+    expect(state.unexpected).toEqual([]);
+  } finally { release(); }
+});
+
+test("saved outcome labels retained status when refresh fails and only reads on explicit recovery", async ({ page }) => {
+  await page.clock.install();
+  const state = await fixture(page);
+  let failRead = false, savedReads = 0;
+  await page.route("**/api/bills/repeat-created-1", route => {
+    const saved = state.bills.get("repeat-created-1");
+    if (route.request().method() !== "GET" || saved?.status !== "READY") return route.fallback();
+    savedReads++;
+    return failRead ? route.fulfill({ status: 503, json: { error: "Fictional status refresh interruption." } })
+      : route.fulfill({ json: { bill: saved } });
+  });
+  await page.goto(`/bills/new?jobId=${job.id}`);
+  await fill(page, "FICTIONAL-STATUS-REFRESH");
+  await page.getByRole("button", { name: "Save and sync", exact: true }).click();
+  const outcome = page.getByRole("group", { name: "Saved bill confirmation", exact: true });
+  await expect(outcome).toContainText("Provider confirmation is pending");
+  await expect.poll(() => savedReads).toBeGreaterThan(0);
+  await fill(page, "FICTIONAL-NEXT-AFTER-REFRESH");
+  failRead = true;
+  await page.clock.fastForward(5000);
+  await expect(outcome).toContainText("Last verified result:");
+  await expect(outcome).toContainText("The latest status could not be verified. Fictional status refresh interruption.");
+  await expect(page.getByLabel("Bill#")).toHaveValue("FICTIONAL-NEXT-AFTER-REFRESH");
+  const pausedReads = savedReads;
+  await page.clock.fastForward(10000);
+  expect(savedReads).toBe(pausedReads);
+  failRead = false;
+  const record = state.bills.get("repeat-created-1")!.syncRecords![0];
+  record.status = "SYNCED"; record.externalId = "998899003";
+  await outcome.getByRole("button", { name: "Refresh saved bill status", exact: true }).click();
+  await expect(outcome).toContainText("Bill saved and synchronized with Zoho Books.");
+  await expect(outcome).not.toContainText("Last verified result:");
+  await expect(page.getByLabel("Bill#")).toHaveValue("FICTIONAL-NEXT-AFTER-REFRESH");
+  expect(await page.getByLabel("Invoice attachment").evaluate((element: HTMLInputElement) => element.files?.length)).toBe(1);
+  expect([state.creates.length, state.attachments.length, state.submits.length]).toEqual([1, 1, 1]);
   expect(state.unexpected).toEqual([]);
 });
