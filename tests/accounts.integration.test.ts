@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Actor } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { hashPassword, verifyPassword } from "@/lib/password";
-import { authenticationAttemptKey } from "@/lib/security/authentication-attempts";
+import { authenticationAttemptKey, reserveAuthenticationAttempt } from "@/lib/security/authentication-attempts";
 import { assertMySqlTestDatabase, createTestCompany } from "./company-fixtures";
 import {
   administerAccount,
@@ -50,6 +50,30 @@ async function session(userId: string) {
     },
   });
 }
+
+describe("durable action budgets remain separate from login", () => {
+  it("atomically allows thirty invoice reads while preserving the five-attempt login default and another actor's budget", async () => {
+    const identity = `fictional-autofill-${tag}`;
+    const previewKey = authenticationAttemptKey("manual-bill-autofill", identity);
+    const loginKey = authenticationAttemptKey("login", identity);
+    const otherKey = authenticationAttemptKey("manual-bill-autofill", `${identity}-other`);
+    expect(new Set([previewKey, loginKey, otherKey]).size).toBe(3);
+    const preview = await Promise.allSettled(Array.from({ length: 35 }, () => reserveAuthenticationAttempt(previewKey, "Fictional invoice budget exhausted.", 30)));
+    expect(preview.filter(result => result.status === "fulfilled")).toHaveLength(30);
+    expect(preview.filter(result => result.status === "rejected")).toHaveLength(5);
+    for (const result of preview) if (result.status === "rejected") expect(result.reason).toMatchObject({ status: 429 });
+    expect((await db.loginAttempt.findUniqueOrThrow({ where: { key: previewKey } })).count).toBe(35);
+    const login = await Promise.allSettled(Array.from({ length: 6 }, () => reserveAuthenticationAttempt(loginKey)));
+    expect(login.filter(result => result.status === "fulfilled")).toHaveLength(5);
+    expect(login.filter(result => result.status === "rejected")).toHaveLength(1);
+    await expect(reserveAuthenticationAttempt(otherKey, "Other fictional invoice budget.", 30)).resolves.toBe(1);
+    // An expired preview window resets only its own reservation, never login.
+    await db.loginAttempt.update({ where: { key: previewKey }, data: { windowStart: new Date(Date.now() - 16 * 60_000) } });
+    await expect(reserveAuthenticationAttempt(previewKey, "Fictional invoice budget exhausted.", 30)).resolves.toBe(1);
+    await expect(reserveAuthenticationAttempt(loginKey)).rejects.toMatchObject({ status: 429 });
+    expect((await db.loginAttempt.findUniqueOrThrow({ where: { key: otherKey } })).count).toBe(1);
+  });
+});
 
 describe("audited account lifecycle", () => {
   it("reauthenticates the actual operator instead of trusting a supplied email or role", async () => {

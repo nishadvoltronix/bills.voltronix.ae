@@ -37,7 +37,7 @@ const identity = (value?: string | null) =>
 /** A supplied tax identity must not be silently replaced by a name-only match. */
 export function matchingOcrVendors<
   T extends { id: string; name: string; trn?: string | null },
->(evidence: OcrEvidence, vendors: readonly T[]): T[] {
+>(evidence: Pick<OcrEvidence, "vendorName" | "vendorTrn">, vendors: readonly T[]): T[] {
   const trn = identity(evidence.vendorTrn);
   const name = identity(evidence.vendorName);
   return vendors.filter((vendor) =>

@@ -9,7 +9,9 @@ export function authenticationAttemptKey(purpose: string, identity: string) {
   return createHash("sha256").update(`${purpose}:${identity}`).digest("hex");
 }
 
-export async function reserveAuthenticationAttempt(key: string, message = "Too many authentication attempts. Try again in 15 minutes.") {
+/** Dedicated purpose hashes may reserve a different bounded action budget; login stays at five. */
+export async function reserveAuthenticationAttempt(key: string, message = "Too many authentication attempts. Try again in 15 minutes.", limit = 5) {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new Error("Invalid action reservation limit.");
   const now = new Date();
   const cutoff = new Date(now.getTime() - WINDOW_MS);
   // The upsert holds its row lock until the reserved count has been read.
@@ -25,7 +27,7 @@ export async function reserveAuthenticationAttempt(key: string, message = "Too m
     `;
     return tx.loginAttempt.findUniqueOrThrow({ where: { key } });
   }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
-  if (attempt.count > 5 || (attempt.lockedUntil && attempt.lockedUntil > now)) {
+  if (attempt.count > limit || (attempt.lockedUntil && attempt.lockedUntil > now)) {
     throw new HttpError(
       429,
       message,

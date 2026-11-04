@@ -38,6 +38,7 @@ async function fixture(page: Page): Promise<Fixture> {
     const request = route.request(), url = new URL(request.url()), path = url.pathname, method = request.method();
     if (method === "GET" && path === "/api/companies") return route.fulfill({ json: { companies: [company,
       { id: "repeat-other-company", name: "Fictional Other Company" }] } });
+    if (method === "GET" && path === "/api/bills/autofill") return route.fulfill({ json: { enabled: false, configured: false, message: "Fictional manual entry fixture." } });
     if (method === "GET" && path === "/api/jobs") return route.fulfill({ json: { jobs: [job] } });
     if (method === "GET" && path === `/api/jobs/${job.id}`) return route.fulfill({ json: { job, bills: [] } });
     if (method === "GET" && ["/api/dashboard/search", "/api/jobs/search"].includes(path)) {

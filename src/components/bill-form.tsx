@@ -45,6 +45,8 @@ import { CompanySelect } from "./company-select";
 import { VendorAutocomplete } from "./vendor-autocomplete";
 import { SavedBillOutcome, type SavedJobBill } from "./saved-bill-outcome";
 import { InvoiceAttachmentPicker, type InvoiceFileSelection } from "./invoice-attachment-picker";
+import { ManualBillAutofill, useManualBillAutofill } from "./manual-bill-autofill";
+import type { InvoiceAutofillResponse } from "@/lib/manual-bill-autofill-types";
 import { BooksLinePicker, booksLineSelection, hasBooksLineDraft, type BooksLineDraft } from "./books-line-picker";
 
 type EditableLine = {
@@ -237,6 +239,10 @@ function BillForm({
   const [savedForSync, setSavedForSync] = useState(false);
   const existingDocuments = bill?.documents ?? bill?.attachments ?? [];
   const uncertainUpload = files.some(file => file.status === "uncertain");
+  const [autofillReviewRequired, setAutofillReviewRequired] = useState(false);
+  const [autofillReviewed, setAutofillReviewed] = useState(false);
+  const humanEdited = useRef(new Set<string>()), autoOwned = useRef(new Set<string>());
+  const markEdited = useCallback((field: string) => { humanEdited.current.add(field); setAutofillReviewed(false); }, []);
   const calculated = useMemo(() => {
     try {
       const unfinished = lines.findIndex((line) => hasBooksLineDraft(line.booksDraft) && !line.booksSelection);
@@ -257,10 +263,11 @@ function BillForm({
       : [{ tax_id: Number(vatRate) > 0 ? "configured-vat" : null }]);
   const handleVendorChange = useCallback((vendor: Vendor | null, source: "selection" | "hydration" | "clear") => {
     if (vendor && vendor.companyId !== companyId) return;
+    if (source !== "hydration") markEdited("vendor");
     setVendorId(vendor?.id ?? "");
     setChosenVendor(vendor);
     if (source === "selection" && vendor && !jobId) setCurrency(vendor.currency);
-  }, [companyId, jobId]);
+  }, [companyId, jobId, markEdited]);
   const handleVendorPending = useCallback((pending: boolean) => {
     setVendorPending((current) => {
       if (!pending && current?.companyId !== companyId) return current;
@@ -279,6 +286,51 @@ function BillForm({
       selectedJob?.currency ||
       selectedVendor?.currency ||
       "AED";
+  const attachmentFirst = !bill && !draft && !review;
+  function applyAutofill(result: InvoiceAutofillResponse) {
+    const fields = result.preview.fields;
+    let kept = false;
+    const scalar = (name: string, value: string | undefined, fallback: string, setter: (value: string) => void, clearUnknown = false) => {
+      if (humanEdited.current.has(name)) { kept = true; return; }
+      if (value !== undefined || autoOwned.current.has(name) || clearUnknown) {
+        setter(value ?? fallback); autoOwned.current.add(name);
+      }
+    };
+    scalar("invoiceNumber", fields.invoiceNumber, "", setInvoiceNumber);
+    scalar("invoiceDate", fields.invoiceDate, "", setInvoiceDate, true);
+    scalar("dueDate", fields.dueDate, "", setDueDate);
+    scalar("orderNumber", fields.orderNumber, "", setOrderNumber);
+    scalar("description", fields.description, "", setDescription);
+    scalar("discount", fields.discount, "0", setDiscount);
+    scalar("vatRate", fields.vatRate, "", setVatRate, true);
+    if (!humanEdited.current.has("lines")) {
+      if (fields.lines || autoOwned.current.has("lines")) {
+        setLines(fields.lines?.map((line, key) => ({ ...line, key })) ?? [{ key: 0, description: "", quantity: "1", unitPrice: "" }]);
+        setBooksFieldsRevision(value => value + 1); autoOwned.current.add("lines");
+      }
+    } else kept = true;
+    if (!humanEdited.current.has("vendor")) {
+      const nextVendor = result.preview.vendor?.id === fields.vendorId ? fields.vendorId : undefined;
+      if (nextVendor || autoOwned.current.has("vendor")) {
+        setVendorId(nextVendor ?? "");
+        if (nextVendor !== vendorId) { setChosenVendor(null); setVendorLookupRevision(value => value + 1); }
+        autoOwned.current.add("vendor");
+      }
+    } else kept = true;
+    setAutofillReviewRequired(true); setAutofillReviewed(false);
+    return { kept };
+  }
+  const autofill = useManualBillAutofill({ eligible: attachmentFirst && !savedId && !busy && user.role !== "MANAGEMENT",
+    companyId, jobId: selectedJob?.id ?? "", currency: selectedJob?.currency ?? currency,
+    files, checking: checkingFiles, apply: applyAutofill, invalidate: () => setAutofillReviewed(false) });
+  function captureHumanEdit(event: React.FormEvent<HTMLFormElement>) {
+    const element = event.target as HTMLInputElement;
+    const names: Record<string, string> = { "invoice-number": "invoiceNumber", "invoice-date": "invoiceDate", "due-date": "dueDate",
+      "bill-order": "orderNumber", "bill-description": "description", "bill-discount": "discount", "bill-vat": "vatRate", "bill-vendor": "vendor" };
+    if (names[element.id]) markEdited(names[element.id]);
+    if (element.id === "bill-payment-terms") markEdited("dueDate");
+    if (element.getAttribute("aria-label")?.startsWith("Line ")) markEdited("lines");
+  }
   const booksDestinations = (integrations.data?.zoho.organizations ?? []).filter(
     (destination) => destination.companyId === companyId,
   );
@@ -312,6 +364,7 @@ function BillForm({
     field: "description" | "quantity" | "unitPrice",
     value: string,
   ) {
+    markEdited("lines");
     setLines((current) =>
       current.map((line) =>
         line.key === key ? { ...line, [field]: value } : line,
@@ -319,10 +372,12 @@ function BillForm({
     );
   }
   function updateBooksLine(key: number, draft: BooksLineDraft) {
+    markEdited("lines");
     setLines((current) => current.map((line) => line.key === key
       ? { ...line, booksDraft: draft, booksSelection: booksLineSelection(draft) } : line));
   }
-  function clearBooksLines() {
+  function clearBooksLines(markHuman = true) {
+    if (markHuman) markEdited("lines");
     setLines((current) => current.map((line) => ({ ...line, booksDraft: undefined, booksSelection: null })));
     setBooksFieldsRevision((current) => current + 1);
   }
@@ -336,7 +391,7 @@ function BillForm({
   async function selectAttachments(selected: File[]) {
     if (busy || selectionInFlight.current || uncertainUpload || finalizedEdit) return;
     if (selected.length > MAX_INVOICE_ATTACHMENTS || selected.some(file => file.size < 8 || file.size > MAX_INVOICE_FILE_BYTES ||
-      !["application/pdf", "image/jpeg", "image/png"].includes(file.type))) {
+      file.type && !["application/pdf", "image/jpeg", "image/png"].includes(file.type))) {
       setError(`Choose PDF, JPEG or PNG originals, up to ${MAX_INVOICE_ATTACHMENTS} files and ${MAX_INVOICE_TOTAL_BYTES / 1_000_000} MB total.`);
       return;
     }
@@ -345,8 +400,14 @@ function BillForm({
     try {
       const additions = await Promise.all(selected.map(async file => {
         const bytes = await file.arrayBuffer();
+        const signature = new Uint8Array(bytes);
+        const detected = signature[0] === 37 && signature[1] === 80 && signature[2] === 68 && signature[3] === 70 && signature[4] === 45 ? "application/pdf"
+          : signature[0] === 255 && signature[1] === 216 && signature[2] === 255 ? "image/jpeg"
+            : signature.slice(0, 8).every((byte, index) => byte === [137, 80, 78, 71, 13, 10, 26, 10][index]) ? "image/png" : null;
+        if (!detected || file.type && file.type !== detected) throw new Error("Choose an original PDF, JPEG or PNG file with a matching file type.");
+        const original = file.type ? file : new File([file], file.name, { type: detected, lastModified: file.lastModified });
         const digest = await crypto.subtle.digest("SHA-256", bytes);
-        return { id: Array.from(new Uint8Array(digest)).map(byte => byte.toString(16).padStart(2, "0")).join(""), file, status: "pending" as const };
+        return { id: Array.from(new Uint8Array(digest)).map(byte => byte.toString(16).padStart(2, "0")).join(""), file: original, status: "pending" as const };
       }));
       const merged = [...fileSelections.current];
       for (const file of additions) if (!merged.some(current => current.id === file.id)) merged.push(file);
@@ -416,6 +477,12 @@ function BillForm({
       .submitter as HTMLButtonElement | null;
     const submit = submitter?.value !== "draft";
     setError("");
+    if (submit && autofill.waiting) {
+      setError("Wait for invoice reading to finish, or choose Continue manually before saving."); return;
+    }
+    if (submit && autofillReviewRequired && !autofillReviewed) {
+      setError("Compare the current originals with all bill values, then confirm your review before final save."); return;
+    }
     if (submit && vendorTaxConflict) {
       setError(BOOKS_VENDOR_VAT_REVIEW_MESSAGE);
       return;
@@ -476,6 +543,7 @@ function BillForm({
       setError("Bill, vendor and job currencies must match. Currency conversion is not configured.");
       return;
     }
+    autofill.stop();
     saveInFlight.current = true;
     setBusy(true);
     try {
@@ -663,7 +731,7 @@ function BillForm({
           </div>
         </Card>
       ) : (
-        <form onSubmit={save} className="books-bill-form">
+        <form onSubmit={save} onChangeCapture={captureHumanEdit} className="books-bill-form">
           <fieldset disabled={busy} className="books-form-fields">
             <legend className="sr-only">Bill details</legend>
             <div className="books-company-section books-form-row">
@@ -677,10 +745,16 @@ function BillForm({
                   setChosenVendor(null);
                   setVendorPending(null);
                   setJobId("");
-                  clearBooksLines();
+                  clearBooksLines(false);
                 }}
               />
             </div>
+            {attachmentFirst && <section className="books-form-notice" aria-label="Invoice originals and automatic reading">
+              <h2>Attach the invoice first</h2>
+              {selectedJob && <p>Job: {selectedJob.jobNumber} · {selectedJob.name}</p>}
+              <InvoiceAttachmentPicker files={files} busy={busy} checking={checkingFiles} onFiles={selectAttachments} onRemove={removeAttachment} />
+              <ManualBillAutofill reading={autofill} jobNumber={selectedJob?.jobNumber} />
+            </section>}
             {finalizedEdit && <div className="books-form-notice"><Notice>
               Changes keep this bill&apos;s company, job, currency, recorded payments and original files.
               {manualEntryOnly ? "" : " A synchronized bill is updated against its existing Zoho Books bill ID."}
@@ -974,7 +1048,7 @@ function BillForm({
                 </Button>}
                 <p>For Books line selections, choose an account and either a tax or {BOOKS_NO_VAT_NAME} on every line. Customer attribution is optional; the local job remains required.</p>
                 </>}
-                {usesLineBooks && <Button type="button" variant="ghost" onClick={clearBooksLines}>Clear all Books selections</Button>}
+                {usesLineBooks && <Button type="button" variant="ghost" onClick={() => clearBooksLines()}>Clear all Books selections</Button>}
               </div>}
               <Table>
                 <thead>
@@ -1070,11 +1144,12 @@ function BillForm({
                           size="icon"
                           aria-label={`Remove line ${index + 1}`}
                           disabled={lines.length <= 1}
-                          onClick={() =>
+                          onClick={() => {
+                            markEdited("lines");
                             setLines((current) =>
                               current.filter((item) => item.key !== line.key),
-                            )
-                          }
+                            );
+                          }}
                         >
                           <Trash2 size={16} />
                         </Button>
@@ -1088,7 +1163,8 @@ function BillForm({
                 variant="ghost"
                 className="books-add-line"
                 disabled={lines.length >= 100}
-                onClick={() =>
+                onClick={() => {
+                  markEdited("lines");
                   setLines((current) => [
                     ...current,
                     {
@@ -1097,8 +1173,8 @@ function BillForm({
                       quantity: "1",
                       unitPrice: "",
                     },
-                  ])
-                }
+                  ]);
+                }}
               >
                 <Plus size={16} />
                 Add another line
@@ -1120,7 +1196,7 @@ function BillForm({
                     placeholder="Add a note for the accounts team…"
                   />
                 </Field>
-                {!review && <InvoiceAttachmentPicker files={files} existing={existingDocuments} busy={busy}
+                {!review && !attachmentFirst && <InvoiceAttachmentPicker files={files} existing={existingDocuments} busy={busy}
                   checking={checkingFiles} readOnly={finalizedEdit} onFiles={selectAttachments} onRemove={removeAttachment} />}
                 {review && (
                   <Notice>
@@ -1280,6 +1356,10 @@ function BillForm({
                 and totals. These values are verified.
               </label>
             )}
+            {attachmentFirst && autofillReviewRequired && <label className="ocr-confirmation">
+              <input id="autofill-reviewed" type="checkbox" checked={autofillReviewed} onChange={event => setAutofillReviewed(event.target.checked)} />
+              I compared the current original files with the supplier, dates, line items, VAT and totals. The bill is ready for final save.
+            </label>}
           </fieldset>
           <footer className="books-form-footer">
             <div className="books-footer-actions">
@@ -1287,7 +1367,7 @@ function BillForm({
                 name="intent"
                 value="submit"
                 type="submit"
-                disabled={busy || checkingFiles || vendorResolving || jobs.loading || vendorTaxConflict}
+                disabled={busy || checkingFiles || vendorResolving || jobs.loading || vendorTaxConflict || autofill.waiting}
               >
                 {busy ? <LoaderCircle size={15} className="spin" /> : <Send size={15} />}
                 {saveLabel}

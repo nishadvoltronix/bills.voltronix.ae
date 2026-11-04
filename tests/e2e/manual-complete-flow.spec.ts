@@ -72,6 +72,7 @@ for (const company of companies) {
       const request = route.request(), url = new URL(request.url()), path = url.pathname, method = request.method();
       if (method !== "GET") writes.push(path);
       if (method === "GET" && path === "/api/companies") return route.fulfill({ json: { companies } });
+      if (method === "GET" && path === "/api/bills/autofill") return route.fulfill({ json: { enabled: false, configured: false, message: "Fictional manual entry fixture." } });
       if (method === "GET" && path === "/api/dashboard/search") {
         expect([...url.searchParams.entries()]).toEqual([["q", company.query]]);
         return route.fulfill({ json: { query: company.query, jobs: [], bills: [], hasMore: false } });

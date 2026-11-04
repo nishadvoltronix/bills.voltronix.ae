@@ -16,6 +16,10 @@ describe("provider test isolation", () => {
       ALLOW_PRODUCTION_ACCOUNTING_WRITES: "true",
       INTEGRATION_TEST_MODE: "true",
       OCR_ENABLED: "true",
+      OPENAI_API_KEY: "synthetic-openai-key",
+      OPENAI_API_KEY_FILE: "/private/fictional-openai-key",
+      OPENAI_INVOICE_MODEL: "fictional-provider-model",
+      BILL_AUTOFILL_ENABLED: "true",
     };
     const result = isolatedProviderEnvironment(source);
     expect(result).toEqual({
@@ -25,6 +29,7 @@ describe("provider test isolation", () => {
       ALLOW_PRODUCTION_ACCOUNTING_WRITES: "false",
       INTEGRATION_TEST_MODE: "false",
       OCR_ENABLED: "false",
+      BILL_AUTOFILL_ENABLED: "false",
     });
     expect(source.ZOHO_BOOKS_CLIENT_SECRET).toBe("synthetic-secret");
   });

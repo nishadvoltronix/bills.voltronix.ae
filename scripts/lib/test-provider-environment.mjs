@@ -2,7 +2,7 @@
 export function isolatedProviderEnvironment(source) {
   const env = { ...source };
   for (const key of Object.keys(env)) {
-    if (/^(ZOHO_|AZURE_DOCUMENT_INTELLIGENCE_|INTEGRATION_|OCR_)/.test(key)) {
+    if (/^(ZOHO_|AZURE_DOCUMENT_INTELLIGENCE_|INTEGRATION_|OCR_|OPENAI_|BILL_AUTOFILL_)/.test(key)) {
       delete env[key];
     }
   }
@@ -13,5 +13,6 @@ export function isolatedProviderEnvironment(source) {
     ALLOW_PRODUCTION_ACCOUNTING_WRITES: "false",
     INTEGRATION_TEST_MODE: "false",
     OCR_ENABLED: "false",
+    BILL_AUTOFILL_ENABLED: "false",
   };
 }

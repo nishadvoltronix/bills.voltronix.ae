@@ -28,6 +28,7 @@ async function setup(page: Page, initial = fixture(), fromEntry = false) {
       return route.fulfill(await state.action(body));
     }
     if (url.pathname === "/api/companies" && request.method() === "GET") return route.fulfill({ json: { companies: [{ id: "fictional-company", name: "Fictional company" }] } });
+    if (url.pathname === "/api/bills/autofill" && request.method() === "GET") return route.fulfill({ json: { enabled: false, configured: false, message: "Fictional manual entry fixture." } });
     if (url.pathname === "/api/jobs" && request.method() === "GET") return route.fulfill({ json: { jobs: [state.bill.job] } });
     if (url.pathname === "/api/jobs/job" && request.method() === "GET") return route.fulfill({ json: { job: state.bill.job, bills: [] } });
     if (url.pathname === "/api/bills/options" && request.method() === "GET") return route.fulfill({ json: {

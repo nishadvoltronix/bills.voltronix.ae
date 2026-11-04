@@ -4,6 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   configuredSecrets,
+  configuredSecretFiles,
   inspectRelease,
 } from "../scripts/check-release.mjs";
 
@@ -17,6 +18,7 @@ describe("release privacy credential coverage", () => {
       ZOHO_CRM_REFRESH_TOKEN: "Tok4!",
       ACCOUNT_NEW_PASSWORD: "New2!",
       AZURE_DOCUMENT_INTELLIGENCE_KEY: "Azure6!",
+      OPENAI_API_KEY: "OpenAI7!",
     });
     for (const value of [
       "S8!x",
@@ -26,6 +28,7 @@ describe("release privacy credential coverage", () => {
       "Tok4!",
       "New2!",
       "Azure6!",
+      "OpenAI7!",
     ])
       expect(secrets).toContain(value);
   });
@@ -106,5 +109,42 @@ describe("release privacy credential coverage", () => {
       await rmdir(server);
       await rmdir(root);
     }
+  });
+  it("scans a file-backed OpenAI key and detects its trace path without exposing its contents", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "voltronix-file-key-fixture-"));
+    const server = path.join(root, "server"), key = path.join(root, "provider-key.txt"), bundle = path.join(server, "route.js"), trace = path.join(server, "route.js.nft.json");
+    const secret = 'fictional"key\\with spaces';
+    await mkdir(server);
+    try {
+      await writeFile(key, `${secret}\n`, { mode: 0o600 });
+      await writeFile(bundle, `const fixture=${JSON.stringify(secret)};`);
+      await writeFile(trace, JSON.stringify({ files: [path.relative(server, key)] }));
+      const environment = { OPENAI_API_KEY_FILE: key, OPENAI_INVOICE_MODEL: "fictional-model", BILL_AUTOFILL_ENABLED: "true" };
+      const values = await configuredSecretFiles(environment);
+      expect(values.secrets).toContain(secret);
+      expect(values.secrets).toContain('fictional\\"key\\\\with spaces');
+      expect(values.secrets).toContain("fictional%22key%5Cwith%20spaces");
+      expect(values.secrets).not.toContain(key);
+      expect(await inspectRelease(root, environment)).toEqual({ checked: 2, secretMatches: 1, privateReferences: 1 });
+      await writeFile(bundle, "const fixture=true;");
+      await writeFile(trace, JSON.stringify({ files: [key] }));
+      expect(await inspectRelease(root, environment)).toEqual({ checked: 2, secretMatches: 0, privateReferences: 1 });
+    } finally {
+      for (const file of [bundle, trace, key]) await unlink(file).catch(() => undefined);
+      await rmdir(server); await rmdir(root);
+    }
+  });
+  it("fails closed on missing, empty, oversized or relative file-backed credential configuration", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "voltronix-invalid-key-fixture-"));
+    const key = path.join(root, "provider-key.txt");
+    try {
+      await expect(configuredSecretFiles({ OPENAI_API_KEY_FILE: key })).rejects.toThrow();
+      await writeFile(key, "");
+      await expect(configuredSecretFiles({ OPENAI_API_KEY_FILE: key })).rejects.toThrow();
+      await writeFile(key, "x".repeat(65_537));
+      await expect(configuredSecretFiles({ OPENAI_API_KEY_FILE: key })).rejects.toThrow();
+      await expect(configuredSecretFiles({ OPENAI_API_KEY_FILE: "relative-key.txt" })).rejects.toThrow();
+      expect(await configuredSecretFiles({ OPENAI_API_KEY_FILE: "", OPENAI_INVOICE_MODEL: "fictional-model" })).toEqual({ secrets: [], paths: [] });
+    } finally { await unlink(key).catch(() => undefined); await rmdir(root); }
   });
 });

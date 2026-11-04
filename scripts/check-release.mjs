@@ -1,6 +1,7 @@
 ﻿import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
-import { existsSync } from "node:fs";
+import { constants, existsSync } from "node:fs";
+import { lstat, open } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
 // Scan configured credentials, never public settings or source-code fixtures.
@@ -57,6 +58,39 @@ export function configuredSecrets(environment) {
   return [...values];
 }
 
+/** Read file-backed credentials at inspection time, never during module import/build. */
+export async function configuredSecretFiles(environment) {
+  const secrets = new Set();
+  const paths = new Set();
+  for (const [name, value] of Object.entries(environment)) {
+    if (!name.endsWith("_FILE") || !credentialName.test(name.slice(0, -5)) || !value) continue;
+    if (!path.isAbsolute(value)) throw new Error("A configured credential file must use an absolute path.");
+    if ((await lstat(value)).isSymbolicLink()) throw new Error("A configured credential file must be a regular file.");
+    const file = await open(value, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+    try {
+      const information = await file.stat();
+      if (!information.isFile() || information.size === 0 || information.size > 65_536)
+        throw new Error("A configured credential file could not be inspected safely.");
+      const bytes = Buffer.alloc(65_537);
+      let bytesRead = 0;
+      while (bytesRead < bytes.length) {
+        const chunk = await file.read(bytes, bytesRead, bytes.length - bytesRead, bytesRead);
+        if (!chunk.bytesRead) break;
+        bytesRead += chunk.bytesRead;
+      }
+      if (bytesRead === 0 || bytesRead > 65_536)
+        throw new Error("A configured credential file could not be inspected safely.");
+      const secret = bytes.subarray(0, bytesRead).toString("utf8").trim();
+      if (!secret) throw new Error("A configured credential file is empty.");
+      for (const variant of configuredSecrets({ RUNTIME_API_KEY: secret })) secrets.add(variant);
+      paths.add(path.resolve(value));
+    } finally {
+      await file.close();
+    }
+  }
+  return { secrets: [...secrets], paths: [...paths] };
+}
+
 /** @param {string} directory */
 async function filesUnder(directory) {
   const result = [];
@@ -75,7 +109,9 @@ export async function inspectRelease(buildDirectory, environment) {
     throw new Error(
       "Run a production build before checking release artifacts.",
     );
-  const secrets = configuredSecrets(environment);
+  const fileCredentials = await configuredSecretFiles(environment);
+  const secrets = [...configuredSecrets(environment), ...fileCredentials.secrets];
+  const privateFiles = new Set(fileCredentials.paths);
   const files = [
     ...(await filesUnder(path.join(buildDirectory, "server"))),
     ...(await filesUnder(path.join(buildDirectory, "static"))),
@@ -100,6 +136,7 @@ export async function inspectRelease(buildDirectory, environment) {
       )
         throw new Error("A release trace is invalid.");
       privateReferences += trace.files.filter((name) =>
+        privateFiles.has(path.resolve(path.dirname(file), name)) ||
         /(?:^|[/\\])(?:\.local|test-results|playwright-report)(?:[/\\]|$)|(?:^|[/\\])\.env(?:$|\.)/.test(
           name,
         ),

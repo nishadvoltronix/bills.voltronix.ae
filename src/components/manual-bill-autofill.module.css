@@ -1,0 +1,11 @@
+.panel { margin-top: 18px; padding: 17px; border: 1px solid #dbe4f0; border-radius: 8px; background: #f8fafc; font-size: 12px; line-height: 1.65; }
+.panel p { margin: 9px 0; }
+.heading, .status { display: flex; align-items: center; gap: 8px; color: #253858; }
+.heading strong { font-size: 14px; }
+.status svg { flex-shrink: 0; }
+.evidence { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin: 16px 0; }
+.evidence dt { color: #64748b; font-size: 11px; }
+.evidence dd { margin: 5px 0 0; overflow-wrap: anywhere; font-weight: 600; }
+.evidence dd span { display: block; font-size: 11px; font-weight: 400; }
+.warnings { margin: 12px 0; padding-left: 18px; color: #925b12; }
+@media (max-width: 650px) { .evidence { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
