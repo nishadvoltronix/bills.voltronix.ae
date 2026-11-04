@@ -17,6 +17,7 @@ import {
 import { calculateBill } from "@/lib/finance";
 import { matchesExactJobSearch, parseExactJobSearch } from "@/lib/job-search";
 import { savedBillState } from "@/lib/bill-save-outcome";
+import { mergeAutofillLines, type AutofillLineEdit, type AutofillLineOrigin } from "@/lib/bill-autofill-lines";
 import { BOOKS_NO_VAT, BOOKS_NO_VAT_NAME, type BooksSelection } from "@/lib/books-selection";
 import { MAX_INVOICE_ATTACHMENTS, MAX_INVOICE_FILE_BYTES, MAX_INVOICE_TOTAL_BYTES } from "@/lib/invoice-attachments";
 import { BOOKS_VENDOR_VAT_REVIEW_MESSAGE, hasBooksVendorTaxConflict } from "@/lib/integrations/books-vendor-tax";
@@ -26,7 +27,7 @@ import {
   type PaymentTerm,
 } from "@/lib/payment-terms";
 import { ApiError, api, dateInput, errorMessage, money, useApi } from "./api";
-import type { Bill, BillBooksOptions, BooksConnection, Job, Vendor } from "./types";
+import type { Bill, BillBooksOptions, Job, Vendor } from "./types";
 import { useManualEntryOnly, useUser } from "./app-shell";
 import {
   Button,
@@ -68,33 +69,6 @@ type OcrReviewContext = {
     currency?: string;
   };
 };
-function booksSetupSteps(
-  connection: NonNullable<BooksConnection["organizations"]>[number],
-) {
-  const missing = [
-    ...(connection.missing ?? []),
-    ...(connection.postingMissing ?? []),
-  ];
-  const steps: string[] = [];
-  if (connection.authorization?.networkEnabled === false)
-    steps.push("enable the Books connection");
-  if (
-    missing.some((item) => item.endsWith("_OAUTH_AUTHORIZATION")) ||
-    connection.status === "CONFIGURED_UNVERIFIED"
-  )
-    steps.push("connect this company's Books account");
-  if (missing.includes("ZOHO_BOOKS_MAPPING_JSON"))
-    steps.push("complete the expense account, tax and currency mappings");
-  if (missing.includes("LIVE_OPERATIONAL_ENVIRONMENT"))
-    steps.push("configure this deployment for live Books synchronization");
-  if (missing.includes("LIVE_COMPANY_VERIFICATION"))
-    steps.push("verify this company and its Books destination for live posting");
-  if (missing.includes("VERIFIED_NONPRODUCTION_TEST_AUTHORIZATION"))
-    steps.push("authorize the selected test organization");
-  return steps.length
-    ? `Ask your administrator to ${steps.join(", and ")}.`
-    : "Ask your administrator to check the Books connection, company permissions and accounting mappings.";
-}
 export function BillEditor({
   id,
   today,
@@ -174,7 +148,6 @@ function BillForm({
     window.scrollTo({ top: 0, behavior: "auto" });
   }, [previousSave]);
   const jobs = useApi<{ jobs: Job[] }>("/api/jobs");
-  const integrations = useApi<{ zoho: BooksConnection }>(manualEntryOnly ? null : "/api/integrations");
   const initial = bill ?? draft;
   const [companyId, setCompanyId] = useState(initial?.companyId ?? initialJob?.companyId ?? "");
   const availableJobs = [...(jobs.data?.jobs ?? [])];
@@ -243,6 +216,13 @@ function BillForm({
   const [autofillReviewed, setAutofillReviewed] = useState(false);
   const humanEdited = useRef(new Set<string>()), autoOwned = useRef(new Set<string>());
   const markEdited = useCallback((field: string) => { humanEdited.current.add(field); setAutofillReviewed(false); }, []);
+  const lineOrigins = useRef<AutofillLineOrigin[]>([]);
+  const lineEdits = useRef(new Map<number, Set<AutofillLineEdit>>());
+  const [lineReadingReview, setLineReadingReview] = useState(false);
+  function markLineEdited(key: number, field: AutofillLineEdit) {
+    const fields = lineEdits.current.get(key) ?? new Set<AutofillLineEdit>();
+    fields.add(field); lineEdits.current.set(key, fields); markEdited("lines");
+  }
   const calculated = useMemo(() => {
     try {
       const unfinished = lines.findIndex((line) => hasBooksLineDraft(line.booksDraft) && !line.booksSelection);
@@ -303,12 +283,9 @@ function BillForm({
     scalar("description", fields.description, "", setDescription);
     scalar("discount", fields.discount, "0", setDiscount);
     scalar("vatRate", fields.vatRate, "", setVatRate, true);
-    if (!humanEdited.current.has("lines")) {
-      if (fields.lines || autoOwned.current.has("lines")) {
-        setLines(fields.lines?.map((line, key) => ({ ...line, key })) ?? [{ key: 0, description: "", quantity: "1", unitPrice: "" }]);
-        setBooksFieldsRevision(value => value + 1); autoOwned.current.add("lines");
-      }
-    } else kept = true;
+    const merged = mergeAutofillLines(lines, lineOrigins.current, fields.lines, lineEdits.current, (line, key) => ({ ...line, key }));
+    setLines(merged.lines); lineOrigins.current = merged.origins;
+    setLineReadingReview(merged.review); kept ||= merged.kept;
     if (!humanEdited.current.has("vendor")) {
       const nextVendor = result.preview.vendor?.id === fields.vendorId ? fields.vendorId : undefined;
       if (nextVendor || autoOwned.current.has("vendor")) {
@@ -323,6 +300,8 @@ function BillForm({
   const autofill = useManualBillAutofill({ eligible: attachmentFirst && !savedId && !busy && user.role !== "MANAGEMENT",
     companyId, jobId: selectedJob?.id ?? "", currency: selectedJob?.currency ?? currency,
     files, checking: checkingFiles, apply: applyAutofill, invalidate: () => setAutofillReviewed(false) });
+  const printedJob = autofill.preview?.evidence.jobNumber;
+  const printedJobMismatch = printedJob && selectedJob && printedJob.toUpperCase().replace(/^JOB[- ]?/, "") !== selectedJob.jobNumber.toUpperCase().replace(/^JOB[- ]?/, "");
   function captureHumanEdit(event: React.FormEvent<HTMLFormElement>) {
     const element = event.target as HTMLInputElement;
     const names: Record<string, string> = { "invoice-number": "invoiceNumber", "invoice-date": "invoiceDate", "due-date": "dueDate",
@@ -331,11 +310,6 @@ function BillForm({
     if (element.id === "bill-payment-terms") markEdited("dueDate");
     if (element.getAttribute("aria-label")?.startsWith("Line ")) markEdited("lines");
   }
-  const booksDestinations = (integrations.data?.zoho.organizations ?? []).filter(
-    (destination) => destination.companyId === companyId,
-  );
-  const booksDestination =
-    booksDestinations.length === 1 ? booksDestinations[0] : undefined;
   const vendorCurrencyMismatch =
     selectedVendor && selectedVendor.currency !== currency;
   let effectiveDueDate = dueDate;
@@ -364,7 +338,7 @@ function BillForm({
     field: "description" | "quantity" | "unitPrice",
     value: string,
   ) {
-    markEdited("lines");
+    markLineEdited(key, field);
     setLines((current) =>
       current.map((line) =>
         line.key === key ? { ...line, [field]: value } : line,
@@ -372,12 +346,12 @@ function BillForm({
     );
   }
   function updateBooksLine(key: number, draft: BooksLineDraft) {
-    markEdited("lines");
+    markLineEdited(key, "books");
     setLines((current) => current.map((line) => line.key === key
       ? { ...line, booksDraft: draft, booksSelection: booksLineSelection(draft) } : line));
   }
   function clearBooksLines(markHuman = true) {
-    if (markHuman) markEdited("lines");
+    if (markHuman) lines.forEach(line => markLineEdited(line.key, "books"));
     setLines((current) => current.map((line) => ({ ...line, booksDraft: undefined, booksSelection: null })));
     setBooksFieldsRevision((current) => current + 1);
   }
@@ -478,7 +452,7 @@ function BillForm({
     const submit = submitter?.value !== "draft";
     setError("");
     if (submit && autofill.waiting) {
-      setError("Wait for invoice reading to finish, or choose Continue manually before saving."); return;
+      setError("Wait for invoice reading to finish before saving."); return;
     }
     if (submit && autofillReviewRequired && !autofillReviewed) {
       setError("Compare the current originals with all bill values, then confirm your review before final save."); return;
@@ -759,32 +733,6 @@ function BillForm({
               Changes keep this bill&apos;s company, job, currency, recorded payments and original files.
               {manualEntryOnly ? "" : " A synchronized bill is updated against its existing Zoho Books bill ID."}
             </Notice></div>}
-            {companyId && !manualEntryOnly && (
-              <div className="books-form-notice" aria-label="Books synchronization readiness">
-                <Notice>
-                  <strong>Zoho Books connection and posting</strong>
-                  <p>Vendor, account, tax and customer lookups use read access. Loading these options does not enable bill posting.</p>
-                  {integrations.loading ? (
-                    <p>Checking this company&apos;s Books setup…</p>
-                  ) : integrations.error ? (
-                    <>
-                      <p>Books setup could not be checked. You can still save this bill locally.</p>
-                      <Button type="button" variant="secondary" onClick={integrations.reload}>
-                        Retry Books setup check
-                      </Button>
-                    </>
-                  ) : booksDestinations.length === 0 ? (
-                    <p>Books sync is unavailable for this company. Ask your administrator to assign its Books destination. You can still save the bill locally.</p>
-                  ) : booksDestinations.length > 1 ? (
-                    <p>This company has more than one Books destination. Save the bill, then select the intended Books organization on the saved bill before queuing synchronization.</p>
-                  ) : booksDestination?.writeEnabled ? (
-                    <p>Posting is enabled for {booksDestination.name}. Save and sync will attempt to queue the completed bill; account, tax and supplier checks still apply. The bill is synchronized only after Zoho Books confirms it.</p>
-                  ) : booksDestination ? (
-                    <p>Books sync is unavailable for {booksDestination.name}. {booksSetupSteps(booksDestination)} You can still save the bill locally.</p>
-                  ) : null}
-                </Notice>
-              </div>
-            )}
             <section
               className="books-vendor-section"
               aria-label="Vendor details"
@@ -996,6 +944,7 @@ function BillForm({
                       </p>
                     )}
                   </div>
+                  {printedJobMismatch && <p className="books-field-error">Invoice reference {printedJob} differs from selected {selectedJob.jobNumber}. Check the original; the selected job was kept.</p>}
                 </Field>
               </div>
               <div className="books-form-row">
@@ -1050,6 +999,11 @@ function BillForm({
                 </>}
                 {usesLineBooks && <Button type="button" variant="ghost" onClick={() => clearBooksLines()}>Clear all Books selections</Button>}
               </div>}
+              {lineReadingReview && <p role="status" aria-label="Invoice line review">Some lines could not be matched safely. Your entries were kept; compare all invoice pages.</p>}
+              {!!autofill.preview?.warnings.length && <details aria-label="Invoice reading notes">
+                <summary>Invoice notes to review</summary>
+                <ul>{autofill.preview.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>
+              </details>}
               <Table>
                 <thead>
                   <tr>
@@ -1165,10 +1119,12 @@ function BillForm({
                 disabled={lines.length >= 100}
                 onClick={() => {
                   markEdited("lines");
+                  const key = Math.max(...lines.map((line) => line.key), ...lineOrigins.current.map(line => line.key)) + 1;
+                  markLineEdited(key, "description");
                   setLines((current) => [
                     ...current,
                     {
-                      key: Math.max(...current.map((line) => line.key)) + 1,
+                      key,
                       description: "",
                       quantity: "1",
                       unitPrice: "",

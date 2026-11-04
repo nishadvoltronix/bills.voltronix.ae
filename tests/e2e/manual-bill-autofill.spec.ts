@@ -89,7 +89,7 @@ async function fixture(page: Page): Promise<Fixture> {
 async function open(page: Page) { await page.goto(`/bills/new?jobId=${job.id}`); await expect(page.getByRole("heading", { name: "Attach the invoice first", exact: true })).toBeVisible(); }
 const files = (page: Page) => page.getByLabel("Invoice attachment", { exact: true });
 const preview = (page: Page) => page.locator('[aria-label="Invoice automatic reading"]');
-async function ready(page: Page) { await expect(preview(page)).toContainText("Invoice details filled for review."); }
+async function ready(page: Page) { await expect(preview(page)).toContainText("Details filled. Review before saving."); }
 async function chooseLine(page: Page, line: number, kind: "account" | "tax", name: string) {
   await page.getByRole("combobox", { name: `Line ${line} ${kind}`, exact: true }).fill(name);
   await page.getByRole("option", { name: new RegExp(`^${name}`) }).click();
@@ -103,6 +103,14 @@ test.afterEach(async ({ page, baseURL }) => { if (baseURL) await page.request.po
 
 test("attachment-first reads all pages once, requires review and explicit save, then uses payment and the same job", async ({ page }) => {
   const state = await fixture(page); await open(page);
+  await expect(page.getByRole("heading", { name: "AI reading", exact: true })).toBeVisible();
+  await expect(page.getByText("Read invoice details", { exact: true })).toHaveCount(0);
+  await expect(page.getByLabel("Books synchronization readiness", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Zoho Books connection and posting", { exact: true })).toHaveCount(0);
+  await expect(preview(page).getByRole("button")).toHaveCount(0);
+  await expect(preview(page).locator("dl")).toHaveCount(0);
+  expect(await preview(page).evaluate(element => ({ background: getComputedStyle(element).backgroundColor, border: getComputedStyle(element).borderTopWidth })))
+    .toEqual({ background: "rgba(0, 0, 0, 0)", border: "0px" });
   const attachment = await files(page).boundingBox(), supplier = await page.getByRole("combobox", { name: "Vendor Name", exact: true }).boundingBox();
   expect(attachment!.y).toBeLessThan(supplier!.y);
   await files(page).setInputFiles([original("FICTIONAL-page-one.pdf"), original("FICTIONAL-page-two.pdf")]);
@@ -144,7 +152,7 @@ test("a late reading keeps human fields and line edits, while filling only untou
     await expect(page.getByLabel("Line 1 unit price", { exact: true })).toHaveValue("7.00");
     await expect(page.getByLabel("Line 2 unit price", { exact: true })).toHaveCount(0);
     await expect(page.locator("#invoice-date")).toHaveValue("2026-10-31");
-    await expect(preview(page)).toContainText("Fields you edited were kept.");
+    await expect(preview(page)).toContainText("Your edits were kept.");
     expect([state.creates.length, state.uploads.length, state.actions.length]).toEqual([0, 0, 0]); expect(state.unexpected).toEqual([]);
   } finally { release(); }
 });
@@ -156,8 +164,12 @@ test("changing originals rejects an old response and resets review for the curre
   try {
     await open(page); await files(page).setInputFiles(original("FICTIONAL-first.pdf"));
     await expect.poll(() => state.reads.length).toBe(1);
-    await files(page).setInputFiles(original("FICTIONAL-added-page.pdf")); await ready(page);
-    await expect(page.locator("#invoice-number")).toHaveValue("AUTO-2"); release(); await expect.poll(() => finished).toBe(true);
+    await files(page).setInputFiles(original("FICTIONAL-added-page.pdf"));
+    await expect(preview(page)).toContainText("Waiting to read all selected pages");
+    await page.waitForTimeout(650); expect(state.reads).toHaveLength(1);
+    await expect(page.locator("#invoice-number")).toHaveValue("");
+    release(); await expect.poll(() => finished).toBe(true); await ready(page);
+    await expect(page.locator("#invoice-number")).toHaveValue("AUTO-2");
     await expect(page.locator("#invoice-number")).toHaveValue("AUTO-2");
     await page.locator("#autofill-reviewed").check();
     await page.getByRole("button", { name: "Remove FICTIONAL-added-page.pdf", exact: true }).click();
@@ -169,6 +181,73 @@ test("changing originals rejects an old response and resets review for the curre
   } finally { release(); }
 });
 
+test("adding the back after a preview appends its items while keeping edited front fields and Books selections", async ({ page }) => {
+  const state = await fixture(page); let release!: () => void;
+  const hold = new Promise<void>(resolve => { release = resolve; });
+  state.respond = async (reply, ordinal) => {
+    if (ordinal === 1) reply.preview.fields.lines = reply.preview.fields.lines!.slice(0, 1);
+    else await hold;
+    return { json: reply };
+  };
+  try {
+    await open(page); await files(page).setInputFiles(original("FICTIONAL-front.pdf")); await ready(page);
+    await expect(page.getByLabel("Line 2 description", { exact: true })).toHaveCount(0);
+    await chooseLine(page, 1, "account", options.accounts[0].name); await chooseLine(page, 1, "tax", options.taxes[0].name);
+    await page.locator("#autofill-reviewed").check();
+    await files(page).setInputFiles(original("FICTIONAL-back.pdf"));
+    await expect.poll(() => state.reads.length).toBe(2);
+    await page.getByLabel("Line 1 quantity", { exact: true }).fill("3");
+    await page.getByLabel("Line 1 unit price", { exact: true }).fill("11.00");
+    await page.locator("#invoice-number").fill("HUMAN-CHECKED");
+    release(); await ready(page);
+    await expect(page.getByLabel("Line 1 quantity", { exact: true })).toHaveValue("3");
+    await expect(page.getByLabel("Line 1 unit price", { exact: true })).toHaveValue("11.00");
+    await expect(page.getByRole("combobox", { name: "Line 1 account", exact: true })).toHaveValue(options.accounts[0].name);
+    await expect(page.getByRole("combobox", { name: "Line 1 tax", exact: true })).toHaveValue(options.taxes[0].name);
+    await expect(page.getByLabel("Line 2 description", { exact: true })).toHaveValue("Fictional extracted second line");
+    await expect(page.getByLabel("Line 2 unit price", { exact: true })).toHaveValue("20.00");
+    await expect(page.getByRole("combobox", { name: "Line 2 account", exact: true })).toHaveValue("");
+    await expect(page.locator("#invoice-number")).toHaveValue("HUMAN-CHECKED");
+    await expect(page.locator("#autofill-reviewed")).not.toBeChecked();
+    await files(page).setInputFiles(original("FICTIONAL-back.pdf"));
+    await page.waitForTimeout(650); expect(state.reads).toHaveLength(2);
+    await expect(page.getByRole("list", { name: "Selected invoice attachments", exact: true }).getByRole("group")).toHaveCount(2);
+    await expect(page.getByLabel("Line 3 description", { exact: true })).toHaveCount(0);
+    expect(state.reads.map(read => read.source.files.length)).toEqual([1, 2]);
+    expect([state.creates.length, state.uploads.length, state.actions.length]).toEqual([0, 0, 0]); expect(state.unexpected).toEqual([]);
+  } finally { release(); }
+});
+
+test("untouched repeated printed rows stay separate when the back adds another identical item", async ({ page }) => {
+  const state = await fixture(page);
+  state.respond = async (reply, ordinal) => {
+    const first = reply.preview.fields.lines![0];
+    reply.preview.fields.lines = ordinal === 1 ? [first] : [first, { ...first }];
+    return { json: reply };
+  };
+  await open(page); await files(page).setInputFiles(original("FICTIONAL-repeated-front.pdf")); await ready(page);
+  await files(page).setInputFiles(original("FICTIONAL-repeated-back.pdf")); await expect.poll(() => state.reads.length).toBe(2); await ready(page);
+  await expect(page.getByLabel("Line 1 description", { exact: true })).toHaveValue("Fictional extracted first line");
+  await expect(page.getByLabel("Line 2 description", { exact: true })).toHaveValue("Fictional extracted first line");
+  await expect(page.getByLabel("Invoice line review", { exact: true })).toHaveCount(0);
+  expect(state.creates).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("a failed read keeps the originals and manual fields and retries only on request", async ({ page }) => {
+  const state = await fixture(page);
+  state.respond = async (reply, ordinal) => ordinal === 1 ? { status: 429, json: { error: "Fictional reading limit. Try later." } } : { json: reply };
+  await open(page); await page.locator("#invoice-number").fill("MANUAL-PRESERVED");
+  await files(page).setInputFiles(original("FICTIONAL-retry.pdf"));
+  await expect(preview(page)).toContainText("Fictional reading limit. Try later.");
+  await expect(preview(page).getByRole("button", { name: "Retry reading", exact: true })).toBeVisible();
+  await page.waitForTimeout(650); expect(state.reads).toHaveLength(1);
+  await expect(page.locator("#invoice-number")).toHaveValue("MANUAL-PRESERVED");
+  await preview(page).getByRole("button", { name: "Retry reading", exact: true }).click(); await ready(page);
+  await expect(page.locator("#invoice-number")).toHaveValue("MANUAL-PRESERVED");
+  await expect(preview(page).getByRole("button")).toHaveCount(0);
+  expect(state.reads).toHaveLength(2); expect(state.creates).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
 test("unknown printed VAT clears the untouched five-percent default and leaves the tax choice to the user", async ({ page }) => {
   const state = await fixture(page); state.respond = async reply => {
     delete reply.preview.fields.vatRate; reply.preview.evidence.vatRate = null; reply.preview.evidence.vatAmount = null;
@@ -177,7 +256,8 @@ test("unknown printed VAT clears the untouched five-percent default and leaves t
   };
   await open(page); await files(page).setInputFiles(original("FICTIONAL-unknown-vat.pdf")); await ready(page);
   await expect(page.locator("#bill-vat")).toHaveValue("");
-  await expect(preview(page)).toContainText("VAT rate was not clearly printed");
+  await page.getByText("Invoice notes to review", { exact: true }).click();
+  await expect(page.getByLabel("Invoice reading notes")).toContainText("VAT rate was not clearly printed");
   await expect(page.getByRole("combobox", { name: "Line 1 tax", exact: true })).toHaveValue("");
   expect(state.creates).toEqual([]); expect(state.unexpected).toEqual([]);
 });
@@ -219,7 +299,7 @@ for (const changed of ["nonce", "job", "file"] as const) test(`a mismatched ${ch
 test("unconfigured automatic reading retains ordinary manual entry without sending files for extraction", async ({ page }) => {
   const state = await fixture(page); state.enabled = false;
   await open(page); await files(page).setInputFiles(original("FICTIONAL-manual.pdf"));
-  await expect(preview(page)).toContainText("Automatic reading is unavailable. Manual entry remains available.");
+  await expect(preview(page)).toContainText("Unavailable. Enter the invoice details below.");
   await page.locator("#invoice-number").fill("MANUAL-ONLY");
   await page.getByRole("combobox", { name: "Vendor Name", exact: true }).fill(vendor.name);
   await page.getByRole("option", { name: new RegExp(`^${vendor.name}`) }).click();

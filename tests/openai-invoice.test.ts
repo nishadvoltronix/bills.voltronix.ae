@@ -23,9 +23,44 @@ function enabled() {
 function response(evidence: unknown = fixture()) {
   return { status: "completed", output: [{ type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: JSON.stringify(evidence) }] }] };
 }
+function frontBackFixture(complete: boolean): InvoiceEvidence {
+  return fixture({ invoiceNumber: "DEMO-FRONT-BACK-001", invoiceDate: "2026-10-28", dueDate: "2026-11-27",
+    subtotal: complete ? "250.00" : null, vatAmount: complete ? "12.50" : null, vatRate: complete ? "5" : null,
+    total: complete ? "262.50" : null, lines: [
+      { description: "Fictional front materials", quantity: "2", unitPrice: "100", amount: "200", taxAmount: null, taxRate: null },
+      ...(complete ? [{ description: "Fictional back fittings", quantity: "1", unitPrice: "50", amount: "50", taxAmount: null, taxRate: null }] : []),
+    ] });
+}
 afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.useRealTimers(); });
 
 describe("conservative invoice evidence", () => {
+  it("fills clear front-page items without inventing the missing final totals or tax rate", () => {
+    const result = normalizeInvoiceEvidence(frontBackFixture(false));
+    expect(result.fields.lines).toEqual([{ description: "Fictional front materials", quantity: "2", unitPrice: "100" }]);
+    expect(result.fields.vatRate).toBeUndefined();
+    expect(result.evidence).toMatchObject({ subtotal: null, vatAmount: null, total: null });
+    expect(result.requiresHumanReview).toBe(true);
+  });
+  it("preserves every front/back item under the one shared invoice identity and final page totals", () => {
+    const result = normalizeInvoiceEvidence(frontBackFixture(true));
+    expect(result.fields).toMatchObject({ invoiceNumber: "DEMO-FRONT-BACK-001", invoiceDate: "2026-10-28", vatRate: "5",
+      lines: [{ description: "Fictional front materials", quantity: "2", unitPrice: "100" }, { description: "Fictional back fittings", quantity: "1", unitPrice: "50" }] });
+    expect(result.evidence).toMatchObject({ subtotal: "250.00", vatAmount: "12.50", total: "262.50" });
+    expect(result.warnings.join(" ")).not.toMatch(/items do not match|need checking/);
+  });
+  it("withholds incomplete or duplicated page rows when they contradict the final invoice totals", () => {
+    const incomplete = frontBackFixture(true); incomplete.lines.pop();
+    expect(normalizeInvoiceEvidence(incomplete).fields.lines).toBeUndefined();
+    const duplicate = frontBackFixture(true); duplicate.lines.unshift({ ...duplicate.lines[0] });
+    expect(normalizeInvoiceEvidence(duplicate).fields.lines).toBeUndefined();
+    const carried = frontBackFixture(true); carried.lines.push({ ...carried.lines[0], description: "Carried forward", quantity: "1", unitPrice: "200" });
+    expect(normalizeInvoiceEvidence(carried).fields.lines).toBeUndefined();
+  });
+  it("keeps legitimate identical printed rows when the invoice totals include both", () => {
+    const raw = fixture({ subtotal: "400", vatAmount: "20", total: "420" }); raw.lines.push({ ...raw.lines[0] });
+    const result = normalizeInvoiceEvidence(raw);
+    expect(result.fields.lines).toHaveLength(2); expect(result.fields.lines![0]).toEqual(result.fields.lines![1]);
+  });
   it("fills printed values and preserves leading zeros, without inventing discounts or IDs", () => {
     const result = normalizeInvoiceEvidence(fixture());
     expect(result.fields).toEqual({ invoiceNumber: "00061", invoiceDate: "2026-11-04", vatRate: "5", lines: [{ description: "Material", quantity: "2", unitPrice: "100" }] });
@@ -75,6 +110,21 @@ describe("conservative invoice evidence", () => {
 });
 
 describe("server-only bounded OpenAI extraction", () => {
+  it("submits both ordered images once and requires continuation/physical-row evidence instead of header-based invoice counts", async () => {
+    enabled(); const fetcher = vi.fn().mockResolvedValue(Response.json(response(frontBackFixture(true)))); vi.stubGlobal("fetch", fetcher);
+    const front = Buffer.from("synthetic-front-page-image"), back = Buffer.from("synthetic-back-page-without-repeated-identity");
+    const result = await extractInvoice([{ bytes: front, mimeType: "image/png" }, { bytes: back, mimeType: "image/png" }]);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(fetcher.mock.calls[0][1].body);
+    expect(body.input[0].content.map((item: { image_url: string }) => item.image_url)).toEqual([
+      `data:image/png;base64,${front.toString("base64")}`, `data:image/png;base64,${back.toString("base64")}`,
+    ]);
+    expect(body.instructions).toContain("continuation page can omit the supplier, date and invoice number");
+    expect(body.instructions).toContain("carried forward or brought forward amounts");
+    expect(body.instructions).toContain("Do not collapse distinct printed rows");
+    expect(body.instructions).toContain("genuinely different invoice numbers");
+    expect(result.fields.lines).toHaveLength(2); expect(result.evidence.total).toBe("262.50");
+  });
   it("does not contact a provider when disabled or misconfigured", async () => {
     const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
     expect(invoiceAutofillStatus().configured).toBe(false);

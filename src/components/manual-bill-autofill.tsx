@@ -1,10 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { LoaderCircle, ScanText } from "lucide-react";
+import { LoaderCircle } from "lucide-react";
 import type { InvoiceAutofillCapability, InvoiceAutofillResponse } from "@/lib/manual-bill-autofill-types";
 import { api, errorMessage, useApi } from "./api";
-import { Button, Notice } from "./ui";
+import { Button } from "./ui";
 import type { InvoiceFileSelection } from "./invoice-attachment-picker";
 import styles from "./manual-bill-autofill.module.css";
 
@@ -34,80 +34,72 @@ export function useManualBillAutofill({ eligible, companyId, jobId, currency, fi
   const capability = useApi<InvoiceAutofillCapability>(eligible && scoped ? `/api/bills/autofill?${new URLSearchParams({ companyId, jobId })}` : null);
   const callbacks = useRef({ apply, invalidate });
   useLayoutEffect(() => { callbacks.current = { apply, invalidate }; }, [apply, invalidate]);
-  const generation = useRef(0), controller = useRef<AbortController | null>(null);
-  const [revision, setRevision] = useState(0), [manualKey, setManualKey] = useState<string | null>(null);
+  const [revision, setRevision] = useState(0), [pausedKey, setPausedKey] = useState<string | null>(null);
+  const paused = useRef<string | null>(null), active = useRef(false), mounted = useRef(true);
+  const [settled, setSettled] = useState(0);
   const [reading, setReading] = useState<Reading | null>(null);
   const key = JSON.stringify([companyId, jobId, currency, files.map(file => [file.id, file.file.size, file.file.type])]);
   const current = reading?.key === key ? reading : null;
   const available = capability.data?.enabled === true && capability.data.configured === true;
-  const canRead = eligible && !!companyId && !!jobId && files.length > 0 && !checking && available;
-  const manual = manualKey === key;
+  const canRead = eligible && !!companyId && !!jobId && files.length > 0 && !checking && available && pausedKey !== key;
+  const latest = useRef({ key, revision, canRead });
+  useLayoutEffect(() => { latest.current = { key, revision, canRead }; }, [key, revision, canRead]);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
-    const version = ++generation.current;
-    controller.current?.abort();
     callbacks.current.invalidate();
-    if (!canRead || manual || current && current.revision === revision && current.status !== "reading") return;
-    const active = new AbortController(); controller.current = active;
+    // A cancelled browser fetch does not release the server's provider lock.
+    // Let the active read settle, then read only the newest complete file batch.
+    if (!canRead || active.current || current && current.revision === revision && current.status !== "reading") return;
+    const isCurrent = () => mounted.current && paused.current !== key && latest.current.canRead &&
+      latest.current.key === key && latest.current.revision === revision;
     const timer = setTimeout(async () => {
-      if (active.signal.aborted) return;
+      if (!isCurrent() || active.current) return;
+      active.current = true;
       const requestId = crypto.randomUUID();
       setReading({ key, revision, status: "reading" });
       try {
         const body = new FormData();
         body.set("companyId", companyId); body.set("jobId", jobId); body.set("requestId", requestId);
         for (const file of files) body.append("files", file.file);
-        const result = await api<InvoiceAutofillResponse>("/api/bills/autofill", { method: "POST", body, signal: active.signal });
-        if (active.signal.aborted || generation.current !== version) return;
+        const result = await api<InvoiceAutofillResponse>("/api/bills/autofill", { method: "POST", body });
+        if (!isCurrent()) return;
         if (!matchesSource(result, requestId, companyId, jobId, currency, files))
           throw new Error("The reading did not match these originals and the selected job. Retry reading or enter this invoice manually.");
         const applied = callbacks.current.apply(result);
         setReading({ key, revision, status: "ready", preview: result.preview, kept: applied.kept });
       } catch (failure) {
-        if (!active.signal.aborted && generation.current === version) setReading({ key, revision, status: "failed", message: errorMessage(failure) });
+        if (isCurrent()) setReading({ key, revision, status: "failed", message: errorMessage(failure) });
+      } finally {
+        active.current = false;
+        if (mounted.current) setSettled(value => value + 1);
       }
-    }, 700);
-    return () => { clearTimeout(timer); active.abort(); };
+    }, 300);
+    return () => clearTimeout(timer);
     // The key binds the exact ordered Files. Form edits update only callbacks,
     // so typing never restarts a provider request or authorizes overwriting them.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, canRead, manual, revision]);
+  }, [key, canRead, revision, settled]);
   const stop = useCallback(() => {
-    generation.current++; controller.current?.abort(); setManualKey(key);
+    paused.current = key; setPausedKey(key);
   }, [key]);
-  const retry = () => { generation.current++; controller.current?.abort(); setManualKey(null); setRevision(value => value + 1); if (!available) capability.reload(); };
-  const waiting = eligible && scoped && files.length > 0 && !manual && (capability.loading || canRead && (!current || current.status === "reading"));
-  return { capability, available, current, manual, waiting, canRead, scoped, stop, retry,
+  const retry = () => { paused.current = null; setPausedKey(null); setRevision(value => value + 1); if (!available) capability.reload(); };
+  const waiting = eligible && scoped && files.length > 0 && pausedKey !== key && (capability.loading || canRead && (!current || current.status === "reading" || current.revision !== revision));
+  const queued = waiting && reading?.status === "reading" && reading.key !== key;
+  return { capability, available, current, waiting, queued, canRead, scoped, stop, retry, hasFiles: files.length > 0,
     preview: current?.status === "ready" ? current.preview : undefined };
 }
 
 export function ManualBillAutofill({ reading, jobNumber }: { reading: ReturnType<typeof useManualBillAutofill>; jobNumber?: string }) {
   const preview = reading.preview;
+  const jobMismatch = preview?.evidence.jobNumber && jobNumber && preview.evidence.jobNumber.toUpperCase().replace(/^JOB[- ]?/, "") !== jobNumber.toUpperCase().replace(/^JOB[- ]?/, "");
+  const failed = reading.current?.status === "failed";
+  const status = reading.queued ? "Waiting to read all selected pages…" : reading.waiting ? "Reading invoice…" : failed
+    ? reading.current?.message : preview ? `Details filled. Review before saving.${reading.current?.kept ? " Your edits were kept." : ""}${preview.warnings.length || jobMismatch ? " Some details need checking." : ""}`
+    : !reading.scoped ? "Select a company and job to begin." : !reading.available && !reading.capability.loading
+      ? "Unavailable. Enter the invoice details below." : "Add the invoice files to begin.";
   return <div className={styles.panel} aria-label="Invoice automatic reading">
-    <div className={styles.heading}><ScanText size={19} /><strong>Read invoice details</strong></div>
-    <p>Attach all pages of one invoice. AI fills the readable details; check the originals and correct the bill before saving.</p>
-    {reading.waiting && <p className={styles.status} role="status"><LoaderCircle size={16} className="spin" />Reading invoice… Your edits will be kept.</p>}
-    {reading.manual && <p role="status">Manual entry selected. Check the current originals and enter the bill below.</p>}
-    {!reading.scoped && <p>Select a company and job before reading the invoice. The selected job will be kept.</p>}
-    {reading.scoped && !reading.available && !reading.capability.loading && <p role="status">Automatic reading is unavailable. Manual entry remains available.</p>}
-    {reading.current?.status === "failed" && !reading.manual && <Notice tone="error">{reading.current.message} You can continue manually.</Notice>}
-    {preview && !reading.manual && <>
-      <p role="status"><strong>Invoice details filled for review.</strong>{reading.current?.kept ? " Fields you edited were kept." : ""}</p>
-      <dl className={styles.evidence}>
-        <div><dt>Printed supplier</dt><dd>{preview.evidence.vendorName ?? "Not read"}{preview.evidence.vendorTrn && <span>TRN: {preview.evidence.vendorTrn}</span>}</dd></div>
-        <div><dt>Printed subtotal</dt><dd>{preview.evidence.subtotal ?? "Not read"}</dd></div>
-        <div><dt>Printed VAT</dt><dd>{preview.evidence.vatAmount ?? "Not read"}{preview.evidence.vatRate && <span>{preview.evidence.vatRate}%</span>}</dd></div>
-        <div><dt>Printed total</dt><dd>{preview.evidence.total ?? "Not read"} {preview.evidence.currency ?? ""}</dd></div>
-      </dl>
-      {!preview.vendor && preview.evidence.vendorName && <p>Choose the matching supplier from Vendor Name. No supplier has been selected automatically.</p>}
-      {preview.evidence.jobNumber && jobNumber && preview.evidence.jobNumber.toUpperCase().replace(/^JOB[- ]?/, "") !== jobNumber.toUpperCase().replace(/^JOB[- ]?/, "") &&
-        <Notice>Printed job reference: {preview.evidence.jobNumber}. The selected job remains {jobNumber}; check the original before saving.</Notice>}
-      {preview.warnings.length > 0 && <ul className={styles.warnings}>{preview.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>}
-      <p>Choose Books accounts, taxes and any customer attribution manually. Reading an invoice never saves a bill or records a payment.</p>
-    </>}
-    <div className="button-row">
-      <Button type="button" variant="secondary" size="sm" disabled={reading.waiting || reading.capability.loading || !reading.canRead && reading.available}
-        onClick={reading.retry}>{preview || reading.current?.status === "failed" ? "Read originals again" : "Retry automatic reading"}</Button>
-      {!reading.manual && <Button type="button" variant="ghost" size="sm" onClick={reading.stop}>Continue manually</Button>}
-    </div>
+    <h3 className={styles.heading}>AI reading</h3>
+    <p className={styles.status} role="status">{reading.waiting && <LoaderCircle size={14} className="spin" />}{status}</p>
+    {failed && <Button type="button" variant="ghost" size="sm" disabled={reading.waiting} onClick={reading.retry}>Retry reading</Button>}
   </div>;
 }

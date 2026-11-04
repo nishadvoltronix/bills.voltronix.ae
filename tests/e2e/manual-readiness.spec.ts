@@ -47,68 +47,32 @@ test("disabled OCR leaves typed entry and Books synchronization available", asyn
   await openManualForm(page);
   await page.getByRole("combobox", { name: "Company", exact: true }).selectOption(companyA);
   await expect(page.getByRole("button", { name: "Save and sync", exact: true })).toBeEnabled();
-  await expect(page.getByLabel("Books synchronization readiness")).toBeVisible();
+  await expect(page.getByLabel("Books synchronization readiness")).toHaveCount(0);
 });
 
-test("manual form scopes Books readiness to company and preserves local saving", async ({ page }) => {
-  await page.route("**/api/integrations", (route) => route.fulfill({
-    json: { zoho: { organizations: [
-      { organizationId: "101", companyId: companyA, name: "Fictional Books A", status: "AUTHORIZED_UNVERIFIED", connected: false, writeEnabled: false, postingMissing: ["LIVE_OPERATIONAL_ENVIRONMENT", "LIVE_COMPANY_VERIFICATION"] },
-      { organizationId: "102", companyId: companyB, name: "Fictional Books B", status: "AUTHORIZED_UNVERIFIED", connected: false, writeEnabled: true },
-    ] } },
-  }));
+test("manual form keeps compact reading and save controls when changing companies", async ({ page }) => {
   await openManualForm(page);
   const company = page.getByRole("combobox", { name: "Company", exact: true });
-  const readiness = page.getByLabel("Books synchronization readiness");
-  await company.selectOption(companyA);
-  await expect(readiness).toContainText("Books sync is unavailable for Fictional Books A");
-  await expect(readiness).toContainText("configure this deployment for live Books synchronization");
-  await expect(readiness).not.toContainText("Fictional Books B");
-  await expect(page.getByRole("button", { name: "Save as draft", exact: true })).toBeEnabled();
-  await expect(page.getByRole("button", { name: "Save and sync", exact: true })).toBeEnabled();
-  await company.selectOption(companyB);
-  await expect(readiness).toContainText("Posting is enabled for Fictional Books B");
-  await expect(readiness).toContainText("attempt to queue the completed bill");
-  await expect(readiness).toContainText("only after Zoho Books confirms it");
-  await expect(readiness).not.toContainText("Fictional Books A");
-  await page.getByLabel("Discount amount").fill("2.50");
-  await expect(page.getByText("Discounted bills can be saved locally", { exact: false })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Save as draft", exact: true })).toBeEnabled();
+  for (const id of [companyA, companyB]) {
+    await company.selectOption(id);
+    await expect(page.getByLabel("Books synchronization readiness")).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "AI reading", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Continue manually", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Save as draft", exact: true })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "Save and sync", exact: true })).toBeEnabled();
+  }
 });
 
-test("unassigned and ambiguous Books destinations explain the next step", async ({ page }) => {
-  await page.route("**/api/integrations", (route) => route.fulfill({
-    json: { zoho: { organizations: [
-      { organizationId: "101", companyId: companyB, name: "Fictional Books B1", writeEnabled: true },
-      { organizationId: "102", companyId: companyB, name: "Fictional Books B2", writeEnabled: true },
-    ] } },
-  }));
-  await openManualForm(page);
-  const company = page.getByRole("combobox", { name: "Company", exact: true });
-  await company.selectOption(companyA);
-  await expect(page.getByLabel("Books synchronization readiness")).toContainText("assign its Books destination");
-  await company.selectOption(companyB);
-  await expect(page.getByLabel("Books synchronization readiness")).toContainText("select the intended Books organization on the saved bill");
-});
-
-test("Books setup lookup can retry without blocking a local draft", async ({ page }) => {
+test("the removed Books setup panel does not make a setup request or offer idle retry controls", async ({ page }) => {
   let checks = 0;
-  let recovered = false;
-  await page.route("**/api/integrations", (route) => {
-    checks++;
-    return !recovered
-      ? route.fulfill({ status: 503, json: { error: "Fictional setup lookup failure." } })
-      : route.fulfill({ json: { zoho: { organizations: [] } } });
-  });
+  await page.route("**/api/integrations", route => { checks++; return route.fulfill({ status: 503, json: { error: "Fictional setup lookup failure." } }); });
   await openManualForm(page);
   await page.getByRole("combobox", { name: "Company", exact: true }).selectOption(companyA);
-  await expect(page.getByLabel("Books synchronization readiness")).toContainText("Books setup could not be checked");
+  await expect(page.getByLabel("Books synchronization readiness")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Retry Books setup check", exact: true })).toHaveCount(0);
+  await expect(page.getByLabel("Invoice automatic reading").getByRole("button")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Save as draft", exact: true })).toBeEnabled();
-  const initialChecks = checks;
-  recovered = true;
-  await page.getByRole("button", { name: "Retry Books setup check" }).click();
-  await expect(page.getByLabel("Books synchronization readiness")).toContainText("assign its Books destination");
-  expect(checks).toBeGreaterThan(initialChecks);
+  expect(checks).toBe(0);
 });
 
 test("company lookup retry preserves the job's company and entered invoice values", async ({ page }) => {
