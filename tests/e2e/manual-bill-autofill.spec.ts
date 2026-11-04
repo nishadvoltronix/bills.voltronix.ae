@@ -17,11 +17,11 @@ const options: BillBooksOptions = { companyId: company.id, organizationId, dataC
   customers: [], hasMoreCustomers: false, warning: null };
 const original = (name: string) => ({ name, mimeType: "application/pdf", buffer: Buffer.from(`%PDF-1.4\n% Fictional autofill original ${name}\n%%EOF`) });
 type Reply = { status?: number; json: unknown };
-type Fixture = { enabled: boolean; reads: InvoiceAutofillResponse[]; creates: Record<string, unknown>[]; uploads: string[]; actions: string[];
+type Fixture = { enabled: boolean; reads: InvoiceAutofillResponse[]; creates: Record<string, unknown>[]; uploads: string[]; uploadedNames: string[]; actions: string[];
   unexpected: string[]; bill: Bill | null; respond: (reply: InvoiceAutofillResponse, ordinal: number) => Promise<Reply> };
 
 async function fixture(page: Page): Promise<Fixture> {
-  const state: Fixture = { enabled: true, reads: [], creates: [], uploads: [], actions: [], unexpected: [], bill: null,
+  const state: Fixture = { enabled: true, reads: [], creates: [], uploads: [], uploadedNames: [], actions: [], unexpected: [], bill: null,
     respond: async reply => ({ json: reply }) };
   await page.route("**/api/**", async route => {
     const request = route.request(), url = new URL(request.url()), path = url.pathname, method = request.method();
@@ -70,6 +70,12 @@ async function fixture(page: Page): Promise<Fixture> {
     if (state.bill && path === `/api/bills/${state.bill.id}` && method === "GET") return route.fulfill({ json: { bill: state.bill } });
     if (state.bill && path === `/api/bills/${state.bill.id}/attachment` && method === "POST") {
       state.uploads.push(path); expect(request.headers()["x-bill-version"]).toBe(String(state.bill.version));
+      const bytes = request.postDataBuffer();
+      if (!bytes) throw new Error("The synthetic original upload is required.");
+      const form = await new Response(Uint8Array.from(bytes).buffer, { headers: { "Content-Type": request.headers()["content-type"] } }).formData();
+      const uploaded = form.get("file");
+      if (!uploaded || typeof uploaded === "string") throw new Error("The synthetic upload must contain its original File.");
+      state.uploadedNames.push(uploaded.name);
       state.bill.version++;
       const document = { id: `autofill-original-${state.uploads.length}`, fileName: "FICTIONAL-original.pdf" };
       state.bill.documents!.push(document);
@@ -88,6 +94,8 @@ async function fixture(page: Page): Promise<Fixture> {
 }
 async function open(page: Page) { await page.goto(`/bills/new?jobId=${job.id}`); await expect(page.getByRole("heading", { name: "Attach the invoice first", exact: true })).toBeVisible(); }
 const files = (page: Page) => page.getByLabel("Invoice attachment", { exact: true });
+const manualFiles = (page: Page) => page.getByLabel("Manual invoice attachment", { exact: true });
+const manualList = (page: Page) => page.getByRole("list", { name: "Selected manual invoice attachments", exact: true });
 const preview = (page: Page) => page.locator('[aria-label="Invoice automatic reading"]');
 async function ready(page: Page) { await expect(preview(page)).toContainText("Details filled. Review before saving."); }
 async function chooseLine(page: Page, line: number, kind: "account" | "tax", name: string) {
@@ -307,4 +315,139 @@ test("unconfigured automatic reading retains ordinary manual entry without sendi
   await page.getByRole("button", { name: "Save as draft", exact: true }).click();
   await expect(page.getByRole("group", { name: "Saved bill confirmation", exact: true })).toContainText("Draft saved");
   expect(state.reads).toEqual([]); expect([state.creates.length, state.uploads.length, state.actions.length]).toEqual([1, 1, 0]); expect(state.unexpected).toEqual([]);
+});
+
+test("manual attachments under Notes preserve typed values, never read AI, and use the normal save and payment flow", async ({ page }) => {
+  const state = await fixture(page); await open(page);
+  const notes = page.locator("#bill-notes");
+  await expect(page.getByText("Manual attachments — AI off", { exact: true })).toBeVisible();
+  await expect(manualFiles(page)).toHaveAttribute("multiple", "");
+  expect((await manualFiles(page).boundingBox())!.y).toBeGreaterThan((await notes.boundingBox())!.y);
+  await page.locator("#invoice-number").fill("MANUAL-NO-AI");
+  await page.locator("#invoice-date").fill("2026-11-03");
+  await page.locator("#bill-description").fill("Keep this manual description");
+  await notes.fill("Keep this accounts note");
+  await page.getByRole("combobox", { name: "Vendor Name", exact: true }).fill(vendor.name);
+  await page.getByRole("option", { name: new RegExp(`^${vendor.name}`) }).click();
+  await page.getByLabel("Line 1 description", { exact: true }).fill("Typed original line");
+  await page.getByLabel("Line 1 quantity", { exact: true }).fill("2");
+  await page.getByLabel("Line 1 unit price", { exact: true }).fill("7.50");
+  await manualFiles(page).setInputFiles(original("FICTIONAL-manual-front.pdf"));
+  await expect(manualList(page).getByRole("group")).toHaveCount(1);
+  await manualFiles(page).setInputFiles(original("FICTIONAL-manual-back.pdf"));
+  await expect(manualList(page).getByRole("group")).toHaveCount(2);
+  await page.waitForTimeout(650); expect(state.reads).toEqual([]);
+  await expect(page.getByRole("list", { name: "Selected invoice attachments", exact: true })).toHaveCount(0);
+  await expect(page.locator("#autofill-reviewed")).toHaveCount(0);
+  await expect(page.locator("#invoice-number")).toHaveValue("MANUAL-NO-AI");
+  await expect(page.locator("#invoice-date")).toHaveValue("2026-11-03");
+  await expect(page.locator("#bill-description")).toHaveValue("Keep this manual description");
+  await expect(notes).toHaveValue("Keep this accounts note");
+  await expect(page.getByLabel("Line 1 quantity", { exact: true })).toHaveValue("2");
+  await expect(page.getByLabel("Line 1 unit price", { exact: true })).toHaveValue("7.50");
+  await page.getByRole("button", { name: "Save and sync", exact: true }).click();
+  await expect(page).toHaveURL(/\/bills\/autofill-saved\/payment\?entry=1&saved=1$/);
+  expect(state.reads).toEqual([]);
+  expect(state.uploadedNames).toEqual(["FICTIONAL-manual-front.pdf", "FICTIONAL-manual-back.pdf"]);
+  expect([state.creates.length, state.uploads.length, state.actions.length]).toEqual([1, 2, 1]);
+  expect(state.creates[0]).toMatchObject({ companyId: company.id, jobId: job.id, invoiceNumber: "MANUAL-NO-AI", notes: "Keep this accounts note" });
+  expect(state.bill).toMatchObject({ paidAmount: "0.00", payments: [] }); expect(state.unexpected).toEqual([]);
+});
+
+test("manual intake during an AI read leaves that read active and excludes every manual file from its source", async ({ page }) => {
+  const state = await fixture(page); let release!: () => void;
+  const hold = new Promise<void>(resolve => { release = resolve; });
+  state.respond = async reply => { await hold; return { json: reply }; };
+  try {
+    await open(page); await files(page).setInputFiles(original("FICTIONAL-ai-only.pdf"));
+    await expect.poll(() => state.reads.length).toBe(1);
+    await page.evaluate(() => {
+      const read = File.prototype.arrayBuffer;
+      let finish!: () => void;
+      const hold = new Promise<void>(resolve => { finish = resolve; });
+      (window as unknown as { finishManualHash: () => void }).finishManualHash = finish;
+      File.prototype.arrayBuffer = function (this: File) {
+        return this.name === "FICTIONAL-held-manual.pdf" ? hold.then(() => read.call(this)) : read.call(this);
+      };
+    });
+    await manualFiles(page).setInputFiles(original("FICTIONAL-held-manual.pdf"));
+    await expect(manualFiles(page)).toBeDisabled();
+    release(); await ready(page);
+    await expect(manualFiles(page)).toBeDisabled();
+    await expect(page.locator("#invoice-number")).toHaveValue("AUTO-1");
+    await page.evaluate(() => (window as unknown as { finishManualHash: () => void }).finishManualHash());
+    await expect(manualList(page).getByRole("group")).toHaveCount(1);
+    await page.locator("#autofill-reviewed").check();
+    await manualFiles(page).setInputFiles(original("FICTIONAL-extra-manual.pdf"));
+    await expect(manualList(page).getByRole("group")).toHaveCount(2);
+    await expect(page.locator("#autofill-reviewed")).toBeChecked();
+    await page.getByRole("button", { name: "Remove FICTIONAL-held-manual.pdf", exact: true }).click();
+    await expect(manualList(page).getByRole("group")).toHaveCount(1);
+    await expect(page.locator("#autofill-reviewed")).toBeChecked();
+    await page.waitForTimeout(650); expect(state.reads).toHaveLength(1); expect(state.reads[0].source.files).toHaveLength(1);
+    expect(state.reads[0].source.files[0].sha256).toBe(createHash("sha256").update(original("FICTIONAL-ai-only.pdf").buffer).digest("hex"));
+    for (const line of [1, 2]) { await chooseLine(page, line, "account", options.accounts[0].name); await chooseLine(page, line, "tax", options.taxes[0].name); }
+    await page.locator("#autofill-reviewed").check();
+    await page.getByRole("button", { name: "Save and sync", exact: true }).click();
+    await expect(page).toHaveURL(/\/bills\/autofill-saved\/payment\?entry=1&saved=1$/);
+    expect(state.uploadedNames).toEqual(["FICTIONAL-ai-only.pdf", "FICTIONAL-extra-manual.pdf"]);
+    expect(state.reads).toHaveLength(1); expect(state.unexpected).toEqual([]);
+  } finally {
+    release();
+    await page.evaluate(() => (window as unknown as { finishManualHash?: () => void }).finishManualHash?.()).catch(() => undefined);
+  }
+});
+
+test("cross-box duplicate originals stay in their first box and manual originals are never promoted into AI", async ({ page }) => {
+  const state = await fixture(page); await open(page);
+  const manual = original("FICTIONAL-first-manual.pdf"), ai = original("FICTIONAL-first-ai.pdf");
+  await manualFiles(page).setInputFiles(manual); await expect(manualList(page).getByRole("group")).toHaveCount(1);
+  await files(page).setInputFiles(manual);
+  await expect(page.getByText("Files already in Manual attachments — AI off stayed there and were excluded from AI. No duplicate was added.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("list", { name: "Selected invoice attachments", exact: true })).toHaveCount(0);
+  await page.waitForTimeout(650); expect(state.reads).toEqual([]);
+  await files(page).setInputFiles(ai); await ready(page);
+  await manualFiles(page).setInputFiles(ai);
+  await expect(page.getByText("Files already in the AI reading box stayed there. No duplicate was added.", { exact: true })).toBeVisible();
+  await expect(manualList(page).getByRole("group")).toHaveCount(1);
+  await expect(page.getByRole("list", { name: "Selected invoice attachments", exact: true }).getByRole("group")).toHaveCount(1);
+  await page.waitForTimeout(650); expect(state.reads).toHaveLength(1);
+  expect(state.reads[0].source.files).toHaveLength(1);
+  expect(state.reads[0].source.files[0].sha256).toBe(createHash("sha256").update(ai.buffer).digest("hex"));
+  expect(state.creates).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("both attachment boxes share the five-original count limit without losing either subset", async ({ page }) => {
+  const state = await fixture(page); await open(page);
+  await manualFiles(page).setInputFiles([1, 2, 3, 4].map(index => original(`FICTIONAL-manual-limit-${index}.pdf`)));
+  await expect(manualList(page).getByRole("group")).toHaveCount(4);
+  await files(page).setInputFiles([original("FICTIONAL-ai-limit-1.pdf"), original("FICTIONAL-ai-limit-2.pdf")]);
+  await expect(page.getByText("Keep up to 5 originals and 5 MB total, including files already saved to this bill.", { exact: true })).toBeVisible();
+  await expect(manualList(page).getByRole("group")).toHaveCount(4);
+  expect(state.reads).toEqual([]);
+  await page.getByRole("button", { name: "Remove FICTIONAL-manual-limit-4.pdf", exact: true }).click();
+  await files(page).setInputFiles([original("FICTIONAL-ai-limit-1.pdf"), original("FICTIONAL-ai-limit-2.pdf")]); await ready(page);
+  await expect(page.getByRole("list", { name: "Selected invoice attachments", exact: true }).getByRole("group")).toHaveCount(2);
+  await manualFiles(page).setInputFiles(original("FICTIONAL-over-count.pdf"));
+  await expect(page.getByText("Keep up to 5 originals and 5 MB total, including files already saved to this bill.", { exact: true })).toBeVisible();
+  await expect(manualList(page).getByRole("group")).toHaveCount(3);
+  await page.waitForTimeout(650); expect(state.reads).toHaveLength(1); expect(state.reads[0].source.files).toHaveLength(2);
+  expect(state.creates).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("both attachment boxes share the aggregate byte limit and rejected manual additions do not reread AI", async ({ page }) => {
+  const state = await fixture(page); await open(page);
+  const sized = (name: string, bytes: number) => { const buffer = Buffer.alloc(bytes, " "); buffer.write("%PDF-1.4\n"); return { name, mimeType: "application/pdf", buffer }; };
+  await manualFiles(page).setInputFiles(sized("FICTIONAL-large-manual.pdf", 3_000_000));
+  await expect(manualList(page).getByRole("group")).toHaveCount(1);
+  await files(page).setInputFiles(sized("FICTIONAL-over-bytes-ai.pdf", 2_000_001));
+  await expect(page.getByText("Keep up to 5 originals and 5 MB total, including files already saved to this bill.", { exact: true })).toBeVisible();
+  expect(state.reads).toEqual([]);
+  await files(page).setInputFiles(sized("FICTIONAL-valid-bytes-ai.pdf", 1_999_999)); await ready(page);
+  await manualFiles(page).setInputFiles(original("FICTIONAL-over-bytes-manual.pdf"));
+  await expect(page.getByText("Keep up to 5 originals and 5 MB total, including files already saved to this bill.", { exact: true })).toBeVisible();
+  await expect(manualList(page).getByRole("group")).toHaveCount(1);
+  await expect(page.getByRole("list", { name: "Selected invoice attachments", exact: true }).getByRole("group")).toHaveCount(1);
+  await page.waitForTimeout(650); expect(state.reads).toHaveLength(1); expect(state.reads[0].source.files).toHaveLength(1);
+  expect(state.creates).toEqual([]); expect(state.unexpected).toEqual([]);
 });

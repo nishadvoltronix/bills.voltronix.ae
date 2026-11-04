@@ -10,6 +10,8 @@ export type InvoiceFileSelection = {
   id: string;
   file: File;
   status: "pending" | "uploading" | "stored" | "rejected" | "uncertain";
+  // Client-only intake choice. Uploading an original does not send this field.
+  readingMode?: "ai" | "manual";
   documentId?: string;
   message?: string;
 };
@@ -18,7 +20,8 @@ const status = (file: InvoiceFileSelection) => file.status === "stored" ? "Saved
   : file.status === "uploading" ? "Uploading…" : file.status === "rejected" ? "Upload rejected"
     : file.status === "uncertain" ? "Upload needs verification; retry this original" : "Ready to upload";
 
-export function InvoiceAttachmentPicker({ files, existing = [], busy, checking = false, locked = false, readOnly = false, onFiles, onRemove, id = "invoice-file" }: {
+export function InvoiceAttachmentPicker({ files, existing = [], busy, checking = false, locked = false, readOnly = false, onFiles, onRemove, id = "invoice-file",
+  label = "Attach files", inputLabel = "Invoice attachment", selectedLabel = "Selected invoice attachments", helpText, sharedLimits = false }: {
   files: InvoiceFileSelection[];
   existing?: Document[];
   busy: boolean;
@@ -28,11 +31,16 @@ export function InvoiceAttachmentPicker({ files, existing = [], busy, checking =
   onFiles: (files: File[]) => void;
   onRemove: (id: string) => void;
   id?: string;
+  label?: string;
+  inputLabel?: string;
+  selectedLabel?: string;
+  helpText?: string;
+  sharedLimits?: boolean;
 }) {
   return <div className={`books-attachment ${styles.picker}`}>
-    {!readOnly && <Field label="Attach files" htmlFor={id}
-      hint={`PDF, JPEG or PNG · Up to ${MAX_INVOICE_ATTACHMENTS} originals · ${size(MAX_INVOICE_TOTAL_BYTES)} total, ${size(MAX_INVOICE_FILE_BYTES)} per file`}>
-      <Input id={id} aria-label="Invoice attachment" type="file" multiple accept="application/pdf,image/jpeg,image/png"
+    {!readOnly && <Field label={label} htmlFor={id}
+      hint={`PDF, JPEG or PNG · Up to ${MAX_INVOICE_ATTACHMENTS} originals · ${size(MAX_INVOICE_TOTAL_BYTES)} total${sharedLimits ? " across both attachment boxes" : ""}, ${size(MAX_INVOICE_FILE_BYTES)} per file`}>
+      <Input id={id} aria-label={inputLabel} type="file" multiple accept="application/pdf,image/jpeg,image/png"
         disabled={busy || checking || locked} onChange={event => {
           const selected = Array.from(event.currentTarget.files ?? []);
           event.currentTarget.value = "";
@@ -40,7 +48,7 @@ export function InvoiceAttachmentPicker({ files, existing = [], busy, checking =
         }} />
     </Field>}
     <p className={styles.hint}><Paperclip size={14} />{readOnly ? "Existing originals are retained when this bill is edited."
-      : checking ? "Checking selected originals…" : "Select several files together, or add more files before saving."}</p>
+      : checking ? "Checking selected originals…" : helpText ?? "Select several files together, or add more files before saving."}</p>
     {existing.length > 0 && <ul className={styles.files} aria-label="Stored invoice attachments">
       {existing.map(document => <li key={document.id}>
         <FileCheck2 size={18} /><div className={styles.description}>
@@ -49,7 +57,7 @@ export function InvoiceAttachmentPicker({ files, existing = [], busy, checking =
         </div>
       </li>)}
     </ul>}
-    {files.length > 0 && <ul className={styles.files} aria-label="Selected invoice attachments" aria-live="polite">
+    {files.length > 0 && <ul className={styles.files} aria-label={selectedLabel} aria-live="polite">
       {files.map(file => <li key={file.id} role="group" aria-label={`Attachment ${file.file.name}`}>
         <Paperclip size={18} /><div className={styles.description}>
           <strong>{file.file.name}</strong><span>{size(file.file.size)} · {status(file)}</span>

@@ -203,6 +203,7 @@ function BillForm({
   const [files, setFiles] = useState<InvoiceFileSelection[]>([]);
   const fileSelections = useRef<InvoiceFileSelection[]>([]);
   const [checkingFiles, setCheckingFiles] = useState(false);
+  const [attachmentNotice, setAttachmentNotice] = useState<{ mode: "ai" | "manual"; message: string } | null>(null);
   const selectionInFlight = useRef(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -267,6 +268,8 @@ function BillForm({
       selectedVendor?.currency ||
       "AED";
   const attachmentFirst = !bill && !draft && !review;
+  const aiFiles = files.filter(file => file.readingMode !== "manual");
+  const manualFiles = files.filter(file => file.readingMode === "manual");
   function applyAutofill(result: InvoiceAutofillResponse) {
     const fields = result.preview.fields;
     let kept = false;
@@ -299,7 +302,9 @@ function BillForm({
   }
   const autofill = useManualBillAutofill({ eligible: attachmentFirst && !savedId && !busy && user.role !== "MANAGEMENT",
     companyId, jobId: selectedJob?.id ?? "", currency: selectedJob?.currency ?? currency,
-    files, checking: checkingFiles, apply: applyAutofill, invalidate: () => setAutofillReviewed(false) });
+    // Only validated AI originals are committed to this subset. Hashing a manual
+    // file or duplicate must not cancel, invalidate or restart an active read.
+    files: aiFiles, checking: false, apply: applyAutofill, invalidate: () => setAutofillReviewed(false) });
   const printedJob = autofill.preview?.evidence.jobNumber;
   const printedJobMismatch = printedJob && selectedJob && printedJob.toUpperCase().replace(/^JOB[- ]?/, "") !== selectedJob.jobNumber.toUpperCase().replace(/^JOB[- ]?/, "");
   function captureHumanEdit(event: React.FormEvent<HTMLFormElement>) {
@@ -362,7 +367,7 @@ function BillForm({
   function updateFile(id: string, patch: Partial<InvoiceFileSelection>) {
     replaceFiles(fileSelections.current.map(file => file.id === id ? { ...file, ...patch } : file));
   }
-  async function selectAttachments(selected: File[]) {
+  async function selectAttachments(selected: File[], readingMode: "ai" | "manual" = "ai") {
     if (busy || selectionInFlight.current || uncertainUpload || finalizedEdit) return;
     if (selected.length > MAX_INVOICE_ATTACHMENTS || selected.some(file => file.size < 8 || file.size > MAX_INVOICE_FILE_BYTES ||
       file.type && !["application/pdf", "image/jpeg", "image/png"].includes(file.type))) {
@@ -381,14 +386,22 @@ function BillForm({
         if (!detected || file.type && file.type !== detected) throw new Error("Choose an original PDF, JPEG or PNG file with a matching file type.");
         const original = file.type ? file : new File([file], file.name, { type: detected, lastModified: file.lastModified });
         const digest = await crypto.subtle.digest("SHA-256", bytes);
-        return { id: Array.from(new Uint8Array(digest)).map(byte => byte.toString(16).padStart(2, "0")).join(""), file: original, status: "pending" as const };
+        return { id: Array.from(new Uint8Array(digest)).map(byte => byte.toString(16).padStart(2, "0")).join(""), file: original, status: "pending" as const, readingMode };
       }));
       const merged = [...fileSelections.current];
-      for (const file of additions) if (!merged.some(current => current.id === file.id)) merged.push(file);
+      let crossBoxDuplicate = false;
+      for (const file of additions) {
+        const duplicate = merged.find(current => current.id === file.id);
+        if (!duplicate) merged.push(file);
+        else if ((duplicate.readingMode ?? "ai") !== readingMode) crossBoxDuplicate = true;
+      }
       const bytes = merged.reduce((sum, file) => sum + file.file.size, 0) + existingDocuments.reduce((sum, document) => sum + (document.byteSize ?? 0), 0);
       if (merged.length + existingDocuments.length > MAX_INVOICE_ATTACHMENTS || bytes > MAX_INVOICE_TOTAL_BYTES)
         throw new Error(`Keep up to ${MAX_INVOICE_ATTACHMENTS} originals and ${MAX_INVOICE_TOTAL_BYTES / 1_000_000} MB total, including files already saved to this bill.`);
       replaceFiles(merged);
+      setAttachmentNotice(crossBoxDuplicate ? { mode: readingMode, message: readingMode === "ai"
+        ? "Files already in Manual attachments — AI off stayed there and were excluded from AI. No duplicate was added."
+        : "Files already in the AI reading box stayed there. No duplicate was added." } : null);
       setError("");
     } catch (failure) { setError(errorMessage(failure)); }
     finally { selectionInFlight.current = false; setCheckingFiles(false); }
@@ -396,6 +409,7 @@ function BillForm({
   function removeAttachment(id: string) {
     if (busy || checkingFiles || uncertainUpload) return;
     replaceFiles(fileSelections.current.filter(file => file.id !== id || file.status === "stored"));
+    setAttachmentNotice(null);
   }
   async function attach(id: string, startingVersion: number) {
     let expectedVersion = startingVersion;
@@ -726,7 +740,8 @@ function BillForm({
             {attachmentFirst && <section className="books-form-notice" aria-label="Invoice originals and automatic reading">
               <h2>Attach the invoice first</h2>
               {selectedJob && <p>Job: {selectedJob.jobNumber} · {selectedJob.name}</p>}
-              <InvoiceAttachmentPicker files={files} busy={busy} checking={checkingFiles} onFiles={selectAttachments} onRemove={removeAttachment} />
+              <InvoiceAttachmentPicker files={aiFiles} busy={busy} checking={checkingFiles} sharedLimits onFiles={selectAttachments} onRemove={removeAttachment} />
+              {attachmentNotice?.mode === "ai" && <p role="status">{attachmentNotice.message}</p>}
               <ManualBillAutofill reading={autofill} jobNumber={selectedJob?.jobNumber} />
             </section>}
             {finalizedEdit && <div className="books-form-notice"><Notice>
@@ -1152,6 +1167,13 @@ function BillForm({
                     placeholder="Add a note for the accounts team…"
                   />
                 </Field>
+                {attachmentFirst && <>
+                  <InvoiceAttachmentPicker id="manual-invoice-file" label="Manual attachments — AI off" inputLabel="Manual invoice attachment"
+                    selectedLabel="Selected manual invoice attachments" helpText="These files are saved with the bill. AI does not read them."
+                    files={manualFiles} busy={busy} checking={checkingFiles} sharedLimits
+                    onFiles={selected => selectAttachments(selected, "manual")} onRemove={removeAttachment} />
+                  {attachmentNotice?.mode === "manual" && <p role="status">{attachmentNotice.message}</p>}
+                </>}
                 {!review && !attachmentFirst && <InvoiceAttachmentPicker files={files} existing={existingDocuments} busy={busy}
                   checking={checkingFiles} readOnly={finalizedEdit} onFiles={selectAttachments} onRemove={removeAttachment} />}
                 {review && (
