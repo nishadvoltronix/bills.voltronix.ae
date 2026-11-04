@@ -11,6 +11,7 @@ import { centers, getBooksOrganizations, getConfig, IntegrationError, type DataC
 import { connectionFingerprint } from "@/lib/integrations/connection-fingerprint";
 import { accessToken, LEGACY_UNSCOPED_ORGANIZATION } from "@/lib/integrations/oauth";
 import { ZohoTransport } from "@/lib/integrations/transport";
+import { booksVendorVatMetadata, type BooksVendorVatMetadata } from "@/lib/integrations/books-vendor-tax";
 
 const id = z.string().trim().min(1).max(100);
 const externalId = z.string().regex(/^\d{1,30}$/);
@@ -33,6 +34,7 @@ export type VendorSuggestion = Omit<LocalVendor, "id"> & {
   organizationId?: string;
   dataCenter?: string;
   environment?: "production" | "sandbox";
+  booksVat?: BooksVendorVatMetadata;
 };
 type Context = {
   purpose: "bill" | "directory";
@@ -107,15 +109,15 @@ function transportFor(value: Context, provided?: ZohoTransport) {
 const contactIdentity = z.object({
   contact_id: externalId, contact_name: z.string().trim().min(1).max(200).regex(/^[^\u0000-\u001f\u007f]+$/),
   contact_type: z.literal("vendor"), status: z.literal("active"), currency_code: currencySchema,
-  email: z.unknown().optional(), tax_reg_no: z.unknown().optional(),
+  email: z.unknown().optional(), tax_reg_no: z.unknown().optional(), tax_treatment: z.unknown().optional(),
 });
 const emailSchema = z.email().max(254);
 const trnSchema = z.string().trim().min(1).max(40).regex(/^[^\u0000-\u001f\u007f]+$/);
-function contactMetadata(contact: { contact_id: string; contact_name: string; currency_code: string; email?: unknown; tax_reg_no?: unknown }) {
+function contactMetadata(contact: { contact_id: string; contact_name: string; currency_code: string; email?: unknown; tax_reg_no?: unknown; tax_treatment?: unknown }) {
   const email = emailSchema.safeParse(contact.email);
   const trn = trnSchema.safeParse(contact.tax_reg_no);
   return { externalVendorId: contact.contact_id, name: contact.contact_name, currency: contact.currency_code,
-    email: email.success ? email.data : null, trn: trn.success ? trn.data : null };
+    email: email.success ? email.data : null, trn: trn.success ? trn.data : null, booksVat: booksVendorVatMetadata(contact) };
 }
 function parseContact(raw: unknown) {
   const parsed = contactIdentity.safeParse(raw);
@@ -188,7 +190,25 @@ export async function searchBillVendors(actor: Actor, payload: unknown, provided
     if (!selectedVendor) throw new HttpError(404, "Vendor not found in the selected company.");
     await recheck(db, actor, before);
     const mapped = before.destination && !before.localDemoFallback ? await db.vendorBooksMapping.findUnique({ where: { vendorId_organizationId_dataCenter_environment: { vendorId: selectedVendor.id, ...before.destination } } }) : null;
-    return { companyId: input.companyId, organizationId, ...scope, vendors: [] as VendorSuggestion[], selectedVendor: { ...selectedVendor, ...(before.destination && !before.localDemoFallback && !mapped ? { booksMappingRequired: true } : {}) }, warning: null, hasMore: false, page: input.page, perPage: 25 as const };
+    let booksVat: BooksVendorVatMetadata | undefined;
+    let warning: string | null = null;
+    if (mapped && before.destination && !before.localDemoFallback) {
+      try {
+        const response = z.object({ code: z.literal(0), contact: z.unknown() }).parse(
+          await transportFor(before, provided).request(`/books/v3/contacts/${mapped.externalVendorId}`, { method: "GET" }));
+        const contact = parseContact(response.contact);
+        if (!contact || contact.externalVendorId !== mapped.externalVendorId || contact.currency !== selectedVendor.currency) throw new Error();
+        booksVat = contact.booksVat;
+      } catch {
+        warning = "The supplier's current Zoho VAT details could not be verified. Retry before final save; your draft can still be saved.";
+        booksVat = { status: "unavailable", taxTreatment: "unknown", hasTaxRegistrationNumber: false, checkedAt: null, warning };
+      }
+    }
+    await recheck(db, actor, before);
+    return { companyId: input.companyId, organizationId, ...scope, vendors: [] as VendorSuggestion[], selectedVendor: {
+      ...selectedVendor, ...(mapped && before.destination ? { ...before.destination, externalVendorId: mapped.externalVendorId } : {}),
+      ...(booksVat ? { booksVat } : {}), ...(before.destination && !before.localDemoFallback && !mapped ? { booksMappingRequired: true } : {}),
+    }, warning, hasMore: false, page: input.page, perPage: 25 as const };
   }
   const saved = await savedSuggestions(before, input.q, input.page);
   const pending = await pendingSuggestions(before, input.q, input.page);
@@ -249,7 +269,7 @@ export async function searchBillVendors(actor: Actor, payload: unknown, provided
 }
 
 /** Resolves a verified provider selection into the existing local vendor identity model. */
-export async function resolveBillVendor(actor: Actor, payload: unknown, provided?: ZohoTransport): Promise<LocalVendor> {
+export async function resolveBillVendor(actor: Actor, payload: unknown, provided?: ZohoTransport): Promise<LocalVendor & Pick<VendorSuggestion, "booksVat" | "externalVendorId" | "organizationId" | "dataCenter" | "environment">> {
   const input = resolveInput.parse(payload);
   const before = await context(db, actor, input.companyId);
   if (!before.destination || before.destination.organizationId !== input.organizationId || before.destination.dataCenter !== input.dataCenter || before.destination.environment !== input.environment)
@@ -260,6 +280,8 @@ export async function resolveBillVendor(actor: Actor, payload: unknown, provided
   const contact = response.success ? parseContact(response.data.contact) : null;
   if (!contact || contact.externalVendorId !== input.externalVendorId)
     throw blocked("BOOKS_VENDOR_INVALID", "Select an active Books vendor with a supported currency. The selected vendor could not be verified.");
+  const verifiedMetadata = { booksVat: contact.booksVat, externalVendorId: contact.externalVendorId,
+    organizationId: input.organizationId, dataCenter: input.dataCenter, environment: input.environment };
   await recheck(db, actor, before);
   try {
     return await db.$transaction(async tx => {
@@ -275,7 +297,7 @@ export async function resolveBillVendor(actor: Actor, payload: unknown, provided
           throw new HttpError(409, "The existing vendor mapping conflicts with this company or currency. Ask an administrator to review it.");
         await recheck(tx, actor, before);
         const { id, companyId, name, currency, email, trn } = mapping.vendor;
-        return { id, companyId, name, currency, email, trn };
+        return { id, companyId, name, currency, email, trn, ...verifiedMetadata };
       }
       const collision = await tx.vendor.findFirst({ where: { companyId: input.companyId, OR: [
         { name: contact.name }, { externalZohoId: input.externalVendorId }, ...(contact.trn ? [{ trn: contact.trn }] : []),
@@ -287,7 +309,7 @@ export async function resolveBillVendor(actor: Actor, payload: unknown, provided
       await tx.auditLog.create({ data: { actorId: actor.id, companyId: input.companyId, action: "BOOKS_VENDOR_SELECTED",
         entityType: "Vendor", entityId: vendor.id, details: { ...destination, externalVendorId: input.externalVendorId, providerFinancialWrites: 0 } } });
       await recheck(tx, actor, before);
-      return vendor;
+      return { ...vendor, ...verifiedMetadata };
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 20_000 });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && ["P2002", "P2034"].includes(error.code))

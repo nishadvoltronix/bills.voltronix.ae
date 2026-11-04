@@ -20,6 +20,7 @@ import {
   type OcrEvidence,
 } from "@/lib/ocr-extraction";
 import { billScope, canCreateBill, canManageVendors } from "@/lib/permissions";
+import { prepareBillVendorVatVerification } from "./bill-vendor-vat";
 import {
   actOnBill,
   createBillInTransaction,
@@ -533,6 +534,9 @@ export async function reviewOcrDocument(
     );
   await readPrivateDocument(document);
   const booksVerification = await prepareBillBooksSelections(actor, document.batch.companyId, request.bill.lines);
+  const vendorVat = request.bill.submit ? await prepareBillVendorVatVerification(actor, document.batch.companyId, {
+    vendorId: request.bill.vendorId, currency: request.bill.currency, vatRate: request.bill.vatRate, lines: request.bill.lines,
+  }) : undefined;
   const result = await db.$transaction(
     async (tx) => {
       await requireCompanyAccess(actor, document.batch.companyId, tx);
@@ -610,7 +614,7 @@ export async function reviewOcrDocument(
         },
       });
       const saved = request.bill.submit
-        ? await finalizeBillInTransaction(tx, actor, bill.id, bill.version)
+        ? await finalizeBillInTransaction(tx, actor, bill.id, bill.version, vendorVat)
         : await tx.bill.findUniqueOrThrow({
             where: { id: bill.id },
             include: billInclude,

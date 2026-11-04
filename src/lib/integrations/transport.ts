@@ -15,7 +15,7 @@ export type Fetch = (
   init?: RequestInit,
 ) => Promise<Response>;
 export type AccessToken = () => Promise<string>;
-export type ProductionWriteRequest = { path: string; body?: unknown; form?: FormData };
+export type ProductionWriteRequest = { path: string; method?: "POST" | "PUT"; body?: unknown; form?: FormData };
 export type ProductionWriteGuard = (request: ProductionWriteRequest) => Promise<void>;
 export function retryAfterSeconds(value: string | null, now = Date.now()) {
   if (!value) return 60;
@@ -68,7 +68,7 @@ export class ZohoTransport {
   async request(
     path: string,
     options: {
-      method?: "GET" | "POST";
+      method?: "GET" | "POST" | "PUT";
       body?: unknown;
       form?: FormData;
       binary?: boolean;
@@ -104,16 +104,19 @@ export class ZohoTransport {
     if (this.config.target === "ZOHO")
       url.searchParams.set("organization_id", this.config.organizationId);
     const method = options.method ?? "GET";
-    if (method === "POST") {
-      await this.assertWritePermission({ path, body: options.body, form: options.form });
+    if (!["GET", "POST", "PUT"].includes(method))
+      throw new IntegrationError("INVALID_WRITE_ENDPOINT", "This integration method is not permitted.", "BLOCKED");
+    const writing = method !== "GET";
+    if (writing) {
+      await this.assertWritePermission({ path, method, body: options.body, form: options.form });
       if (this.config.environment === "production" && !this.productionWriteGuard && !this.vendorContactWriteCapability)
         throw new IntegrationError("LIVE_PERMISSION_REQUIRED", "Current source and access checks are required for this Books operation.", "BLOCKED");
-      if (this.productionWriteGuard) await this.productionWriteGuard({ path, body: options.body, form: options.form });
+      if (this.productionWriteGuard) await this.productionWriteGuard({ path, method, body: options.body, form: options.form });
       this.assertLocalWriteQuota(false);
       if (
         this.config.target !== "ZOHO" ||
-        (!/^\/books\/v3\/bills(?:\/\d+\/attachment)?$/.test(path) &&
-          !(path === "/books/v3/contacts" && this.vendorContactWriteCapability))
+        (method === "PUT" ? (!/^\/books\/v3\/bills\/\d+$/.test(path) || !this.productionWriteGuard || !!this.localLiveTestCapability || !!this.vendorContactWriteCapability) :
+          !/^\/books\/v3\/bills(?:\/\d+\/attachment)?$/.test(path) && !(path === "/books/v3/contacts" && this.vendorContactWriteCapability))
       )
         throw new IntegrationError(
           "INVALID_WRITE_ENDPOINT",
@@ -153,11 +156,11 @@ export class ZohoTransport {
     }
     const token = await this.token();
     // Authorization may expire during organization verification or token refresh.
-    if (method === "POST") await this.assertWritePermission({ path, body: options.body, form: options.form });
-    if (method === "POST" && this.productionWriteGuard) {
-      await this.productionWriteGuard({ path, body: options.body, form: options.form });
+    if (writing) await this.assertWritePermission({ path, method, body: options.body, form: options.form });
+    if (writing && this.productionWriteGuard) {
+      await this.productionWriteGuard({ path, method, body: options.body, form: options.form });
     }
-    if (method === "POST") this.assertLocalWriteQuota(true);
+    if (writing) this.assertLocalWriteQuota(true);
     let response: Response;
     if (method === "POST" && this.vendorContactWriteCapability) {
       this.consumeVendorWrite!();
@@ -179,10 +182,10 @@ export class ZohoTransport {
     } catch {
       throw new IntegrationError(
         "REQUEST_INTERRUPTED",
-        method === "POST"
-          ? "The external request outcome is unknown. Reconcile before attempting creation again."
+        writing
+          ? "The external write outcome is unknown. Reconcile before attempting the write again."
           : "The external service could not be reached.",
-        method === "POST" ? "UNKNOWN" : "RETRY",
+        writing ? "UNKNOWN" : "RETRY",
       );
     }
     // Retain successful response bodies even at zero quota: an outcome already
@@ -205,10 +208,10 @@ export class ZohoTransport {
     if (response.status === 408 || response.status >= 500)
       throw new IntegrationError(
         "REMOTE_UNAVAILABLE",
-        method === "POST"
-          ? "The external server failed after submission; creation must be reconciled."
+        writing
+          ? "The external server failed after submission; the write must be reconciled."
           : "The external service is temporarily unavailable.",
-        method === "POST" ? "UNKNOWN" : "RETRY",
+        writing ? "UNKNOWN" : "RETRY",
       );
     if (response.status === 404)
       throw new IntegrationError(
@@ -244,11 +247,11 @@ export class ZohoTransport {
         ? await boundedBytes(response, 10 * 1024 * 1024)
         : await boundedJson(response, 2 * 1024 * 1024, Boolean(options.form));
     } catch (error) {
-      if (method !== "POST" && error instanceof IntegrationError) throw error;
+      if (!writing && error instanceof IntegrationError) throw error;
       throw new IntegrationError(
         "INVALID_RESPONSE",
         "Zoho returned an unreadable response; review the external outcome.",
-        method === "POST" ? "UNKNOWN" : "RETRY",
+        writing ? "UNKNOWN" : "RETRY",
       );
     }
     if (

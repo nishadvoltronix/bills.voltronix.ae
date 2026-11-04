@@ -5,13 +5,25 @@ import { z } from "zod";
 import { calculateBill } from "@/lib/finance";
 import { BOOKS_NO_VAT, BOOKS_PURCHASE_ACCOUNT_TYPES, booksSelectionSchema } from "@/lib/books-selection";
 import { IntegrationError, type ZohoConfig } from "./config";
-import { hasBooksVendorTaxConflict } from "./books-vendor-tax";
+import { BOOKS_VENDOR_VAT_REVIEW_MESSAGE, hasBooksVendorTaxConflict } from "./books-vendor-tax";
+import { assertBooksUpdateBaseline, assertBooksUpdateMapping, assertBooksUpdateMoney, booksRemoteAppliedAmount, booksRemoteMatchesPayload, buildBooksUpdatePayload,
+  parseBooksUpdateRemote, type BooksUpdateRemote } from "./books-update";
 import type { ZohoTransport } from "./transport";
 
 export const snapshotSchema = z.object({
   internalBillId: z.string(),
   companyId: z.string().optional(),
   initiatedById: z.string().optional(),
+  revision: z.object({
+    kind: z.literal("UPDATE_BILL"), previousJobId: z.string().min(1).max(100),
+    previousPayloadHash: z.string().regex(/^[a-f0-9]{64}$/), externalId: z.string().regex(/^\d{1,30}$/),
+    paymentSourceHash: z.string().regex(/^[a-f0-9]{64}$/), documentSourceHash: z.string().regex(/^[a-f0-9]{64}$/),
+    remoteLineIds: z.array(z.string().regex(/^\d{1,30}$/)).max(100),
+    remoteDocuments: z.array(z.object({ document_id: z.string().regex(/^\d{1,30}$/), file_name: z.string().optional() }).strict()).max(20),
+    remoteLastModified: z.string().min(1).max(100),
+    preservedRemoteNotes: z.string().max(10000).optional(),
+  }).strict().optional(),
+  attachmentMode: z.literal("bundle").optional(),
   sourceVersion: z.number().int().positive(),
   destination: z
     .object({
@@ -278,6 +290,8 @@ export type Confirmation = { externalId: string; confirmedAt: Date };
 export interface SupplierBillAdapter {
   create(snapshot: BillSnapshot): Promise<Confirmation>;
   reconcile(snapshot: BillSnapshot): Promise<Confirmation | null>;
+  update?(externalId: string, snapshot: BillSnapshot, previous: BillSnapshot, localPaid: string): Promise<Confirmation>;
+  reconcileUpdate?(externalId: string, snapshot: BillSnapshot): Promise<Confirmation | null>;
   attach(
     externalId: string,
     document: {
@@ -294,6 +308,59 @@ export interface SupplierBillAdapter {
 }
 export class BooksAdapter implements SupplierBillAdapter {
   constructor(private readonly transport: ZohoTransport) {}
+  async readForUpdate(externalId: string): Promise<BooksUpdateRemote> {
+    if (!/^\d{1,30}$/.test(externalId)) throw new IntegrationError("UPDATE_REMOTE_UNVERIFIED", "The existing Books bill ID is invalid.", "BLOCKED");
+    return parseBooksUpdateRemote(await this.transport.request(`/books/v3/bills/${externalId}`, { method: "GET" }), externalId);
+  }
+  private async verifyVendor(snapshot: BillSnapshot, payload: ReturnType<typeof buildBooksPayload>) {
+    const response = await this.transport.request(`/books/v3/contacts/${snapshot.externalVendorId}`, { method: "GET" });
+    const parsed = z.object({ code: z.literal(0), contact: z.object({ contact_id: z.string(), contact_type: z.literal("vendor"),
+      currency_code: z.string(), status: z.literal("active"), tax_treatment: z.unknown().optional() }) }).safeParse(response);
+    if (!parsed.success || parsed.data.contact.contact_id !== snapshot.externalVendorId || parsed.data.contact.currency_code !== snapshot.currency)
+      throw new IntegrationError("VENDOR_MAPPING_MISMATCH", "The external vendor is inactive or does not match the reviewed mapping and currency.", "BLOCKED");
+    if (hasBooksVendorTaxConflict(parsed.data.contact.tax_treatment, payload.line_items))
+      throw new IntegrationError("VENDOR_VAT_TREATMENT_MISMATCH", BOOKS_VENDOR_VAT_REVIEW_MESSAGE, "BLOCKED");
+  }
+  private updateMatches(remote: BooksUpdateRemote, snapshot: BillSnapshot) {
+    const revision = snapshot.revision;
+    return !!revision && booksRemoteMatchesPayload(remote, snapshot, buildBooksUpdatePayload(snapshot, buildBooksPayload(snapshot, this.transport.config))) &&
+      JSON.stringify(remote.documents) === JSON.stringify(revision.remoteDocuments) &&
+      remote.line_items.every((line, index) => !revision.remoteLineIds[index] || line.line_item_id === revision.remoteLineIds[index]);
+  }
+  async reconcileUpdate(externalId: string, snapshot: BillSnapshot) {
+    if (snapshot.revision?.externalId !== externalId) throw new IntegrationError("UPDATE_REMOTE_UNVERIFIED", "The saved update belongs to a different Books bill.", "BLOCKED");
+    const remote = await this.readForUpdate(externalId);
+    booksRemoteAppliedAmount(remote);
+    return this.updateMatches(remote, snapshot) ? { externalId, confirmedAt: new Date() } : null;
+  }
+  async update(externalId: string, snapshot: BillSnapshot, previous: BillSnapshot, localPaid: string) {
+    assertBooksUpdateMapping(this.transport.config);
+    await this.transport.assertWritePermission();
+    if (snapshot.revision?.externalId !== externalId) throw new IntegrationError("UPDATE_REMOTE_UNVERIFIED", "The saved update belongs to a different Books bill.", "BLOCKED");
+    const base = buildBooksPayload(snapshot, this.transport.config);
+    const remote = await this.readForUpdate(externalId);
+    if (this.updateMatches(remote, snapshot)) {
+      if (new Decimal(snapshot.total).lessThan(localPaid)) throw new IntegrationError("UPDATE_BELOW_PAID_AMOUNT", "The edited total is below recorded payments.", "BLOCKED");
+      booksRemoteAppliedAmount(remote);
+      return { externalId, confirmedAt: new Date() };
+    }
+    assertBooksUpdateMoney(remote, snapshot, localPaid);
+    assertBooksUpdateBaseline(remote, snapshot);
+    if (!booksRemoteMatchesPayload(remote, previous, buildBooksPayload(previous, this.transport.config)))
+      throw new IntegrationError("UPDATE_BASELINE_CHANGED", "The Books bill differs from the last confirmed version. Review it before updating; no update was sent.", "BLOCKED");
+    await verifySelectedLineMetadata(this.transport, snapshot);
+    await this.verifyVendor(snapshot, base);
+    const response = await this.transport.request(`/books/v3/bills/${externalId}`, { method: "PUT", body: buildBooksUpdatePayload(snapshot, base) });
+    const parsed = z.object({ code: z.literal(0), bill: z.object({ bill_id: z.literal(externalId) }) }).safeParse(response);
+    if (!parsed.success) throw new IntegrationError("UPDATE_UNCONFIRMED", "The existing Books bill may have been updated. Reconcile its current state before retrying.", "UNKNOWN");
+    try {
+      const confirmed = await this.reconcileUpdate(externalId, snapshot);
+      if (!confirmed) throw new Error("Update confirmation mismatch");
+      return confirmed;
+    } catch {
+      throw new IntegrationError("UPDATE_UNCONFIRMED", "The existing Books bill may have been updated, but confirmation failed. Reconcile before retrying.", "UNKNOWN");
+    }
+  }
   private async confirm(externalId: string, snapshot: BillSnapshot) {
     const response = await this.transport.request(
       `/books/v3/bills/${externalId}`,
@@ -405,7 +472,7 @@ export class BooksAdapter implements SupplierBillAdapter {
     if (hasBooksVendorTaxConflict(vendor.data.contact.tax_treatment, payload.line_items))
       throw new IntegrationError(
         "VENDOR_VAT_TREATMENT_MISMATCH",
-        "Books marks this supplier as VAT not registered, but this bill selects a VAT tax; zero rate also counts. The bill remains saved locally. An administrator must verify the correct supplier and VAT registration against the original invoice before retrying. Do not remove valid invoice VAT to bypass this check.",
+        BOOKS_VENDOR_VAT_REVIEW_MESSAGE,
         "BLOCKED",
       );
     const response = await this.transport.request("/books/v3/bills", {

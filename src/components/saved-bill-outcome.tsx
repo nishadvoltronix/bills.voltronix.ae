@@ -5,18 +5,22 @@ import { useEffect, useRef, useState } from "react";
 import { savedBillNotice, savedBillState, type BillSaveState } from "@/lib/bill-save-outcome";
 import { useApi } from "./api";
 import { Button, Notice } from "./ui";
+import type { Bill } from "./types";
 
 export type SavedJobBill = { id: string; invoiceNumber: string; isDraft: boolean; outcome: BillSaveState | null };
 
-export function SavedBillOutcome({ receipt, job, manualEntryOnly }: {
+export function SavedBillOutcome({ receipt, job, manualEntryOnly, continuation = "entry", navigationBusy = false }: {
   receipt: SavedJobBill;
   job: { id: string; companyId: string; jobNumber: string };
   manualEntryOnly: boolean;
+  continuation?: "entry" | "payment";
+  navigationBusy?: boolean;
 }) {
-  const state = useApi<{ bill: unknown }>(!manualEntryOnly && !receipt.isDraft
+  const state = useApi<{ bill: Bill }>(!manualEntryOnly && !receipt.isDraft
     ? `/api/bills/${encodeURIComponent(receipt.id)}` : null, { keepPreviousData: true });
   const expected = { id: receipt.id, companyId: job.companyId, jobId: job.id };
   const current = state.data ? savedBillState(state.data.bill, expected) : null;
+  const editEligibility = current ? state.data?.bill.editEligibility : undefined;
   const verificationError = state.error || state.refreshError || (state.data && !current
     ? "The saved bill status did not match this job. Open the saved bill to review its current status." : null);
   const bill = current ?? receipt.outcome ?? (receipt.isDraft || manualEntryOnly
@@ -47,14 +51,21 @@ export function SavedBillOutcome({ receipt, job, manualEntryOnly }: {
     <p>{verificationError && bill ? "Last verified result: " : ""}{outcome.message}</p>
     {verificationError && bill && <p role="alert">The latest status could not be verified. {verificationError}</p>}
     {pollingExpired && pending && <p>Confirmation is still pending. Refresh the status or open the saved bill.</p>}
-    <p>Enter another bill for {job.jobNumber}. The form is ready for a new invoice.</p>
+    <p>{continuation === "payment"
+      ? `Record a payment below, or add another bill for ${job.jobNumber} without recording a payment.`
+      : `Enter another bill for ${job.jobNumber}. The form is ready for a new invoice.`}</p>
     <div className="button-row">
-      <Link className="text-link" href={`/bills/${encodeURIComponent(receipt.id)}?saved=1`}>View saved bill</Link>
-      <Link className="text-link" href={`/jobs/${encodeURIComponent(job.id)}`}>View job history</Link>
+      {navigationBusy ? <span className="text-link" aria-disabled="true">View saved bill</span>
+        : <Link className="text-link" href={`/bills/${encodeURIComponent(receipt.id)}?saved=1`}>View saved bill</Link>}
+      {(receipt.isDraft || editEligibility?.allowed) && (navigationBusy ? <span className="text-link" aria-disabled="true">Edit saved bill</span>
+        : <Link className="text-link" href={`/bills/${encodeURIComponent(receipt.id)}/edit`}>Edit saved bill</Link>)}
+      {navigationBusy ? <span className="text-link" aria-disabled="true">View job history</span>
+        : <Link className="text-link" href={`/jobs/${encodeURIComponent(job.id)}`}>View job history</Link>}
       {!manualEntryOnly && !receipt.isDraft && <Button type="button" variant="secondary" size="sm"
-        disabled={state.loading || state.refreshing} onClick={() => { setPollingExpired(false); reload(); }}>
+        disabled={navigationBusy || state.loading || state.refreshing} onClick={() => { setPollingExpired(false); reload(); }}>
         Refresh saved bill status
       </Button>}
     </div>
+    {editEligibility?.allowed === false && editEligibility.reason && <p>{editEligibility.reason}</p>}
   </Notice>;
 }

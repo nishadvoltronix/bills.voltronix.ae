@@ -15,6 +15,8 @@ import { db } from "@/lib/db";
 import { HttpError } from "@/lib/http";
 import { canCreateBill } from "@/lib/permissions";
 import { assertBillAccess } from "@/lib/services/bills";
+import { MAX_INVOICE_ATTACHMENTS, MAX_INVOICE_FILE_BYTES, MAX_INVOICE_TOTAL_BYTES } from "@/lib/invoice-attachments";
+import { buildInvoiceAttachment, type InvoiceAttachmentInput } from "@/lib/integrations/invoice-bundle";
 
 export const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024;
 
@@ -258,6 +260,8 @@ export async function attachDocument(
       409,
       "The bill changed before upload. Review the saved bill before continuing.",
     );
+  if (file.size > MAX_INVOICE_FILE_BYTES)
+    throw new HttpError(413, "Each invoice attachment must be 5 MB or smaller.");
   const stored = await storePrivateDocument(file);
   try {
     const duplicate = await db.document.findFirst({
@@ -309,6 +313,17 @@ export async function attachDocument(
         409,
         "The bill changed before upload. Review it before continuing.",
       );
+    const originals = await db.document.findMany({ where: { billId }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] });
+    if (originals.length >= MAX_INVOICE_ATTACHMENTS || originals.reduce((sum, item) => sum + item.byteSize, stored.byteSize) > MAX_INVOICE_TOTAL_BYTES)
+      throw new HttpError(413, "Attach up to 5 invoice files, totaling no more than 5 MB.");
+    // Validate the actual provider representation before accepting another file.
+    // The version CAS below rejects any concurrent attachment/source change.
+    if (originals.length) {
+      const prepared: InvoiceAttachmentInput[] = [];
+      for (const original of originals) prepared.push({ ...original, bytes: await readPrivateDocument(original) });
+      prepared.push({ ...stored, bytes: await readPrivateDocument(stored) });
+      await buildInvoiceAttachment(prepared);
+    }
     return await db.$transaction(
       async (tx) => {
         await assertBillAccess(actor, existing, tx);

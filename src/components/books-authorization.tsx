@@ -65,6 +65,8 @@ export function BooksAuthorization({
         alone does not send a bill or enable live accounting.
         <p>Supplier access includes creating vendors and correcting existing vendor
           details, such as the VAT registration shown on an original invoice.</p>
+        <p>Bill access includes creating bills and updating an existing bill when
+          an authorized user saves changes. Updates keep the same Zoho Books bill ID.</p>
       </Notice>
       {error && (
         <Notice tone="error" onClose={() => setError("")}>

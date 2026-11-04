@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { PDFDocument } from "pdf-lib";
 import { Prisma } from "@prisma/client";
 import {
   afterAll,
@@ -35,7 +36,7 @@ import {
   booksTestConfigurationHash,
 } from "@/lib/integrations/config";
 import { beginOAuth, completeOAuth } from "@/lib/integrations/oauth";
-import { BooksAdapter, snapshotSchema, stableReference, type SupplierBillAdapter } from "@/lib/integrations/books";
+import { BooksAdapter, snapshotHash, snapshotSchema, stableReference, type SupplierBillAdapter } from "@/lib/integrations/books";
 import type {
   BooksMapping,
   BooksTestAuthorization,
@@ -204,12 +205,11 @@ async function finalized(
     documentIndex < Number(withDocument);
     documentIndex++
   ) {
+    const original = await PDFDocument.create();
+    original.setTitle(`Fictional synchronization attachment ${documentIndex}`);
+    original.addPage([120, 80]);
     const pdf = new File(
-      [
-        new TextEncoder().encode(
-          `%PDF-1.4\nFictional synchronization attachment ${documentIndex}\n%%EOF`,
-        ),
-      ],
+      [new Uint8Array(await original.save())],
       `fictional-sync-${documentIndex}.pdf`,
       { type: "application/pdf" },
     );
@@ -224,6 +224,20 @@ async function finalized(
     status: "READY", approvedById: null, approvedAt: null, paidAmount: "0.00",
   });
   return bill;
+}
+/** Isolated pre-bundle fixture: retain coverage of already persisted legacy sibling jobs. */
+async function legacySeparateOriginals(billId: string) {
+  assertMySqlTestDatabase();
+  const operation = await db.integrationJob.findFirstOrThrow({ where: { billId, target: "ZOHO", operation: "CREATE_BILL" } });
+  expect(operation.status).toBe("QUEUED");
+  expect(operation.attempts).toBe(0);
+  const snapshot = snapshotSchema.parse(operation.snapshot);
+  expect(snapshot.documents).toHaveLength(2);
+  expect(snapshot.attachmentMode).toBe("bundle");
+  delete snapshot.attachmentMode;
+  await db.integrationJob.update({ where: { id: operation.id }, data: {
+    snapshot: snapshot as unknown as Prisma.InputJsonValue, payloadHash: snapshotHash(snapshot),
+  } });
 }
 let nextExternalId = 9000;
 describe("original creator ownership at the queue boundary", () => {
@@ -373,6 +387,7 @@ describe("durable accounting outbox", () => {
   it("keeps pending reconciliation UNKNOWN and blocks sibling attachment writes until it completes", async () => {
     configure();
     const bill = await finalized(2);
+    await legacySeparateOriginals(bill.id);
     const adapter = fakeAdapter();
     await processIntegrationJobs({ limit: 1, adapterFactory: () => adapter });
     const first = await db.integrationJob.findFirstOrThrow({
@@ -409,6 +424,7 @@ describe("durable accounting outbox", () => {
   it("serializes different attachment jobs for one bill across concurrent workers", async () => {
     configure();
     const bill = await finalized(2);
+    await legacySeparateOriginals(bill.id);
     let release: () => void = () => {};
     let started: () => void = () => {};
     const blocked = new Promise<void>((resolve) => {
@@ -453,6 +469,7 @@ describe("durable accounting outbox", () => {
   it("rechecks committed sibling claims after a bill lock changes hands between worker transactions", async () => {
     configure();
     const bill = await finalized(2);
+    await legacySeparateOriginals(bill.id);
     const firstClaimPrepared = Promise.withResolvers<void>();
     const secondCandidateSelected = Promise.withResolvers<void>();
     const allowFirstCommit = Promise.withResolvers<void>();

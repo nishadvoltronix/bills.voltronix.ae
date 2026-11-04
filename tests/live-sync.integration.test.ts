@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import type { Actor } from "@/lib/auth";
 import { db } from "@/lib/db";
 import * as configuration from "@/lib/integrations/config";
+import * as oauth from "@/lib/integrations/oauth";
 import { BooksAdapter, buildBooksPayload, snapshotSchema } from "@/lib/integrations/books";
 import { ZohoTransport } from "@/lib/integrations/transport";
 import { assertLiveJobWrite, assertLiveJobPermission, confirmLiveSnapshot, recordLiveConfirmation } from "@/lib/integrations/live-sync";
@@ -42,6 +43,8 @@ beforeAll(async () => {
   vendorId = (await db.vendor.create({ data: { companyId, name: "FICTIONAL simulated supplier", currency: "AED", isDemo: false } })).id;
   jobId = (await db.job.create({ data: { companyId, jobNumber: `FIXTURE-LIVE-${tag}`, name: "FICTIONAL simulated job", customer: "FICTIONAL", currency: "AED", isDemo: false } })).id;
   await db.vendorBooksMapping.create({ data: { vendorId, organizationId, dataCenter: "US", environment: "production", externalVendorId: "77004" } });
+  await db.integrationCredential.create({ data: { target: "ZOHO", organizationId, dataCenter: "US",
+    connectionFingerprint: oauth.connectionFingerprint(config), refreshTokenEncrypted: "fictional-unused-grant" } });
 });
 beforeEach(() => {
   vi.stubEnv("ZOHO_BOOKS_ORGANIZATIONS_JSON", ""); vi.stubEnv("ZOHO_BOOKS_ORGANIZATION_ID", organizationId);
@@ -49,7 +52,12 @@ beforeEach(() => {
     if (target !== "ZOHO" || (requested && requested !== organizationId)) throw new configuration.IntegrationError("FICTIONAL_DESTINATION", "Unexpected fixture destination.");
     return config;
   });
-  vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("No provider networking is permitted in this disposable fixture.")));
+  vi.spyOn(oauth, "accessToken").mockResolvedValue("fictional-supplier-inspection-token");
+  vi.stubGlobal("fetch", vi.fn(async (input: string | URL, options?: RequestInit) => {
+    if ((options?.method ?? "GET") === "GET" && new URL(input).pathname === "/books/v3/contacts/77004")
+      return Response.json({ code: 0, contact: { contact_id: "77004", contact_type: "vendor", status: "active", currency_code: "AED", tax_treatment: "vat_registered" } });
+    throw new Error("Unexpected provider networking in this disposable fixture.");
+  }));
 });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 afterAll(() => db.$disconnect());
@@ -153,26 +161,29 @@ describe("real MySQL automatic final-save sync and preserved historical permissi
     expect((await db.bill.findUniqueOrThrow({ where: { id: bill.id } })).paidAmount.toFixed(2)).toBe("20.00");
     expect(await db.payment.count({ where: { billId: bill.id } })).toBe(1);
   });
-  it("retains final saves with a visible blocked status when company setup is missing or ambiguous", async () => {
+  it("preserves editable drafts when an enabled real company's supplier setup is missing or ambiguous", async () => {
     const storedDestination = await db.companyIntegrationDestination.findUniqueOrThrow({ where: { companyId_target_organizationId_dataCenter_environment: destination() } });
     await db.companyIntegrationDestination.delete({ where: { companyId_target_organizationId_dataCenter_environment: destination() } });
     const input = { companyId, vendorId, jobId, invoiceDate: "2026-10-28", category: "MATERIALS", currency: "AED", submit: true,
       discount: "0", vatRate: "5", lines: [{ description: "FICTIONAL blocked setup", quantity: "1", unitPrice: "100" }] };
     try {
-      const bill = await createBill(staff, { ...input, invoiceNumber: `FICTIONAL-MISSING-${tag}` });
-      expect(bill.status).toBe("READY");
+      const bill = await createBill(staff, { ...input, submit: false, invoiceNumber: `FICTIONAL-MISSING-${tag}` });
+      await expect(actOnBill(staff, bill.id, { action: "submit", version: bill.version })).rejects.toMatchObject({ code: "VENDOR_VAT_LOOKUP_UNAVAILABLE" });
+      expect(await db.bill.findUnique({ where: { id: bill.id } })).toMatchObject({ status: "DRAFT", version: bill.version });
       expect(await db.integrationJob.count({ where: { billId: bill.id } })).toBe(0);
-      expect(await db.syncRecord.findUnique({ where: { billId_target: { billId: bill.id, target: "ZOHO" } } })).toMatchObject({ status: "FAILED", organizationId: null });
+      expect(await db.syncRecord.findUnique({ where: { billId_target: { billId: bill.id, target: "ZOHO" } } })).toMatchObject({ status: "NOT_CONFIGURED", organizationId: null });
     } finally { await db.companyIntegrationDestination.create({ data: storedDestination }); }
     const second = `${organizationId}1`;
     await db.companyIntegrationDestination.create({ data: { ...destination(), organizationId: second } });
     vi.stubEnv("ZOHO_BOOKS_ORGANIZATIONS_JSON", JSON.stringify([{ organizationId, name: "FICTIONAL first" }, { organizationId: second, name: "FICTIONAL second" }]));
     vi.mocked(configuration.getConfig).mockImplementation((_target, _environment, requested) => ({ ...config, organizationId: requested ?? organizationId }));
     try {
-      const bill = await createBill(staff, { ...input, invoiceNumber: `FICTIONAL-AMBIGUOUS-${tag}` });
-      expect(bill.status).toBe("READY"); expect(await db.integrationJob.count({ where: { billId: bill.id } })).toBe(0);
+      const bill = await createBill(staff, { ...input, submit: false, invoiceNumber: `FICTIONAL-AMBIGUOUS-${tag}` });
+      await expect(actOnBill(staff, bill.id, { action: "submit", version: bill.version })).rejects.toMatchObject({ code: "VENDOR_VAT_LOOKUP_UNAVAILABLE" });
+      expect(await db.bill.findUnique({ where: { id: bill.id } })).toMatchObject({ status: "DRAFT", version: bill.version });
+      expect(await db.integrationJob.count({ where: { billId: bill.id } })).toBe(0);
       const record = await db.syncRecord.findUniqueOrThrow({ where: { billId_target: { billId: bill.id, target: "ZOHO" } } });
-      expect(record.status).toBe("FAILED"); expect(record.lastError).toMatch(/More than one/);
+      expect(record.status).toBe("NOT_CONFIGURED"); expect(record.lastError).toBeNull();
     } finally { await db.companyIntegrationDestination.delete({ where: { companyId_target_organizationId_dataCenter_environment: { ...destination(), organizationId: second } } }); }
   });
   it("enforces Data Entry ownership and rechecks the autonomous initiator before posting", async () => {

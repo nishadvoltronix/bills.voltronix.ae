@@ -15,7 +15,7 @@ const fixture = (): Bill => ({
   payments: [], lines: [], documents: [], syncRecords: [],
 });
 type Action = (body: Record<string, unknown>) => Promise<{ status?: number; json: unknown }>;
-async function setup(page: Page, initial = fixture()) {
+async function setup(page: Page, initial = fixture(), fromEntry = false) {
   const state = { bill: initial, unexpected: [] as string[], actions: [] as Record<string, unknown>[],
     action: (async () => ({ status: 409, json: { error: "Fictional payment response not configured." } })) as Action };
   await page.route("**/api/**", async route => {
@@ -28,6 +28,11 @@ async function setup(page: Page, initial = fixture()) {
       return route.fulfill(await state.action(body));
     }
     if (url.pathname === "/api/companies" && request.method() === "GET") return route.fulfill({ json: { companies: [{ id: "fictional-company", name: "Fictional company" }] } });
+    if (url.pathname === "/api/jobs" && request.method() === "GET") return route.fulfill({ json: { jobs: [state.bill.job] } });
+    if (url.pathname === "/api/jobs/job" && request.method() === "GET") return route.fulfill({ json: { job: state.bill.job, bills: [] } });
+    if (url.pathname === "/api/bills/options" && request.method() === "GET") return route.fulfill({ json: {
+      companyId: "fictional-company", organizationId: null, dataCenter: null, environment: null, accounts: [], taxes: [], customers: [], hasMoreCustomers: false, warning: null,
+    } });
     if (url.pathname === "/api/integrations" && request.method() === "GET") return route.fulfill({ json: {
       zoho: { organizations: [] }, crm: { status: "NOT_CONFIGURED", message: "Fictional connection" },
     } });
@@ -41,6 +46,7 @@ async function setup(page: Page, initial = fixture()) {
   await page.getByLabel("Password", { exact: true }).fill(password);
   await page.getByRole("button", { name: /Login.*Sign in to workspace/ }).click();
   await expect(page).toHaveURL(new RegExp(`/bills/${billId}/payment$`));
+  if (fromEntry) await page.goto(`/bills/${billId}/payment?entry=1&saved=1&jobId=untrusted-job&companyId=untrusted-company`);
   return state;
 }
 const ribbon = (page: Page) => page.getByRole("img", { name: "Paid in full", exact: true });
@@ -126,11 +132,17 @@ test("rejects wrong bill or nonadvancing response identity before reporting succ
   await expect(ribbon(page)).toHaveCount(0);
   await page.getByRole("button", { name: "Refresh bill", exact: true }).click();
   await expect(page.getByRole("button", { name: "Confirm payment", exact: true })).toBeEnabled();
+  state.action = async () => ({ json: { bill: { ...state.bill, jobId: "wrong-job", version: 2 } } });
+  await page.getByRole("button", { name: "Confirm payment", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Confirm payment", exact: true })).toBeDisabled();
+  await expect(page.getByLabel("Payment reference", { exact: true })).toHaveValue("KEEP-UNVERIFIED");
+  await page.getByRole("button", { name: "Refresh bill", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Confirm payment", exact: true })).toBeEnabled();
   state.action = async () => ({ json: { bill: state.bill } });
   await page.getByRole("button", { name: "Confirm payment", exact: true }).click();
   await expect(page.getByRole("button", { name: "Confirm payment", exact: true })).toBeDisabled();
   await expect(page.getByLabel("Payment reference", { exact: true })).toHaveValue("KEEP-UNVERIFIED");
-  expect(state.actions).toHaveLength(2); expect(state.unexpected).toEqual([]);
+  expect(state.actions).toHaveLength(3); expect(state.unexpected).toEqual([]);
 });
 
 test("fails closed when the requested bill GET returns another bill", async ({ page }) => {
@@ -157,4 +169,58 @@ test("Paid detail and payment cards show the diagonal ribbon without mobile over
     }
   }
   expect(state.actions).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("entry continuation skips payment and opens a blank bill for the actual saved job while ignoring allocation query strings", async ({ page }) => {
+  const state = await setup(page, { ...fixture(), syncRecords: [{ id: "fictional-entry-sync", target: "ZOHO", status: "PENDING", externalId: null }] }, true);
+  await expect(page.getByRole("link", { name: "Add another bill", exact: true })).toHaveAttribute("href", "/bills/new?jobId=job");
+  await expect(page.getByRole("link", { name: "Back to job history", exact: true })).toHaveAttribute("href", "/jobs/job");
+  await expect(page.getByRole("link", { name: "Change job", exact: true })).toHaveAttribute("href", "/bills/manual");
+  await expect(page.getByRole("group", { name: "Saved bill confirmation", exact: true })).toContainText("Provider confirmation is pending");
+  for (const width of [390, 360]) {
+    await page.setViewportSize({ width, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  }
+  await page.getByRole("link", { name: "Skip payment", exact: true }).click();
+  await expect(page).toHaveURL(/\/bills\/new\?jobId=job$/);
+  await expect(page.getByRole("heading", { name: "New Bill", exact: true })).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "Company", exact: true })).toHaveValue("fictional-company");
+  await expect(page.getByRole("combobox", { name: "Company", exact: true })).toBeDisabled();
+  await expect(page.getByLabel(/^Job \/ project/)).toHaveValue("job");
+  await expect(page.getByLabel(/^Job \/ project/)).toBeDisabled();
+  await expect(page.getByLabel("Bill#")).toHaveValue("");
+  await expect(page.getByRole("list", { name: "Selected invoice attachments", exact: true })).toHaveCount(0);
+  expect(state.actions).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("entry continuation records only an explicit payment and retains same-job navigation after confirmation", async ({ page }) => {
+  const state = await setup(page, { ...fixture(), editEligibility: { allowed: true, reason: null, mode: "provider_update" } }, true);
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  state.action = async body => {
+    expect(body).toEqual({ action: "payment", version: 1, amount: "105.00", reference: "FICTIONAL-EXPLICIT-PAYMENT" });
+    await pending;
+    state.bill = { ...state.bill, version: 2, paidAmount: "105.00", outstanding: "0.00", paymentStatus: "PAID",
+      payments: [{ id: "fictional-explicit-payment", amount: "105.00", reference: "FICTIONAL-EXPLICIT-PAYMENT", createdAt: "2026-11-04T10:00:00Z" }] };
+    return { json: { bill: state.bill } };
+  };
+  expect(state.actions).toEqual([]);
+  await expect(page.getByRole("link", { name: "Edit saved bill", exact: true })).toBeVisible();
+  await page.getByLabel("Payment reference", { exact: true }).fill("FICTIONAL-EXPLICIT-PAYMENT");
+  await page.getByRole("button", { name: "Confirm payment", exact: true }).click();
+  for (const label of ["Add another bill", "Back to job history", "Change job", "Skip payment"])
+    await expect(page.getByRole("button", { name: label, exact: true })).toBeDisabled();
+  for (const label of ["View saved bill", "Edit saved bill", "View job history"]) {
+    await expect(page.getByRole("link", { name: label, exact: true })).toHaveCount(0);
+    await expect(page.locator('[aria-disabled="true"]').filter({ hasText: label })).toBeVisible();
+  }
+  await expect(page.getByRole("button", { name: "Refresh saved bill status", exact: true })).toBeDisabled();
+  await expect(ribbon(page)).toHaveCount(0);
+  release();
+  await expect(ribbon(page)).toBeVisible();
+  await expect(page.getByText("Payment recorded successfully.", { exact: true })).toBeVisible();
+  await page.getByRole("link", { name: "Add another bill", exact: true }).click();
+  await expect(page).toHaveURL(/\/bills\/new\?jobId=job$/);
+  await expect(page.getByRole("heading", { name: "New Bill", exact: true })).toBeVisible();
+  expect(state.actions).toHaveLength(1); expect(state.unexpected).toEqual([]);
 });

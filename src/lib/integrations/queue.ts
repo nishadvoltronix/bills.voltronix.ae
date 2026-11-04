@@ -43,6 +43,8 @@ import { createLocalLiveTestWriteCapability, isLocalLiveTestSnapshot, prepareLoc
   recordLocalLiveTestConfirmation } from "./local-live-test";
 import { assertSourceSupersessionQueueProof, consumeSourceSupersessionQueueProof, isSupersededIntegrationJob,
   SOURCE_SUPERSEDED, type SourceSupersessionQueueProof } from "./source-supersession";
+import { prepareBooksAttachment } from "./books-attachment";
+import { currentBooksMutation } from "./books-mutations";
 
 function financeRole(actor: Actor) {
   if (!["ADMIN", "ACCOUNTS", "DATA_ENTRY"].includes(actor.role))
@@ -163,7 +165,7 @@ async function enqueueTx(
   });
   if (
     record &&
-    (["PENDING", "UNKNOWN", "SYNCED"].includes(record.status) ||
+    (["UNKNOWN", "SYNCED"].includes(record.status) || (record.status === "PENDING" && !supersession) ||
       (record.attempts > 0 && !supersession))
   )
     throw new HttpError(
@@ -320,6 +322,29 @@ export async function enqueueReadyBillTx(tx: Prisma.TransactionClient, billId: s
       details: { code: error instanceof IntegrationError ? error.code : "SYNC_ACCESS_BLOCKED", target: "ZOHO" } } });
     return null;
   }
+}
+/** A reviewed edit targets the already confirmed Books identity; it never falls back to CREATE. */
+export async function enqueueBillUpdateTx(tx: Prisma.TransactionClient, billId: string, actorId: string,
+  revision: NonNullable<BillSnapshot["revision"]>) {
+  const bill = await tx.bill.findUniqueOrThrow({ where: { id: billId }, include: sourceInclude });
+  const config = await selectedBooksConfig(tx, bill.companyId);
+  const previous = await tx.integrationJob.findUnique({ where: { id: revision.previousJobId } });
+  const record = await tx.syncRecord.findUnique({ where: { billId_target: { billId, target: "ZOHO" } } });
+  if (isManualEntryOnly() || !previous || previous.billId !== billId || previous.target !== "ZOHO" || previous.status !== "SUCCEEDED" ||
+    !["CREATE_BILL", "UPDATE_BILL"].includes(previous.operation) || previous.payloadHash !== revision.previousPayloadHash ||
+    previous.externalId !== revision.externalId || previous.organizationId !== config.organizationId || record?.externalId !== revision.externalId ||
+    record.organizationId !== config.organizationId || snapshotHash(snapshotSchema.parse(previous.snapshot)) !== previous.payloadHash)
+    throw new HttpError(409, "The confirmed Books bill identity changed. No new external bill was created.");
+  const snapshot = await savedSourceSnapshot(tx, bill, config, actorId);
+  snapshot.revision = revision;
+  buildBooksPayload(snapshot, config);
+  const job = await tx.integrationJob.create({ data: { billId, target: "ZOHO", operation: "UPDATE_BILL", initiatedById: actorId,
+    sourceVersion: bill.version, organizationId: config.organizationId, externalId: revision.externalId,
+    idempotencyKey: `ZOHO:${billId}:UPDATE_BILL:${bill.version}`, snapshot: snapshot as unknown as Prisma.InputJsonValue, payloadHash: snapshotHash(snapshot) } });
+  await tx.syncRecord.update({ where: { billId_target: { billId, target: "ZOHO" } }, data: { status: "PENDING", lastError: null } });
+  await tx.auditLog.create({ data: { actorId, companyId: bill.companyId, action: "SYNC_QUEUED", entityType: "Bill", entityId: billId,
+    details: { jobId: job.id, target: "ZOHO", operation: "UPDATE_BILL", sourceVersion: bill.version, previousJobId: previous.id, externalId: revision.externalId } } });
+  return job;
 }
 export async function assertBillCancellationSyncSafe(
   tx: Prisma.TransactionClient,
@@ -552,11 +577,12 @@ async function isCurrentOperation(tx: Prisma.TransactionClient, job: Integration
   await tx.$queryRaw(Prisma.sql`SELECT \`id\` FROM \`Bill\` WHERE \`id\`=${job.billId} FOR UPDATE`);
   const persisted = await tx.integrationJob.findUnique({ where: { id: job.id } });
   if (!persisted || isSupersededIntegrationJob(persisted)) return false;
-  const current = await tx.integrationJob.findUnique({ where: { idempotencyKey: `${job.target}:${job.billId}:CREATE_BILL` } });
+  const current = job.target === "ZOHO" ? await currentBooksMutation(tx, job.billId) :
+    await tx.integrationJob.findUnique({ where: { idempotencyKey: `${job.target}:${job.billId}:CREATE_BILL` } });
   // Preserve established destination-free legacy operations. A canonical row,
   // once present, is the only authority for its own source and attachment jobs.
   if (!current) return true;
-  return job.operation === "CREATE_BILL" ? current.id === job.id :
+  return ["CREATE_BILL", "UPDATE_BILL"].includes(job.operation) ? current.id === job.id :
     current.status === "SUCCEEDED" && current.externalId === job.externalId && current.payloadHash === job.payloadHash &&
       current.sourceVersion === job.sourceVersion && current.organizationId === job.organizationId;
 }
@@ -806,7 +832,7 @@ async function finalizeSuccess(
     });
     if (!changed.count) return;
     if (job.operation === "CREATE_BILL") {
-      for (const document of snapshot.documents)
+      for (const document of snapshot.attachmentMode === "bundle" ? snapshot.documents.slice(0, 1) : snapshot.documents)
         await tx.integrationJob.upsert({
           where: {
             idempotencyKey: `${job.target}:${job.billId}:ATTACH_DOCUMENT:${document.id}`,
@@ -974,6 +1000,17 @@ export async function processIntegrationJobs(
         confirmation = job.needsReconciliation
           ? await adapter.reconcile(snapshot)
           : await adapter.create(snapshot);
+      } else if (job.operation === "UPDATE_BILL") {
+        const revision = snapshot.revision;
+        const previous = revision ? await db.integrationJob.findUnique({ where: { id: revision.previousJobId } }) : null;
+        if (!revision || !job.externalId || revision.externalId !== job.externalId || !previous || previous.billId !== job.billId ||
+          previous.target !== "ZOHO" || previous.status !== "SUCCEEDED" || previous.externalId !== job.externalId ||
+          previous.organizationId !== job.organizationId || previous.payloadHash !== revision.previousPayloadHash ||
+          snapshotHash(snapshotSchema.parse(previous.snapshot)) !== previous.payloadHash || !adapter.update || !adapter.reconcileUpdate)
+          throw new IntegrationError("UPDATE_SOURCE_UNVERIFIED", "The existing Books bill and previous confirmed revision must be verified before updating.", "BLOCKED");
+        const current = await db.bill.findUniqueOrThrow({ where: { id: job.billId }, select: { paidAmount: true } });
+        confirmation = job.needsReconciliation ? await adapter.reconcileUpdate(job.externalId, snapshot) :
+          await adapter.update(job.externalId, snapshot, snapshotSchema.parse(previous.snapshot), current.paidAmount.toFixed(2));
       } else if (job.operation === "ATTACH_DOCUMENT") {
         if (!job.externalId || !job.documentId)
           throw new IntegrationError(
@@ -990,10 +1027,12 @@ export async function processIntegrationJobs(
             "This attachment was not part of the approved snapshot.",
             "BLOCKED",
           );
+        const derived = snapshot.attachmentMode === "bundle" || snapshot.documents.length === 1
+          ? await prepareBooksAttachment(snapshot, job.documentId) : null;
         if (job.needsReconciliation) {
           confirmation = await adapter.reconcileAttachment(
             job.externalId,
-            expected.sha256,
+            derived?.sha256 ?? expected.sha256,
           );
         } else {
           const document = await db.document.findFirst({
@@ -1005,9 +1044,9 @@ export async function processIntegrationJobs(
               "The source attachment no longer matches the approved snapshot.",
               "BLOCKED",
             );
-          const bytes = await readPrivateDocument(document);
+          const bytes = derived?.bytes ?? await readPrivateDocument(document);
           if (
-            createHash("sha256").update(bytes).digest("hex") !== expected.sha256
+            createHash("sha256").update(bytes).digest("hex") !== (derived?.sha256 ?? expected.sha256)
           )
             throw new IntegrationError(
               "DOCUMENT_INTEGRITY_FAILED",
@@ -1016,9 +1055,9 @@ export async function processIntegrationJobs(
             );
           confirmation = await adapter.attach(job.externalId, {
             bytes,
-            fileName: document.fileName,
-            mimeType: document.mimeType,
-            sha256: document.sha256,
+            fileName: derived?.fileName ?? document.fileName,
+            mimeType: derived?.mimeType ?? document.mimeType,
+            sha256: derived?.sha256 ?? document.sha256,
           });
         }
       } else

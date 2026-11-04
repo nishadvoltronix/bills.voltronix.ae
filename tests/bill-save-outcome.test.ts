@@ -28,6 +28,16 @@ describe("saved bill provider outcome", () => {
     expect(savedBillNotice({ ...bill("SYNCED", "99001"), status: "DRAFT" }, false).message).toBe("Draft saved. It has not been sent to Zoho Books.");
     expect(savedBillNotice(bill("NOT_CONFIGURED"), true).message).toBe("Bill saved successfully.");
   });
+
+  it("describes a pending or failed update against an existing ID without claiming attachment completion or another create", () => {
+    const update = (status: string) => ({ ...bill(status, "99001", "Fictional update rejected."), syncOperation: "UPDATE_BILL" as const });
+    expect(savedBillNotice(update("PENDING"), false)).toMatchObject({ tone: "info", message: expect.stringContaining("Confirmation of the changes is pending") });
+    expect(savedBillNotice(update("PENDING"), false).message).not.toMatch(/Attachment|created/);
+    expect(savedBillNotice(update("FAILED"), false)).toMatchObject({ tone: "error", message: expect.stringContaining("Fictional update rejected.") });
+    expect(savedBillNotice(update("UNKNOWN"), false)).toMatchObject({ tone: "error", message: expect.stringContaining("Reconcile the existing bill") });
+    expect(savedBillNotice(update("SYNCED"), false)).toEqual({ tone: "success", message: "Bill changes saved and synchronized with Zoho Books." });
+    expect(savedBillNotice({ ...update("SYNCED"), syncRecords: [] }, false).tone).toBe("error");
+  });
 });
 
 describe("saved outcome response scope", () => {
@@ -45,5 +55,7 @@ describe("saved outcome response scope", () => {
     source.syncRecords[0].lastError = "A later unrelated change.";
     expect(snapshot).toEqual({ status: "READY", syncRecords: [{ target: "ZOHO", status: "FAILED", externalId: null, lastError: "Original failure." }] });
     expect(snapshot).not.toHaveProperty("notes");
+    expect(savedBillState({ ...source, syncOperation: "UPDATE_BILL" }, expected)).toMatchObject({ syncOperation: "UPDATE_BILL" });
+    expect(savedBillState({ ...source, syncOperation: "UNREVIEWED_OPERATION" }, expected)).toBeNull();
   });
 });

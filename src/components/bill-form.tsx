@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import {
   CheckCircle2,
   ArrowLeft,
-  Paperclip,
   LoaderCircle,
   Plus,
   ReceiptText,
@@ -18,13 +17,15 @@ import {
 import { calculateBill } from "@/lib/finance";
 import { matchesExactJobSearch, parseExactJobSearch } from "@/lib/job-search";
 import { savedBillState } from "@/lib/bill-save-outcome";
-import { BOOKS_NO_VAT_NAME, type BooksSelection } from "@/lib/books-selection";
+import { BOOKS_NO_VAT, BOOKS_NO_VAT_NAME, type BooksSelection } from "@/lib/books-selection";
+import { MAX_INVOICE_ATTACHMENTS, MAX_INVOICE_FILE_BYTES, MAX_INVOICE_TOTAL_BYTES } from "@/lib/invoice-attachments";
+import { BOOKS_VENDOR_VAT_REVIEW_MESSAGE, hasBooksVendorTaxConflict } from "@/lib/integrations/books-vendor-tax";
 import {
   PAYMENT_TERMS,
   resolveDueDate,
   type PaymentTerm,
 } from "@/lib/payment-terms";
-import { api, dateInput, errorMessage, money, useApi } from "./api";
+import { ApiError, api, dateInput, errorMessage, money, useApi } from "./api";
 import type { Bill, BillBooksOptions, BooksConnection, Job, Vendor } from "./types";
 import { useManualEntryOnly, useUser } from "./app-shell";
 import {
@@ -43,6 +44,7 @@ import { AmountRow } from "./records";
 import { CompanySelect } from "./company-select";
 import { VendorAutocomplete } from "./vendor-autocomplete";
 import { SavedBillOutcome, type SavedJobBill } from "./saved-bill-outcome";
+import { InvoiceAttachmentPicker, type InvoiceFileSelection } from "./invoice-attachment-picker";
 import { BooksLinePicker, booksLineSelection, hasBooksLineDraft, type BooksLineDraft } from "./books-line-picker";
 
 type EditableLine = {
@@ -159,7 +161,8 @@ function BillForm({
   const router = useRouter();
   const user = useUser();
   const manualEntryOnly = useManualEntryOnly();
-  const saveLabel = manualEntryOnly ? "Save bill" : "Save and sync";
+  const finalizedEdit = !!bill && ["READY", "APPROVED"].includes(bill.status);
+  const saveLabel = finalizedEdit ? manualEntryOnly ? "Save changes" : "Save changes and sync" : manualEntryOnly ? "Save bill" : "Save and sync";
   const repeatJobEntry = !!initialJob && !!onSaved;
   const saveInFlight = useRef(false);
   const receiptNotice = useRef<HTMLDivElement>(null);
@@ -174,6 +177,9 @@ function BillForm({
   const [companyId, setCompanyId] = useState(initial?.companyId ?? initialJob?.companyId ?? "");
   const availableJobs = [...(jobs.data?.jobs ?? [])];
   if (initialJob && !availableJobs.some((job) => job.id === initialJob.id)) availableJobs.push(initialJob);
+  if (initial?.job && initial.companyId && !availableJobs.some(job => job.id === initial.jobId)) availableJobs.push({
+    ...initial.job, id: initial.jobId!, companyId: initial.companyId, currency: initial.currency ?? initial.job.currency,
+  });
   const booksOptions = useApi<BillBooksOptions>(companyId && !manualEntryOnly
     ? `/api/bills/options?${new URLSearchParams({ companyId })}` : null);
   const booksCatalog = booksOptions.data?.companyId === companyId ? booksOptions.data : null;
@@ -182,6 +188,7 @@ function BillForm({
   const [confirmed, setConfirmed] = useState(false);
   const [vendorId, setVendorId] = useState(initial?.vendorId ?? "");
   const [chosenVendor, setChosenVendor] = useState<Vendor | null>(null);
+  const [vendorLookupRevision, setVendorLookupRevision] = useState(0);
   const [vendorPending, setVendorPending] = useState<{ companyId: string; pending: boolean } | null>(null);
   const [jobId, setJobId] = useState(initial?.jobId ?? initialJob?.id ?? "");
   const [jobQuery, setJobQuery] = useState("");
@@ -218,13 +225,18 @@ function BillForm({
   const [booksFieldsRevision, setBooksFieldsRevision] = useState(0);
   const usesLineBooks = lines.some((line) => hasBooksLineDraft(line.booksDraft));
   const showBooksLines = !manualEntryOnly || usesLineBooks;
-  const [file, setFile] = useState<File | null>(null);
+  const [files, setFiles] = useState<InvoiceFileSelection[]>([]);
+  const fileSelections = useRef<InvoiceFileSelection[]>([]);
+  const [checkingFiles, setCheckingFiles] = useState(false);
+  const selectionInFlight = useRef(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [savedId, setSavedId] = useState<string | null>(null);
   const [savedVersion, setSavedVersion] = useState<number | null>(null);
   const [recovery, setRecovery] = useState<"attachment" | "finalize" | null>(null);
   const [savedForSync, setSavedForSync] = useState(false);
+  const existingDocuments = bill?.documents ?? bill?.attachments ?? [];
+  const uncertainUpload = files.some(file => file.status === "uncertain");
   const calculated = useMemo(() => {
     try {
       const unfinished = lines.findIndex((line) => hasBooksLineDraft(line.booksDraft) && !line.booksSelection);
@@ -239,6 +251,10 @@ function BillForm({
     ? chosenVendor
     : null;
   const vendorResolving = vendorPending?.companyId === companyId && vendorPending.pending;
+  const vendorVat = selectedVendor?.booksVat;
+  const vendorTaxConflict = !manualEntryOnly && vendorVat?.status === "verified" && hasBooksVendorTaxConflict(vendorVat.taxTreatment,
+    usesLineBooks ? lines.map(line => ({ tax_id: line.booksDraft?.taxId && line.booksDraft.taxId !== BOOKS_NO_VAT ? line.booksDraft.taxId : null }))
+      : [{ tax_id: Number(vatRate) > 0 ? "configured-vat" : null }]);
   const handleVendorChange = useCallback((vendor: Vendor | null, source: "selection" | "hydration" | "clear") => {
     if (vendor && vendor.companyId !== companyId) return;
     setVendorId(vendor?.id ?? "");
@@ -251,6 +267,12 @@ function BillForm({
       return { companyId, pending };
     });
   }, [companyId]);
+  function refreshVendor() {
+    if (!vendorId || busy) return;
+    setChosenVendor(null);
+    setVendorPending({ companyId, pending: true });
+    setVendorLookupRevision(current => current + 1);
+  }
   const currency = review
     ? currencyOverride
     : currencyOverride ||
@@ -304,29 +326,65 @@ function BillForm({
     setLines((current) => current.map((line) => ({ ...line, booksDraft: undefined, booksSelection: null })));
     setBooksFieldsRevision((current) => current + 1);
   }
-  function selectAttachment(event: React.ChangeEvent<HTMLInputElement>) {
-    const selected = event.target.files?.[0] ?? null;
-    if (selected && selected.size > 10 * 1024 * 1024) {
-      setError("Choose a document smaller than 10 MB.");
-      event.target.value = "";
-      setFile(null);
+  function replaceFiles(next: InvoiceFileSelection[]) {
+    fileSelections.current = next;
+    setFiles(next);
+  }
+  function updateFile(id: string, patch: Partial<InvoiceFileSelection>) {
+    replaceFiles(fileSelections.current.map(file => file.id === id ? { ...file, ...patch } : file));
+  }
+  async function selectAttachments(selected: File[]) {
+    if (busy || selectionInFlight.current || uncertainUpload || finalizedEdit) return;
+    if (selected.length > MAX_INVOICE_ATTACHMENTS || selected.some(file => file.size < 8 || file.size > MAX_INVOICE_FILE_BYTES ||
+      !["application/pdf", "image/jpeg", "image/png"].includes(file.type))) {
+      setError(`Choose PDF, JPEG or PNG originals, up to ${MAX_INVOICE_ATTACHMENTS} files and ${MAX_INVOICE_TOTAL_BYTES / 1_000_000} MB total.`);
       return;
     }
-    setFile(selected);
+    selectionInFlight.current = true;
+    setCheckingFiles(true);
+    try {
+      const additions = await Promise.all(selected.map(async file => {
+        const bytes = await file.arrayBuffer();
+        const digest = await crypto.subtle.digest("SHA-256", bytes);
+        return { id: Array.from(new Uint8Array(digest)).map(byte => byte.toString(16).padStart(2, "0")).join(""), file, status: "pending" as const };
+      }));
+      const merged = [...fileSelections.current];
+      for (const file of additions) if (!merged.some(current => current.id === file.id)) merged.push(file);
+      const bytes = merged.reduce((sum, file) => sum + file.file.size, 0) + existingDocuments.reduce((sum, document) => sum + (document.byteSize ?? 0), 0);
+      if (merged.length + existingDocuments.length > MAX_INVOICE_ATTACHMENTS || bytes > MAX_INVOICE_TOTAL_BYTES)
+        throw new Error(`Keep up to ${MAX_INVOICE_ATTACHMENTS} originals and ${MAX_INVOICE_TOTAL_BYTES / 1_000_000} MB total, including files already saved to this bill.`);
+      replaceFiles(merged);
+      setError("");
+    } catch (failure) { setError(errorMessage(failure)); }
+    finally { selectionInFlight.current = false; setCheckingFiles(false); }
   }
-  async function attach(id: string, expectedVersion: number) {
-    if (!file) return;
-    const data = new FormData();
-    data.set("file", file);
-    const result = await api<{ document: { billVersion: number; alreadyAttached: boolean } }>(`/api/bills/${id}/attachment`, {
-      method: "POST",
-      headers: { "x-bill-version": String(expectedVersion) },
-      body: data,
-    });
-    const { billVersion, alreadyAttached } = result.document;
-    if (billVersion !== expectedVersion + 1 && !(alreadyAttached && billVersion === expectedVersion))
-      throw new Error("The original was stored, but this bill changed during upload. Open the saved bill and review its current details.");
-    return billVersion;
+  function removeAttachment(id: string) {
+    if (busy || checkingFiles || uncertainUpload) return;
+    replaceFiles(fileSelections.current.filter(file => file.id !== id || file.status === "stored"));
+  }
+  async function attach(id: string, startingVersion: number) {
+    let expectedVersion = startingVersion;
+    for (const file of fileSelections.current.filter(file => file.status !== "stored")) {
+      updateFile(file.id, { status: "uploading", message: undefined });
+      try {
+        const data = new FormData();
+        data.set("file", file.file);
+        const result = await api<{ document: { id: string; billVersion: number; alreadyAttached: boolean } }>(`/api/bills/${id}/attachment`, {
+          method: "POST", headers: { "x-bill-version": String(expectedVersion) }, body: data,
+        });
+        const document = result?.document;
+        if (!document?.id || (document.billVersion !== expectedVersion + 1 && !(document.alreadyAttached && document.billVersion === expectedVersion)))
+          throw new Error("The original upload result could not be verified. Keep this file and retry the saved bill before changing attachments.");
+        expectedVersion = document.billVersion;
+        setSavedVersion(expectedVersion);
+        updateFile(file.id, { status: "stored", documentId: document.id, message: undefined });
+      } catch (failure) {
+        const rejected = failure instanceof ApiError && [413, 415, 422].includes(failure.status);
+        updateFile(file.id, { status: rejected ? "rejected" : "uncertain", message: errorMessage(failure) });
+        throw failure;
+      }
+    }
+    return expectedVersion;
   }
   async function finalize(id: string, expectedVersion: number) {
     const { bill: current } = await api<{ bill: Bill }>(`/api/bills/${id}`);
@@ -339,6 +397,11 @@ function BillForm({
     return result?.bill ?? null;
   }
   function openSavedBill(id: string, isDraft: boolean, completedBill?: Bill | null) {
+    if (!isDraft && !bill && !review && ["ADMIN", "ACCOUNTS"].includes(user.role)) {
+      router.push(`/bills/${encodeURIComponent(id)}/payment?entry=1&saved=1`);
+      router.refresh();
+      return;
+    }
     if (repeatJobEntry && onSaved) {
       onSaved({ id, invoiceNumber, isDraft, outcome: savedBillState(completedBill, { id, companyId, jobId }) });
       return;
@@ -348,11 +411,19 @@ function BillForm({
   }
   async function save(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (busy || saveInFlight.current || savedId) return;
+    if (busy || checkingFiles || selectionInFlight.current || saveInFlight.current || savedId) return;
     const submitter = (event.nativeEvent as SubmitEvent)
       .submitter as HTMLButtonElement | null;
     const submit = submitter?.value !== "draft";
     setError("");
+    if (submit && vendorTaxConflict) {
+      setError(BOOKS_VENDOR_VAT_REVIEW_MESSAGE);
+      return;
+    }
+    if (submit && !review && !finalizedEdit && !existingDocuments.length && !fileSelections.current.length) {
+      setError("Attach the original invoice before final save. You can save an unfinished draft without an attachment.");
+      return;
+    }
     if (manualEntryOnly && usesLineBooks) {
       setError("Clear the Books line selections before saving in manual entry mode. Review the invoice VAT rate after clearing them.");
       return;
@@ -387,6 +458,10 @@ function BillForm({
     }
     if (termsError) {
       setError(termsError);
+      return;
+    }
+    if (finalizedEdit && paymentTerms === "CUSTOM" && !effectiveDueDate) {
+      setError("Choose a due date or select a known payment term before updating this finalized bill.");
       return;
     }
     if (!calculated.totals) {
@@ -452,21 +527,24 @@ function BillForm({
       );
       setSavedId(result.bill.id);
       setSavedVersion(result.bill.version);
+      if (finalizedEdit) {
+        openSavedBill(result.bill.id, false, result.bill);
+        return;
+      }
       setSavedForSync(submit && !review);
-      let attachmentVersion: number | undefined;
+      let attachmentVersion: number;
       try {
         attachmentVersion = await attach(result.bill.id, result.bill.version);
       } catch (e) {
         setRecovery("attachment");
         setError(
-          `Your draft was saved and has not been queued. The attachment could not be uploaded: ${errorMessage(e)}`,
+          `Your draft was saved and has not been queued. The remaining original files could not be uploaded: ${errorMessage(e)}`,
         );
         setBusy(false);
         return;
       }
-      const expectedVersion = attachmentVersion ?? result.bill.version;
+      const expectedVersion = attachmentVersion;
       setSavedVersion(expectedVersion);
-      setFile(null);
       let completedBill: Bill | null = result.bill;
       if (submit && !review) {
         try {
@@ -496,10 +574,8 @@ function BillForm({
     try {
       if (recovery === "attachment") {
         const attachmentVersion = await attach(savedId, expectedVersion);
-        if (attachmentVersion === undefined) throw new Error("Select the original attachment again before continuing.");
         expectedVersion = attachmentVersion;
         setSavedVersion(expectedVersion);
-        setFile(null);
         nextStep = savedForSync ? "finalize" : null;
         setRecovery(nextStep);
       }
@@ -519,10 +595,10 @@ function BillForm({
         Bill entry is available to authorized finance and data entry staff.
       </Notice>
     );
-  if (bill && !["DRAFT", "REJECTED"].includes(bill.status))
+  if (bill && !(bill.editEligibility?.allowed ?? ["DRAFT", "REJECTED"].includes(bill.status)))
     return (
       <Notice>
-        This bill is no longer editable.{" "}
+        {bill.editEligibility?.reason ?? "This bill is no longer editable."}{" "}
         <Link className="text-link" href={`/bills/${bill.id}`}>
           Return to bill
         </Link>
@@ -543,7 +619,7 @@ function BillForm({
                   : "New Bill"}
           </h1>
         </div>
-        {repeatJobEntry ? <Button type="button" variant="secondary" size="sm" disabled={busy}
+        {repeatJobEntry ? <Button type="button" variant="secondary" size="sm" disabled={busy || checkingFiles}
           onClick={() => router.push("/bills/manual")}>
           <ArrowLeft size={15} />Back to job search
         </Button> : <Link
@@ -569,25 +645,21 @@ function BillForm({
           <h2>Your financial data is safely saved</h2>
           <p>
             {recovery === "attachment"
-              ? "The bill remains a draft until its original is stored. Retry the upload to finish your selected save action, or open the saved draft."
+              ? "The bill remains a draft until its originals are stored. Completed uploads stay saved. Retry the remaining files, or open the saved draft."
               : `Retry ${saveLabel} for this saved bill, or open it to inspect its current status.`}
             {" "}Do not create the bill again.
           </p>
-          {recovery === "attachment" && <div className="books-attachment">
-            <Field label="Replace original" htmlFor="recovery-invoice-file" hint="PDF, JPEG or PNG · Maximum 10 MB per file">
-              <Input id="recovery-invoice-file" aria-label="Replacement invoice attachment" type="file"
-                accept="application/pdf,image/jpeg,image/png" disabled={busy} onChange={selectAttachment} />
-            </Field>
-            <p><Paperclip size={13} />{file ? file.name : "Choose the original vendor invoice before retrying."}</p>
-          </div>}
+          {recovery === "attachment" && <InvoiceAttachmentPicker id="recovery-invoice-files" files={files} existing={existingDocuments}
+            busy={busy} checking={checkingFiles} locked={uncertainUpload} onFiles={selectAttachments} onRemove={removeAttachment} />}
           <div className="button-row">
-            <Button onClick={resumeSavedBill} disabled={busy || (recovery === "attachment" && !file)}>
+            <Button onClick={resumeSavedBill} disabled={busy || checkingFiles || (recovery === "attachment" && !files.length && !existingDocuments.length)}>
               {busy && <LoaderCircle className="spin" size={16} />}
-              {recovery === "attachment" ? "Retry attachment" : `Retry ${saveLabel}`}
+              {recovery === "attachment" ? files.filter(file => file.status !== "stored").length > 1 ? "Retry attachments"
+                : files.some(file => file.status !== "stored") ? "Retry attachment" : "Finish saved bill" : `Retry ${saveLabel}`}
             </Button>
-            <Button variant="secondary" asChild>
+            {busy ? <Button variant="secondary" disabled>Open saved bill</Button> : <Button variant="secondary" asChild>
               <Link href={`/bills/${savedId}`}>Open saved bill</Link>
-            </Button>
+            </Button>}
           </div>
         </Card>
       ) : (
@@ -609,6 +681,10 @@ function BillForm({
                 }}
               />
             </div>
+            {finalizedEdit && <div className="books-form-notice"><Notice>
+              Changes keep this bill&apos;s company, job, currency, recorded payments and original files.
+              {manualEntryOnly ? "" : " A synchronized bill is updated against its existing Zoho Books bill ID."}
+            </Notice></div>}
             {companyId && !manualEntryOnly && (
               <div className="books-form-notice" aria-label="Books synchronization readiness">
                 <Notice>
@@ -644,7 +720,7 @@ function BillForm({
                   <Field label="Vendor Name" htmlFor="bill-vendor" required>
                     <div className="books-vendor-control">
                       <VendorAutocomplete
-                        key={companyId}
+                        key={`${companyId}:${vendorLookupRevision}`}
                         id="bill-vendor"
                         companyId={companyId}
                         value={vendorId}
@@ -658,6 +734,9 @@ function BillForm({
                             ? `TRN: ${selectedVendor.trn}`
                             : "No tax registration number recorded"}
                           {selectedVendor.email && <span className="books-vendor-email">{selectedVendor.email}</span>}
+                          {vendorVat && <span className="books-vendor-email">Zoho VAT status: {vendorVat.status === "verified"
+                            ? vendorVat.taxTreatment === "vat_registered" ? "VAT registered" : vendorVat.taxTreatment === "vat_not_registered" ? "VAT not registered" : "Not confirmed"
+                            : "Not confirmed"}</span>}
                         </p>
                       )}
                     </div>
@@ -674,6 +753,7 @@ function BillForm({
                 >
                   <Select
                     id="bill-currency"
+                    disabled={finalizedEdit}
                     value={currency}
                     onChange={(e) => setCurrency(e.target.value)}
                     required
@@ -690,6 +770,16 @@ function BillForm({
                   The selected vendor uses {selectedVendor.currency}. Bill, vendor and job currencies must match; currency conversion is not configured.
                 </Notice>
               )}
+              {vendorTaxConflict && <Notice tone="error">
+                <p>{BOOKS_VENDOR_VAT_REVIEW_MESSAGE}</p>
+                <p>{finalizedEdit ? "The existing bill remains saved. Review the supplier and original invoice before applying these changes."
+                  : "You can save an unfinished draft while the supplier or invoice is reviewed."}</p>
+                <Button type="button" variant="secondary" disabled={busy || vendorResolving} onClick={refreshVendor}>Retry supplier check</Button>
+              </Notice>}
+              {!manualEntryOnly && vendorVat?.status === "unavailable" && <Notice>
+                <p>{vendorVat.warning ?? "The supplier VAT status could not be checked. Final save will verify it again; save a draft if verification remains unavailable."}</p>
+                <Button type="button" variant="secondary" disabled={busy || vendorResolving} onClick={refreshVendor}>Retry supplier check</Button>
+              </Notice>}
             </section>
 
             <section
@@ -734,7 +824,8 @@ function BillForm({
               </div>
               <div className="books-date-payment-row">
                 <div className="books-form-row">
-                  <Field label="Due Date" htmlFor="due-date">
+                  <Field label="Due Date" htmlFor="due-date" hint={finalizedEdit && paymentTerms === "CUSTOM"
+                    ? "A finalized bill needs an explicit due date or a known payment term before its Books details can be updated." : undefined}>
                     <Input
                       id="due-date"
                       type="date"
@@ -793,7 +884,7 @@ function BillForm({
               <div className="books-form-row">
                 <Field label="Job / project" htmlFor="bill-job" required>
                   <div className="books-job-control">
-                    {!repeatJobEntry && <Input
+                    {!repeatJobEntry && !finalizedEdit && <Input
                       id="job-search"
                       aria-label="Search job ID or name"
                       value={jobQuery}
@@ -811,7 +902,7 @@ function BillForm({
                         );
                         if (selected) setCurrency(selected.currency);
                       }}
-                      disabled={jobs.loading || repeatJobEntry}
+                      disabled={jobs.loading || repeatJobEntry || finalizedEdit}
                     >
                       <option value="">
                         {jobs.loading ? "Loading jobs…" : "Select a job"}
@@ -1029,27 +1120,8 @@ function BillForm({
                     placeholder="Add a note for the accounts team…"
                   />
                 </Field>
-                {!review && (
-                  <div className="books-attachment">
-                    <Field
-                      label="Attach File"
-                      htmlFor="invoice-file"
-                      hint="PDF, JPEG or PNG · Maximum 10 MB per file"
-                    >
-                      <Input
-                        id="invoice-file"
-                        aria-label="Invoice attachment"
-                        type="file"
-                        accept="application/pdf,image/jpeg,image/png"
-                        onChange={selectAttachment}
-                      />
-                    </Field>
-                    <p>
-                      <Paperclip size={13} />
-                      {file ? file.name : "Attach the original vendor invoice."}
-                    </p>
-                  </div>
-                )}
+                {!review && <InvoiceAttachmentPicker files={files} existing={existingDocuments} busy={busy}
+                  checking={checkingFiles} readOnly={finalizedEdit} onFiles={selectAttachments} onRemove={removeAttachment} />}
                 {review && (
                   <Notice>
                     The stored original invoice will be attached automatically.
@@ -1215,17 +1287,17 @@ function BillForm({
                 name="intent"
                 value="submit"
                 type="submit"
-                disabled={busy || vendorResolving || jobs.loading}
+                disabled={busy || checkingFiles || vendorResolving || jobs.loading || vendorTaxConflict}
               >
                 {busy ? <LoaderCircle size={15} className="spin" /> : <Send size={15} />}
                 {saveLabel}
               </Button>
-              <Button
+              {!finalizedEdit && <Button
                 name="intent"
                 value="draft"
                 type="submit"
                 variant="secondary"
-                disabled={busy || vendorResolving || jobs.loading}
+                disabled={busy || checkingFiles || vendorResolving || jobs.loading}
               >
                 <Save size={15} />
                 {review
@@ -1235,11 +1307,11 @@ function BillForm({
                   : bill
                     ? "Save changes"
                     : "Save as draft"}
-              </Button>
+              </Button>}
               <Button
                 type="button"
                 variant="ghost"
-                disabled={busy}
+                disabled={busy || checkingFiles}
                 onClick={() =>
                   router.push(repeatJobEntry ? "/bills/manual" : bill ? `/bills/${bill.id}` : "/bills")
                 }

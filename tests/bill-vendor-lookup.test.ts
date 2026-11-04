@@ -254,6 +254,23 @@ describe("company-specific bill vendor search", () => {
     await expect(searchBillVendors(actor, { companyId: "company-b", vendorId: saved.id }, transport)).rejects.toMatchObject({ status: 404 });
   });
 
+  it("hydrates a mapped supplier's fresh authoritative VAT metadata in its exact destination", async () => {
+    const saved = local(); mapped(saved);
+    const { transport, fetcher } = connection({ code: 0, contact: contact({ tax_treatment: "vat_not_registered", tax_reg_no: "" }) });
+    const result = await searchBillVendors(actor, { companyId: "company-a", vendorId: saved.id }, transport);
+    expect(result.selectedVendor).toMatchObject({ id: saved.id, externalVendorId: "2001", ...destination,
+      booksVat: { status: "verified", taxTreatment: "vat_not_registered", hasTaxRegistrationNumber: false, warning: expect.stringContaining("original invoice") } });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(new URL(fetcher.mock.calls[0][0]).pathname).toBe("/books/v3/contacts/2001");
+  });
+
+  it("keeps mapped draft identity but marks supplier VAT unavailable when the exact provider identity cannot be verified", async () => {
+    const saved = local(); mapped(saved);
+    const result = await searchBillVendors(actor, { companyId: "company-a", vendorId: saved.id }, connection({ code: 0, contact: contact({ contact_id: "other" }) }).transport);
+    expect(result.selectedVendor).toMatchObject({ id: saved.id, booksVat: { status: "unavailable", taxTreatment: "unknown", checkedAt: null } });
+    expect(result.warning).toContain("draft");
+  });
+
   it("keeps no-destination companies on the scoped local database without requiring provider configuration", async () => {
     destinations = [];
     vi.stubEnv("ZOHO_BOOKS_ORGANIZATIONS_JSON", "invalid-private-config");
@@ -419,7 +436,8 @@ describe("resolving an existing Books supplier for bill entry", () => {
   it("reuses exact scoped mapping without changing saved names, email, TRN or IDs", async () => {
     const saved = local({ name: "Reviewed existing name", email: "saved@example.invalid", trn: "old-reviewed-trn" }); mapped(saved);
     const result = await resolveBillVendor(actor, selection, connection({ code: 0, contact: contact() }).transport);
-    expect(result).toEqual(localView(saved));
+    expect(result).toMatchObject({ ...localView(saved), externalVendorId: "2001", ...destination,
+      booksVat: { status: "verified", taxTreatment: "unknown", hasTaxRegistrationNumber: true } });
     expect(store.vendor.create).not.toHaveBeenCalled(); expect(audit).toHaveLength(0);
   });
 

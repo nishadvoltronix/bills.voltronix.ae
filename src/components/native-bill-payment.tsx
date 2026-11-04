@@ -3,16 +3,18 @@
 import Link from "next/link";
 import { useState } from "react";
 import Decimal from "decimal.js";
-import { ArrowLeft, LoaderCircle, RefreshCw, Wallet } from "lucide-react";
-import { useUser } from "./app-shell";
+import { ArrowLeft, LoaderCircle, Plus, RefreshCw, Wallet } from "lucide-react";
+import { useManualEntryOnly, useUser } from "./app-shell";
+import { savedBillState } from "@/lib/bill-save-outcome";
 import { api, billTotal, dateTime, errorMessage, money, useApi } from "./api";
 import type { Bill } from "./types";
 import { AmountRow } from "./records";
 import { isNativeBillPaid, NativePaidRibbon } from "./native-paid-ribbon";
+import { SavedBillOutcome } from "./saved-bill-outcome";
 import { Button, Card, ErrorState, Field, Input, LoadingPanel, Notice, PageHeader, StatusBadge, Table } from "./ui";
 import styles from "./native-bill-payment.module.css";
 
-export function NativeBillPayment({ id }: { id: string }) {
+export function NativeBillPayment({ id, fromEntry = false, saved = false }: { id: string; fromEntry?: boolean; saved?: boolean }) {
   const user = useUser();
   const allowed = user.role === "ADMIN" || user.role === "ACCOUNTS";
   const state = useApi<{ bill: Bill }>(allowed ? `/api/bills/${encodeURIComponent(id)}` : null, { keepPreviousData: true });
@@ -22,12 +24,14 @@ export function NativeBillPayment({ id }: { id: string }) {
   if (state.data.bill.id !== id) return state.refreshing ? <LoadingPanel />
     : <ErrorState message="The returned bill does not match this payment page. Refresh the bill." retry={state.reload} />;
   return <NativeBillPaymentRecord key={id} bill={state.data.bill} refreshing={state.refreshing}
-    refreshError={state.refreshError} refresh={state.reload} />;
+    refreshError={state.refreshError} refresh={state.reload} fromEntry={fromEntry} saved={saved} />;
 }
 
-export function NativeBillPaymentRecord({ bill, refreshing = false, refreshError, refresh }: {
+export function NativeBillPaymentRecord({ bill, refreshing = false, refreshError, refresh, fromEntry = false, saved = false }: {
   bill: Bill; refreshing?: boolean; refreshError?: string | null; refresh?: () => void;
+  fromEntry?: boolean; saved?: boolean;
 }) {
+  const manualEntryOnly = useManualEntryOnly();
   const [confirmed, setConfirmed] = useState<Bill | null>(null);
   const [amount, setAmount] = useState<string | null>(null);
   const [reference, setReference] = useState("");
@@ -40,6 +44,8 @@ export function NativeBillPaymentRecord({ bill, refreshing = false, refreshError
   // replace it while the refreshed bill is on its way back.
   const current = confirmed && confirmed.version >= bill.version ? confirmed : bill;
   const finalized = ["READY", "APPROVED"].includes(current.status);
+  const entryJob = fromEntry ? { id: current.jobId, companyId: current.companyId, jobNumber: current.job?.jobNumber ?? "this job" } : null;
+  const nextBillHref = entryJob ? `/bills/new?${new URLSearchParams({ jobId: entryJob.id })}` : null;
   let balance: string | null = null;
   try {
     const total = new Decimal(String(billTotal(current)));
@@ -55,7 +61,7 @@ export function NativeBillPaymentRecord({ bill, refreshing = false, refreshError
       const result = await api<{ bill: Bill }>(`/api/bills/${encodeURIComponent(current.id)}/actions`, {
         method: "POST", body: JSON.stringify({ action: "payment", version: current.version, amount: amount ?? balance, reference }),
       });
-      if (!result?.bill || result.bill.id !== current.id || result.bill.companyId !== current.companyId || result.bill.currency !== current.currency ||
+      if (!result?.bill || result.bill.id !== current.id || result.bill.companyId !== current.companyId || result.bill.jobId !== current.jobId || result.bill.currency !== current.currency ||
         !Number.isInteger(result.bill.version) || result.bill.version <= current.version) {
         setUnverifiedSource(bill);
         throw new Error("The payment result could not be verified. Refresh this bill before retrying.");
@@ -72,11 +78,27 @@ export function NativeBillPaymentRecord({ bill, refreshing = false, refreshError
       : <Link className="back-link" href={`/bills/${encodeURIComponent(current.id)}`}><ArrowLeft size={15} />Back to bill</Link>}
     <PageHeader eyebrow="BILL PAYMENTS" title="Record payment" description={`Invoice ${current.invoiceNumber}`}>
       <StatusBadge status={current.paymentStatus ?? "UNPAID"} />
+      {nextBillHref && (busy ? <Button disabled><Plus size={15} />Add another bill</Button>
+        : <Button asChild><Link href={nextBillHref}><Plus size={15} />Add another bill</Link></Button>)}
       {refresh && <Button variant="secondary" disabled={busy || refreshing} onClick={refresh}><RefreshCw size={15} />Refresh bill</Button>}
     </PageHeader>
     {error && <Notice tone="error">{error}</Notice>}
     {success && <Notice tone="success">{success}</Notice>}
     {refreshError && <Notice tone="error">{refreshError} Refresh the bill before recording another payment.</Notice>}
+    {saved && entryJob && <div role="group" aria-label="Saved bill confirmation">
+      <SavedBillOutcome key={current.id} receipt={{ id: current.id, invoiceNumber: current.invoiceNumber, isDraft: !finalized,
+        outcome: savedBillState(current, { id: current.id, companyId: current.companyId, jobId: current.jobId }) }}
+        job={entryJob} manualEntryOnly={manualEntryOnly} continuation="payment" navigationBusy={busy} />
+    </div>}
+    {entryJob && <nav className="button-row" aria-label="Bill entry navigation">
+      {busy ? <>
+        <Button type="button" variant="secondary" disabled>Back to job history</Button>
+        <Button type="button" variant="ghost" disabled>Change job</Button>
+      </> : <>
+        <Button asChild variant="secondary"><Link href={`/jobs/${encodeURIComponent(entryJob.id)}`}>Back to job history</Link></Button>
+        <Button asChild variant="ghost"><Link href="/bills/manual">Change job</Link></Button>
+      </>}
+    </nav>}
     <div className={styles.layout}>
       <div className={styles.main}>
         <Card className={styles.billCard}>
@@ -99,8 +121,8 @@ export function NativeBillPaymentRecord({ bill, refreshing = false, refreshError
             <p className="field-hint">This records a local payment. It does not transfer funds or update Zoho Books.</p>
             <div className={styles.actions}><Button type="submit" disabled={busy || refreshing || !!refreshError || verificationBlocked}>
               {busy ? <LoaderCircle size={16} className="spin" /> : <Wallet size={16} />}Confirm payment</Button>
-              {busy ? <Button type="button" variant="secondary" disabled>Cancel</Button>
-                : <Button asChild variant="secondary"><Link href={`/bills/${encodeURIComponent(current.id)}`}>Cancel</Link></Button>}</div>
+              {busy ? <Button type="button" variant="secondary" disabled>{nextBillHref ? "Skip payment" : "Cancel"}</Button>
+                : <Button asChild variant="secondary"><Link href={nextBillHref ?? `/bills/${encodeURIComponent(current.id)}`}>{nextBillHref ? "Skip payment" : "Cancel"}</Link></Button>}</div>
           </form> : <Notice tone={current.paymentStatus === "PAID" && finalized && balance === "0.00" ? "success" : "info"}>
             {!finalized ? "Payments can only be recorded against finalized bills."
               : balance === "0.00" ? "This bill has no outstanding amount."

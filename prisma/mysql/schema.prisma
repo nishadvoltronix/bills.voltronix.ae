@@ -325,6 +325,7 @@ enum IntegrationJobStatus {
 
 enum IntegrationOperation {
   CREATE_BILL
+  UPDATE_BILL
   ATTACH_DOCUMENT
   CREATE_EXPENSE
 }

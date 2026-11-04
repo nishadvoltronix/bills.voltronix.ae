@@ -106,6 +106,7 @@ export function authorizationUrl(config: ZohoConfig, state: string) {
       ? [
           "ZohoBooks.bills.CREATE",
           "ZohoBooks.bills.READ",
+          "ZohoBooks.bills.UPDATE",
           "ZohoBooks.contacts.READ",
           "ZohoBooks.contacts.CREATE",
           "ZohoBooks.contacts.UPDATE",

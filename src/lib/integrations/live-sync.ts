@@ -7,12 +7,17 @@ import { HttpError } from "@/lib/http";
 import { billScope } from "@/lib/permissions";
 import { readPrivateDocument } from "@/lib/services/documents";
 import { approvedSnapshot, sourceInclude, type BillSource } from "./source-snapshot";
-import { booksMappingFingerprint, buildBooksPayload, snapshotHash, snapshotSchema } from "./books";
+import { BooksAdapter, booksMappingFingerprint, buildBooksPayload, snapshotHash, snapshotSchema } from "./books";
+import { currentBooksMutation } from "./books-mutations";
+import { assertBooksUpdateBaseline, assertBooksUpdateMoney, booksRemoteMatchesPayload, buildBooksUpdatePayload } from "./books-update";
+import { accessToken } from "./oauth";
+import { ZohoTransport } from "./transport";
 import { assertNetwork, assertWrite, booksConfigurationHash, getBooksOrganizations, getConfig, IntegrationError, type ZohoConfig } from "./config";
 import type { ProductionWriteRequest } from "./transport";
 import { requireDestinationForCompany } from "./company-destination";
 import { assertLocalLiveTestJobPermission, isLocalLiveTestSnapshot } from "./local-live-test";
 import { isSupersededIntegrationJob } from "./source-supersession";
+import { prepareBooksAttachment } from "./books-attachment";
 
 type Store = Prisma.TransactionClient;
 export type LiveSyncConfirmation = { challengeId: string; challengeToken: string };
@@ -75,6 +80,7 @@ export async function savedSourceSnapshot(store: Store, bill: BillSource, config
   } } });
   if (!vendor) throw new IntegrationError("VENDOR_MAPPING_REQUIRED", "Map this supplier in the selected Books company before synchronization.", "BLOCKED");
   const snapshot = approvedSnapshot(bill, vendor.externalVendorId);
+  if (bill.documents.length > 1) snapshot.attachmentMode = "bundle";
   snapshot.initiatedById = actorId;
   snapshot.destination = { dataCenter: config.dataCenter, environment: config.environment, mappingHash: booksMappingFingerprint(config),
     configurationHash: booksConfigurationHash(config), authorizationReference: config.testAuthorization?.approvalReference };
@@ -89,17 +95,20 @@ async function assertAutonomousJobPermission(job: IntegrationJob, config: ZohoCo
     snapshot.destination?.environment !== config.environment || snapshot.destination?.dataCenter !== config.dataCenter ||
     snapshot.destination?.configurationHash !== booksConfigurationHash(config) || job.organizationId !== config.organizationId ||
     snapshotHash(snapshot) !== job.payloadHash) throw blocked("The saved operation no longer matches its source actor or destination configuration.");
-  const canonical = await db.integrationJob.findUnique({ where: { idempotencyKey: `ZOHO:${job.billId}:CREATE_BILL` } });
-  if (!canonical || canonical.target !== "ZOHO" || canonical.operation !== "CREATE_BILL" || canonical.organizationId !== job.organizationId ||
+  const canonical = await currentBooksMutation(db, job.billId);
+  if (!canonical || canonical.target !== "ZOHO" || canonical.operation !== (job.operation === "UPDATE_BILL" ? "UPDATE_BILL" : "CREATE_BILL") || canonical.organizationId !== job.organizationId ||
     canonical.initiatedById !== job.initiatedById || canonical.payloadHash !== job.payloadHash ||
-    (job.operation === "CREATE_BILL" ? job.id !== canonical.id : canonical.status !== "SUCCEEDED" || canonical.externalId !== job.externalId))
+    (["CREATE_BILL", "UPDATE_BILL"].includes(job.operation) ? job.id !== canonical.id : canonical.status !== "SUCCEEDED" || canonical.externalId !== job.externalId))
     throw blocked("The saved operation is not linked to its original canonical Books bill.");
+  if (job.operation === "UPDATE_BILL") await assertUpdatePredecessor(job, snapshot);
   const bill = await db.bill.findUnique({ where: { id: job.billId }, include: sourceInclude });
   if (!bill || bill.companyId !== snapshot.companyId) throw blocked("The saved source bill is unavailable or its company changed.");
   const current = await savedSourceSnapshot(db, bill, config, job.initiatedById);
   // Local payments increment the UI edit version but are never exported. Compare
   // every exported value and attachment against the original source version.
   current.sourceVersion = snapshot.sourceVersion;
+  current.attachmentMode = snapshot.attachmentMode;
+  current.revision = snapshot.revision;
   current.destination!.authorizationReference = snapshot.destination.authorizationReference;
   if (snapshotHash(current) !== job.payloadHash) throw blocked("The saved bill, supplier mapping or attachment list changed before synchronization.");
   if (verifyFiles) await verifyPrivateFiles(bill);
@@ -120,11 +129,12 @@ export async function assertJobReconciliationAccess(job: IntegrationJob, config:
     snapshot.internalBillId !== job.billId || snapshot.destination?.liveAuthorizationId ||
     snapshot.destination?.environment !== config.environment || snapshot.destination?.dataCenter !== config.dataCenter ||
     job.organizationId !== config.organizationId) throw blocked("The reconciliation request differs from the original Books source and destination.");
-  const canonical = await db.integrationJob.findUnique({ where: { idempotencyKey: `ZOHO:${job.billId}:CREATE_BILL` } });
-  if (!canonical || canonical.target !== "ZOHO" || canonical.operation !== "CREATE_BILL" || canonical.organizationId !== job.organizationId ||
+  const canonical = await currentBooksMutation(db, job.billId);
+  if (!canonical || canonical.target !== "ZOHO" || canonical.operation !== (job.operation === "UPDATE_BILL" ? "UPDATE_BILL" : "CREATE_BILL") || canonical.organizationId !== job.organizationId ||
     canonical.initiatedById !== job.initiatedById || canonical.payloadHash !== job.payloadHash ||
-    (job.operation === "CREATE_BILL" ? canonical.id !== job.id : canonical.status !== "SUCCEEDED" || canonical.externalId !== job.externalId))
+    (["CREATE_BILL", "UPDATE_BILL"].includes(job.operation) ? canonical.id !== job.id : canonical.status !== "SUCCEEDED" || canonical.externalId !== job.externalId))
     throw blocked("Reconciliation must use the original canonical Books operation.");
+  if (job.operation === "UPDATE_BILL") await assertUpdatePredecessor(job, snapshot);
   const bill = await db.bill.findUnique({ where: { id: job.billId }, include: sourceInclude });
   if (!bill || !["READY", "APPROVED"].includes(bill.status) || bill.companyId !== snapshot.companyId ||
     bill.vendor.companyId !== bill.companyId || bill.job.companyId !== bill.companyId)
@@ -138,6 +148,8 @@ export async function assertJobReconciliationAccess(job: IntegrationJob, config:
   current.sourceVersion = snapshot.sourceVersion;
   current.initiatedById = snapshot.initiatedById;
   current.destination = snapshot.destination;
+  current.attachmentMode = snapshot.attachmentMode;
+  current.revision = snapshot.revision;
   if (snapshotHash(current) !== job.payloadHash) throw blocked("The local exported source changed; review the original outcome before linking it.");
 }
 
@@ -249,7 +261,21 @@ export async function assertLiveJobPermission(job: IntegrationJob, config: ZohoC
   return { snapshot, expiresAt: permit.expiresAt };
 }
 
-/** Production transport invokes this again after token/organization work, immediately before its POST. */
+async function assertUpdatePredecessor(job: IntegrationJob, snapshot: ReturnType<typeof snapshotSchema.parse>) {
+  const revision = snapshot.revision;
+  const previous = revision ? await db.integrationJob.findUnique({ where: { id: revision.previousJobId } }) : null;
+  const original = previous ? snapshotSchema.safeParse(previous.snapshot) : null;
+  if (!revision || !previous || !original?.success || previous.billId !== job.billId || previous.target !== "ZOHO" ||
+    !["CREATE_BILL", "UPDATE_BILL"].includes(previous.operation) || previous.status !== "SUCCEEDED" || previous.needsReconciliation ||
+    previous.externalId !== job.externalId || revision.externalId !== job.externalId || previous.organizationId !== job.organizationId ||
+    previous.payloadHash !== revision.previousPayloadHash || snapshotHash(original.data) !== previous.payloadHash ||
+    previous.sourceVersion >= job.sourceVersion || original.data.companyId !== snapshot.companyId || original.data.currency !== snapshot.currency ||
+    original.data.jobId !== snapshot.jobId || original.data.destination?.dataCenter !== snapshot.destination?.dataCenter ||
+    original.data.destination?.environment !== snapshot.destination?.environment)
+    throw blocked("The exact confirmed predecessor and external Books bill identity could not be verified.");
+  return original.data;
+}
+/** Transport repeats authority checks after token/organization work, immediately before its write. */
 export async function assertLiveJobWrite(jobId: string, leaseToken: string, request: ProductionWriteRequest) {
   const job = await db.integrationJob.findUnique({ where: { id: jobId } });
   if (!job || !leaseToken || job.leaseToken !== leaseToken || job.status !== "PROCESSING" || !job.leaseUntil || job.leaseUntil.getTime() <= Date.now() || job.needsReconciliation)
@@ -257,20 +283,41 @@ export async function assertLiveJobWrite(jobId: string, leaseToken: string, requ
   const config = getConfig("ZOHO", process.env, job.organizationId);
   const { snapshot } = await assertLiveJobPermission(job, config);
   if (job.operation === "CREATE_BILL") {
-    if (request.path !== "/books/v3/bills" || request.form || JSON.stringify(request.body) !== JSON.stringify(buildBooksPayload(snapshot, config)))
+    if ((request.method ?? "POST") !== "POST" || request.path !== "/books/v3/bills" || request.form || JSON.stringify(request.body) !== JSON.stringify(buildBooksPayload(snapshot, config)))
       throw blocked("The outgoing bill differs from the saved Books operation.");
+  } else if (job.operation === "UPDATE_BILL") {
+    if (request.method !== "PUT" || !job.externalId || request.path !== `/books/v3/bills/${job.externalId}` || request.form ||
+      JSON.stringify(request.body) !== JSON.stringify(buildBooksUpdatePayload(snapshot, buildBooksPayload(snapshot, config))))
+      throw blocked("The outgoing update differs from the saved existing Books bill revision.");
+    const previous = await assertUpdatePredecessor(job, snapshot);
+    const paid = await db.bill.findUniqueOrThrow({ where: { id: job.billId }, select: { paidAmount: true } });
+    // The read uses no write capability. Repeat immediately before PUT, after
+    // OAuth/organization/metadata latency, so a changed provider bill is refused.
+    const adapter = new BooksAdapter(new ZohoTransport(config, () => accessToken(config)));
+    const remote = await adapter.readForUpdate(job.externalId);
+    assertBooksUpdateMoney(remote, snapshot, paid.paidAmount.toFixed(2));
+    assertBooksUpdateBaseline(remote, snapshot);
+    if (!booksRemoteMatchesPayload(remote, previous, buildBooksPayload(previous, config)))
+      throw blocked("The Books bill changed after this edit was saved. Reconcile and review its current version before updating.");
   } else if (job.operation === "ATTACH_DOCUMENT") {
     const document = snapshot.documents.find(document => document.id === job.documentId);
+    const derived = (snapshot.attachmentMode === "bundle" || snapshot.documents.length === 1) && job.documentId
+      ? await prepareBooksAttachment(snapshot, job.documentId) : null;
     const form = request.form;
     const value = form?.get("attachment");
-    if (!document || request.body || request.path !== `/books/v3/bills/${job.externalId}/attachment` || !form ||
-      [...form.keys()].length !== 1 || !(value instanceof File) || value.name !== document.fileName || value.type !== document.mimeType ||
-      hash(new Uint8Array(await value.arrayBuffer())) !== document.sha256)
+    if ((request.method ?? "POST") !== "POST" || !document || request.body || request.path !== `/books/v3/bills/${job.externalId}/attachment` || !form ||
+      [...form.keys()].length !== 1 || !(value instanceof File) || value.name !== (derived?.fileName ?? document.fileName) ||
+      value.type !== (derived?.mimeType ?? document.mimeType) ||
+      hash(new Uint8Array(await value.arrayBuffer())) !== (derived?.sha256 ?? document.sha256))
       throw blocked("The outgoing attachment differs from the saved source document.");
   } else throw blocked("This live operation is not supported.");
   // Files/token/provider checks can take time. Re-read current authority and the
   // original worker lease after all potentially slow byte hashing.
   const final = await assertLiveJobPermission(job, getConfig("ZOHO", process.env, job.organizationId), false);
+  if (job.operation === "UPDATE_BILL") {
+    const current = await db.bill.findUniqueOrThrow({ where: { id: job.billId }, select: { paidAmount: true } });
+    if (Number(current.paidAmount.toString()) > Number(snapshot.total)) throw blocked("The edited total is below the current recorded payments.");
+  }
   const held = await db.integrationJob.findUnique({ where: { id: jobId }, select: { status: true, leaseToken: true, leaseUntil: true, needsReconciliation: true } });
   if (!held || held.status !== "PROCESSING" || held.leaseToken !== leaseToken || !held.leaseUntil ||
     held.leaseUntil.getTime() <= Date.now() || held.needsReconciliation || (final.expiresAt && final.expiresAt.getTime() <= Date.now()))

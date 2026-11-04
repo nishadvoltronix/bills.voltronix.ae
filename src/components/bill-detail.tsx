@@ -243,7 +243,7 @@ export function BillDetail({
     );
   const accounts = user.role === "ADMIN" || user.role === "ACCOUNTS";
   const editable =
-    ["DRAFT", "REJECTED"].includes(bill.status) && canWrite;
+    (bill.editEligibility?.allowed ?? ["DRAFT", "REJECTED"].includes(bill.status)) && canWrite;
   const canFinalize = canWrite && ["DRAFT", "REJECTED", "PENDING_APPROVAL"].includes(bill.status);
   const financialReady = ["READY", "APPROVED"].includes(bill.status);
   const remaining = new Decimal(String(billTotal(bill)))
@@ -511,6 +511,8 @@ export function BillDetail({
         <aside className="detail-aside">
           <Card className="summary-card">
             <h2>Financial summary</h2>
+            {canWrite && bill.editEligibility?.allowed === false && bill.editEligibility.reason &&
+              <p className="muted small">{bill.editEligibility.reason}</p>}
             <AmountRow
               label="Subtotal"
               value={bill.subtotal ?? bill.subTotal}
@@ -645,10 +647,12 @@ export function BillDetail({
               <p>Books bill ID: <strong>{booksRecord.externalId}</strong></p>
             )}
             {booksJobs.filter((job) => job.status !== "SUCCEEDED").map((job) => {
+              const label = job.operation === "UPDATE_BILL" ? "Bill update" : job.operation === "CREATE_BILL" ? "Bill posting" : "Original attachment";
+              const recoveryLabel = job.operation === "UPDATE_BILL" ? "Bill update" : job.operation === "CREATE_BILL" ? "Bill" : "Attachment";
               if (job.isSuperseded) {
                 return (
                   <div key={job.id} role="group" aria-label="Synchronization before correction">
-                    <strong>{job.operation === "CREATE_BILL" ? "Bill posting" : "Original attachment"}</strong>{" "}
+                    <strong>{label}</strong>{" "}
                     <Badge>Superseded</Badge>
                     <p>This operation used the bill before correction. It is retained as history and cannot be retried.</p>
                   </div>
@@ -657,15 +661,15 @@ export function BillDetail({
               const uncertain = job.needsReconciliation || job.status === "UNKNOWN";
               const waiting = ["QUEUED", "RETRY", "PROCESSING"].includes(job.status);
               return (
-                <div key={job.id} role="group" aria-label={`${job.operation === "CREATE_BILL" ? "Bill" : "Attachment"} synchronization recovery`}>
-                  <strong>{job.operation === "CREATE_BILL" ? "Bill posting" : "Original attachment"}</strong>{" "}
+                <div key={job.id} role="group" aria-label={`${recoveryLabel} synchronization recovery`}>
+                  <strong>{label}</strong>{" "}
                   <StatusBadge status={job.status} />
                   {job.lastError && <p className="text-danger">{job.lastError}</p>}
                   {job.status === "RETRY" && <p>Automatic retry scheduled for {dateTime(job.nextAttemptAt)} Dubai.</p>}
                   {accounts && canWrite && !waiting && (
                     <Button variant="secondary" disabled={busy || (!uncertain && !selectedConnection?.writeEnabled)}
                       onClick={() => recoverSync(job, uncertain ? "reconcile" : "retry")}>
-                      {uncertain ? "Reconcile Zoho Books outcome" : job.operation === "CREATE_BILL" ? "Retry Zoho Books sync" : "Retry original attachment"}
+                      {uncertain ? "Reconcile Zoho Books outcome" : job.operation === "UPDATE_BILL" ? "Retry Zoho Books update" : job.operation === "CREATE_BILL" ? "Retry Zoho Books sync" : "Retry original attachment"}
                     </Button>
                   )}
                   {!accounts && !waiting && <p>Ask an administrator or Accounts user to {uncertain ? "reconcile the existing Books outcome" : "retry this operation"}.</p>}

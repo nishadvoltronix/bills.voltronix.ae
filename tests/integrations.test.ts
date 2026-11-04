@@ -763,6 +763,7 @@ describe("OAuth and verified CRM mapping", () => {
     expect(url.searchParams.get("scope")?.split(",")).toEqual([
       "ZohoBooks.bills.CREATE",
       "ZohoBooks.bills.READ",
+      "ZohoBooks.bills.UPDATE",
       "ZohoBooks.contacts.READ",
       "ZohoBooks.contacts.CREATE",
       "ZohoBooks.contacts.UPDATE",

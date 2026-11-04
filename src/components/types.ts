@@ -1,5 +1,6 @@
 import type { PaymentTerm } from "@/lib/payment-terms";
 import type { BooksSelection } from "@/lib/books-selection";
+import type { BooksVendorVatMetadata } from "@/lib/integrations/books-vendor-tax";
 
 export type Role = "ADMIN" | "ACCOUNTS" | "DATA_ENTRY" | "MANAGEMENT";
 export type User = { id: string; name: string; email: string; role: Role };
@@ -38,6 +39,7 @@ export type Vendor = {
   email?: string | null;
   trn?: string | null;
   currency: string;
+  booksVat?: BooksVendorVatMetadata;
 };
 export type VendorSuggestion = Omit<Vendor, "id"> & {
   id: string | null;
@@ -148,6 +150,8 @@ export type Document = {
   originalName?: string;
   filename?: string;
   createdAt?: string;
+  byteSize?: number;
+  mimeType?: string;
 };
 export type Payment = {
   id: string;
@@ -182,6 +186,12 @@ export type Bill = {
   notes?: string | null;
   description?: string | null;
   version: number;
+  editEligibility?: {
+    allowed: boolean;
+    reason: string | null;
+    mode: "draft" | "create_revision" | "provider_update" | null;
+  };
+  syncOperation?: "CREATE_BILL" | "UPDATE_BILL";
   createdAt: string;
   vendor?: Vendor;
   job?: Job;
@@ -196,7 +206,7 @@ export type Bill = {
   integrationJobs?: {
     id: string;
     organizationId: string;
-    operation: "CREATE_BILL" | "ATTACH_DOCUMENT";
+    operation: "CREATE_BILL" | "UPDATE_BILL" | "ATTACH_DOCUMENT";
     status: string;
     needsReconciliation: boolean;
     isSuperseded?: boolean;

@@ -11,6 +11,10 @@ const store = vi.hoisted(() => ({
   integrationJob: { findMany: vi.fn() },
 }));
 vi.mock("@/lib/db", () => ({ db: store }));
+const edits = vi.hoisted(() => ({ eligibility: vi.fn() }));
+vi.mock("@/lib/services/bill-edit", async (original) => ({
+  ...await original<typeof import("@/lib/services/bill-edit")>(), billEditEligibility: edits.eligibility,
+}));
 
 const actor: Actor = { id: "fictional-author", email: "author@example.invalid", name: "Fictional Author", role: "ACCOUNTS" };
 const amount = (value: string) => new Prisma.Decimal(value);
@@ -24,6 +28,7 @@ const operation = {
 
 beforeEach(() => {
   vi.resetAllMocks();
+  edits.eligibility.mockResolvedValue({ allowed: false, reason: "Reconcile the existing Books outcome before editing.", mode: null });
   store.user.findUnique.mockResolvedValue({ active: true, role: actor.role });
   store.bill.findUnique.mockResolvedValue({
     id: "fictional-bill", companyId: "fictional-company", createdById: actor.id, status: "READY",
@@ -51,6 +56,7 @@ describe("bill synchronization recovery visibility", () => {
     expect(store.integrationJob.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: { billId: "fictional-bill", target: "ZOHO" },
     }));
+    expect(edits.eligibility).toHaveBeenCalledWith(actor, "fictional-bill");
   });
 
   it.each(["key", "marker"] as const)("exposes a safe superseded flag from the internal %s without routing metadata", async (source) => {
@@ -80,6 +86,7 @@ describe("bill synchronization recovery visibility", () => {
     store.userCompanyMembership.findMany.mockResolvedValue([]);
     await expect(getBill(actor, "fictional-bill")).rejects.toMatchObject({ status: 404 });
     expect(store.integrationJob.findMany).not.toHaveBeenCalled();
+    expect(edits.eligibility).not.toHaveBeenCalled();
   });
 
   it.each(["ACCOUNTS", "DATA_ENTRY", "MANAGEMENT"] as const)("does not expose another creator's synchronization details to %s", async role => {
@@ -101,5 +108,14 @@ describe("bill synchronization recovery visibility", () => {
       return [];
     });
     await expect(getBill(actor, "fictional-bill")).rejects.toMatchObject({ status: 404 });
+  });
+  it.each(["membership", "role"] as const)("rechecks %s after the additional edit-eligibility read", async change => {
+    edits.eligibility.mockImplementationOnce(async () => {
+      if (change === "membership") store.userCompanyMembership.findMany.mockResolvedValue([]);
+      else store.user.findUnique.mockResolvedValue({ active: true, role: "MANAGEMENT" });
+      return { allowed: false, reason: "Fictional edit is unavailable.", mode: null };
+    });
+    await expect(getBill(actor, "fictional-bill")).rejects.toMatchObject({ status: change === "membership" ? 404 : 403 });
+    expect(edits.eligibility).toHaveBeenCalledOnce();
   });
 });

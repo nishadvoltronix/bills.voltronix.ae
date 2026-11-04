@@ -109,7 +109,7 @@ describe("Books supplier VAT compatibility", () => {
       const remote = fixture(source, { taxTreatment: "vat_not_registered" });
       await expect(remote.adapter.create(source)).rejects.toMatchObject({
         code: "VENDOR_VAT_TREATMENT_MISMATCH", kind: "BLOCKED",
-        message: expect.stringMatching(/saved locally.*administrator.*original invoice.*Do not remove valid invoice VAT/),
+        message: expect.stringMatching(/original invoice.*Keep valid invoice VAT.*administrator.*Choose No VAT only/),
       });
       expect(remote.posts()).toHaveLength(0);
       expect(remote.contactReads()).toHaveLength(1);

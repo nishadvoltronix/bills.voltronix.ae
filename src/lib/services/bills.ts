@@ -7,11 +7,15 @@ import type { Actor } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { assertBooksLineTaxMode, booksLineTaxMode, booksSelectionDestination, booksSelectionFields, type BooksSelection } from "@/lib/books-selection";
 import { booksConfigurationHash, booksLineSelectionRequired, getConfig } from "@/lib/integrations/config";
-import { assertBooksLineSelections } from "@/lib/integrations/books";
+import { assertBooksLineSelections, snapshotHash } from "@/lib/integrations/books";
+import { approvedSnapshot, sourceInclude } from "@/lib/integrations/source-snapshot";
+import { savedSourceSnapshot } from "@/lib/integrations/live-sync";
 import { connectionFingerprint } from "@/lib/integrations/connection-fingerprint";
 import { LEGACY_UNSCOPED_ORGANIZATION } from "@/lib/integrations/oauth";
-import { isSupersededIntegrationJob } from "@/lib/integrations/source-supersession";
+import { correctionStateHash, isSupersededIntegrationJob, sourceSupersessionQueueProof, SOURCE_SUPERSEDED, supersededSourceKey } from "@/lib/integrations/source-supersession";
+import { assertFinalizedBillEdit, billEditEligibility, finalizedBillForEdit, prepareFinalizedBillEdit } from "./bill-edit";
 import { verifyBillBooksSelections } from "@/lib/services/bill-books-options";
+import { assertBillVendorVatVerification, prepareBillVendorVatVerification, type BillVendorVatVerification } from "./bill-vendor-vat";
 import {
   companyFilter,
   requireCompanyAccess,
@@ -29,6 +33,7 @@ import {
   assertBillCancellationSyncSafe,
   enqueueApprovedBillTx,
   enqueueReadyBillTx,
+  enqueueBillUpdateTx,
 } from "@/lib/integrations/queue";
 import {
   billScope,
@@ -265,8 +270,11 @@ export async function createBill(actor: Actor, payload: unknown) {
   const input = billInputSchema.parse(payload);
   const companyId = await resolveCompanyForCreate(actor, input.companyId);
   const verified = await prepareBillBooksSelections(actor, companyId, input.lines, input.version);
+  const vendorVat = input.submit ? await prepareBillVendorVatVerification(actor, companyId, {
+    vendorId: input.vendorId, currency: input.currency, vatRate: input.vatRate, lines: input.lines,
+  }) : undefined;
   const bill = await db.$transaction(
-    (tx) => createBillInTransaction(tx, actor, input, verified),
+    (tx) => createBillInTransaction(tx, actor, input, verified, vendorVat),
     {
       isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
       timeout: 20_000,
@@ -281,6 +289,7 @@ export async function createBillInTransaction(
   actor: Actor,
   payload: unknown,
   verification?: BillBooksVerification,
+  vendorVat?: BillVendorVatVerification,
 ) {
   assertWriter(actor);
   const input = billInputSchema.parse(payload);
@@ -345,7 +354,7 @@ export async function createBillInTransaction(
     },
   });
   return input.submit
-    ? finalizeBillInTransaction(tx, actor, saved.id, saved.version)
+    ? finalizeBillInTransaction(tx, actor, saved.id, saved.version, vendorVat)
     : saved;
 }
 
@@ -355,6 +364,8 @@ export async function finalizeBillInTransaction(
   actor: Actor,
   id: string,
   version: number,
+  vendorVat?: BillVendorVatVerification,
+  vatIdentity?: { billId: string; version: number },
 ) {
   assertWriter(actor);
   const bill = await tx.bill.findUnique({
@@ -409,6 +420,9 @@ export async function finalizeBillInTransaction(
       catch (error) { throw new HttpError(422, error instanceof Error ? error.message : "Select an account and tax for every Books line."); }
     }
   }
+  await assertBillVendorVatVerification(tx, actor, bill.companyId, {
+    vendorId: bill.vendorId, currency: bill.currency, vatRate: bill.vatRate, lines: bill.lines, ...vatIdentity,
+  }, vendorVat);
   const totals = calculateBill(
     bill.lines.map((line) => ({
       description: line.description,
@@ -501,8 +515,13 @@ export async function getBill(actor: Actor, id: string) {
     },
   });
   await assertBillAccess(actor, bill);
+  const editEligibility = await billEditEligibility(actor, id);
+  await assertBillAccess(actor, bill);
   return {
     ...serializeBill(bill),
+    editEligibility,
+    ...(integrationJobs.filter(job => !isSupersededIntegrationJob(job) && ["CREATE_BILL", "UPDATE_BILL"].includes(job.operation)).at(-1)?.operation === "UPDATE_BILL"
+      ? { syncOperation: "UPDATE_BILL" as const } : {}),
     auditLogs,
     integrationJobs: integrationJobs.map((job) => {
       const { billId, target, idempotencyKey, errorCode, ...recovery } = job;
@@ -519,6 +538,89 @@ export async function getBill(actor: Actor, id: string) {
       };
     }),
   };
+}
+
+async function updateFinalizedBill(actor: Actor, id: string, input: BillInput, version: number) {
+  const original = await finalizedBillForEdit(actor, id);
+  if (input.companyId && input.companyId !== original.companyId || input.jobId !== original.jobId || input.currency !== original.currency)
+    throw new HttpError(422, "A finalized bill's company, job and currency cannot be changed. Its creator, originals and payments are preserved.");
+  if (original.lines.some(line => line.booksSelection) && input.lines.some(line => line.booksSelection === undefined))
+    throw new HttpError(422, "Include each saved line's Books selection, or explicitly clear all selections.");
+  const verification = await prepareBillBooksSelections(actor, original.companyId, input.lines, version);
+  input.lines = await verifiedLines(db, actor, original.companyId, input.lines, version, verification);
+  const totals = validatedTotals(input);
+  await validateReferences(db, input.vendorId, input.jobId, input.currency, original.companyId);
+  const vendorVat = await prepareBillVendorVatVerification(actor, original.companyId, {
+    vendorId: input.vendorId, currency: input.currency, vatRate: input.vatRate, lines: input.lines, billId: id, version,
+  });
+  const destination = await db.companyIntegrationDestination.findMany({ where: { companyId: original.companyId, target: "ZOHO" } });
+  const mapping = destination.length === 1 ? await db.vendorBooksMapping.findUnique({ where: { vendorId_organizationId_dataCenter_environment: {
+    vendorId: input.vendorId, organizationId: destination[0].organizationId, dataCenter: destination[0].dataCenter, environment: destination[0].environment,
+  } } }) : null;
+  const desired = approvedSnapshot(original, mapping?.externalVendorId ?? null);
+  Object.assign(desired, { sourceVersion: version + 1, vendorId: input.vendorId, invoiceNumber: input.invoiceNumber,
+    invoiceDate: input.invoiceDate, dueDate: input.dueDate || null, orderNumber: input.orderNumber || null, paymentTerms: input.paymentTerms,
+    category: input.category, discount: totals.discount, vatRate: totals.vatRate, subtotal: totals.subtotal, vatAmount: totals.vatAmount, total: totals.total,
+    lines: totals.lines.map(line => ({ description: line.description, quantity: new Decimal(line.quantity).toString(), unitPrice: line.unitPrice, ...booksSelectionFields(line.booksSelection) })) });
+  const proof = await prepareFinalizedBillEdit(actor, id, version, desired);
+  const result = await db.$transaction(async tx => {
+    const context = await assertFinalizedBillEdit(tx, actor, proof, desired);
+    const bill = context.bill;
+    await assertBillAccess(actor, bill, tx);
+    await validateReferences(tx, input.vendorId, bill.jobId, bill.currency, bill.companyId);
+    input.lines = await verifiedLines(tx, actor, bill.companyId, input.lines, version, verification);
+    await assertBillVendorVatVerification(tx, actor, bill.companyId, {
+      vendorId: input.vendorId, currency: input.currency, vatRate: input.vatRate, lines: input.lines, billId: id, version,
+    }, vendorVat);
+    if (new Decimal(totals.total).lessThan(bill.paidAmount.toString())) throw new HttpError(422, "The edited total cannot be less than recorded payments.");
+    const collision = await tx.bill.findFirst({ where: { companyId: bill.companyId, vendorId: input.vendorId,
+      normalizedInvoiceNumber: normalizeInvoiceNumber(input.invoiceNumber), id: { not: id } }, select: { id: true } });
+    if (collision) throw new HttpError(409, "This supplier already has a bill with that invoice number in this company.");
+    const changed = await tx.bill.updateMany({ where: { id, version }, data: {
+      vendorId: input.vendorId, invoiceNumber: input.invoiceNumber, normalizedInvoiceNumber: normalizeInvoiceNumber(input.invoiceNumber),
+      orderNumber: input.orderNumber || null, paymentTerms: input.paymentTerms, invoiceDate: new Date(`${input.invoiceDate}T00:00:00Z`),
+      dueDate: input.dueDate ? new Date(`${input.dueDate}T00:00:00Z`) : null, category: input.category,
+      description: input.description === undefined ? bill.description : input.description || null, notes: input.notes || null,
+      subtotal: totals.subtotal, discount: totals.discount, vatRate: totals.vatRate, vatAmount: totals.vatAmount,
+      usesBooksLineTaxes: booksLineTaxMode(totals.lines), total: totals.total, version: { increment: 1 },
+    } });
+    if (changed.count !== 1) throw new HttpError(409, "The bill or its payments changed. Refresh before saving this edit.");
+    await tx.billLine.deleteMany({ where: { billId: id } });
+    await tx.billLine.createMany({ data: totals.lines.map(line => ({ ...line, billId: id })) });
+    const writtenSource = await tx.bill.findUniqueOrThrow({ where: { id }, include: sourceInclude });
+    if (correctionStateHash(approvedSnapshot(writtenSource, desired.externalVendorId)) !== correctionStateHash(desired))
+      throw new HttpError(409, "The saved exported fields differ from the reviewed edit. The previous bill was preserved.");
+    const updated = await tx.bill.findUniqueOrThrow({ where: { id }, include: billInclude });
+    const active = context.mutation;
+    // Immutable snapshots and complete attempt rows remain on the archived job.
+    if (active && (context.mode === "create_revision" || active.operation === "UPDATE_BILL" && active.status !== "SUCCEEDED")) {
+      await tx.integrationJob.update({ where: { id: active.id }, data: { status: "CANCELLED", errorCode: SOURCE_SUPERSEDED,
+        idempotencyKey: supersededSourceKey(active.target, id, active.id), lastError: "Superseded by an audited saved bill edit.", completedAt: new Date() } });
+    }
+    const audit = await tx.auditLog.create({ data: { actorId: actor.id, companyId: bill.companyId,
+      action: context.mode === "create_revision" && active ? "BILL_SOURCE_CORRECTION_PREPARED" : "BILL_FINALIZED_EDITED",
+      entityType: "Bill", entityId: id, details: { before: financeSnapshot(bill), after: financeSnapshot(updated),
+        originalJobId: active?.id ?? null, originalIdempotencyKey: active?.idempotencyKey ?? null, originalPayloadHash: active?.payloadHash ?? null,
+        newSourceVersion: updated.version, paymentSourceHash: correctionStateHash(bill.payments), documentSourceHash: correctionStateHash(bill.documents),
+        ...(context.mode === "create_revision" && active && context.config ? {
+          expectedPayloadHash: snapshotHash(await savedSourceSnapshot(tx, await tx.bill.findUniqueOrThrow({ where: { id }, include: sourceInclude }), context.config, actor.id)),
+        } : {}), mode: context.mode } } });
+    if (context.mode === "provider_update") {
+      if (!context.revision) throw new HttpError(409, "The reviewed existing Books revision is missing.");
+      await enqueueBillUpdateTx(tx, id, actor.id, context.revision);
+    } else {
+      const savedSource = context.config ? await savedSourceSnapshot(tx, await tx.bill.findUniqueOrThrow({ where: { id }, include: sourceInclude }), context.config, actor.id) : null;
+      const capability = active && context.config && savedSource ? sourceSupersessionQueueProof({ tx, actorId: actor.id,
+        companyId: bill.companyId, billId: id, sourceVersion: updated.version, organizationId: context.config.organizationId,
+        originalJobId: active.id, originalPayloadHash: active.payloadHash, originalSnapshotHash: correctionStateHash(active.snapshot),
+        expectedPayloadHash: snapshotHash(savedSource), syncRecordHash: correctionStateHash(context.sync), auditId: audit.id }) : undefined;
+      const queued = await enqueueReadyBillTx(tx, id, actor.id, context.config?.organizationId, capability);
+      if (active && !queued) throw new HttpError(409, "The corrected source could not be safely queued. The original saved bill was preserved.");
+    }
+    const saved = await tx.bill.findUniqueOrThrow({ where: { id }, include: billInclude });
+    return { ...serializeBill(saved), ...(context.mode === "provider_update" ? { syncOperation: "UPDATE_BILL" as const } : {}) };
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 20_000 });
+  return result;
 }
 
 export async function updateBill(actor: Actor, id: string, payload: unknown) {
@@ -538,14 +640,18 @@ export async function updateBill(actor: Actor, id: string, payload: unknown) {
   const beforeVerification = await db.bill.findUnique({ where: { id }, include: { lines: true } });
   if (!beforeVerification) throw new HttpError(404, "Bill not found.");
   await assertBillAccess(actor, beforeVerification);
-  if (!canEditBill(actor, beforeVerification)) throw new HttpError(403, "Only draft and rejected bills can be edited.");
   if (beforeVerification.version !== version) throw new HttpError(409, "The bill has changed. Refresh before editing.");
   const preflight = billInputSchema.parse(rawInput);
+  if (["READY", "APPROVED"].includes(beforeVerification.status)) return updateFinalizedBill(actor, id, preflight, version);
+  if (!canEditBill(actor, beforeVerification)) throw new HttpError(403, "This bill cannot be edited in its current state.");
   if (preflight.companyId && preflight.companyId !== beforeVerification.companyId)
     throw new HttpError(422, "A saved bill cannot be moved to another company.");
   if (beforeVerification.lines.some((line) => line.booksSelection) && preflight.lines.some((line) => line.booksSelection === undefined))
     throw new HttpError(422, "Include each saved line's Books selection, or explicitly clear all selections. Existing selections were preserved.");
   const verification = await prepareBillBooksSelections(actor, beforeVerification.companyId, preflight.lines, version);
+  const vendorVat = preflight.submit ? await prepareBillVendorVatVerification(actor, beforeVerification.companyId, {
+    vendorId: preflight.vendorId, currency: preflight.currency, vatRate: preflight.vatRate, lines: preflight.lines,
+  }) : undefined;
   const updated = await db.$transaction(
     async (tx) => {
       const bill = await tx.bill.findUnique({
@@ -663,7 +769,7 @@ export async function updateBill(actor: Actor, id: string, payload: unknown) {
         },
       });
       return input.submit
-        ? finalizeBillInTransaction(tx, actor, id, result.version)
+        ? finalizeBillInTransaction(tx, actor, id, result.version, vendorVat)
         : result;
     },
     {
@@ -677,6 +783,17 @@ export async function updateBill(actor: Actor, id: string, payload: unknown) {
 export async function actOnBill(actor: Actor, id: string, payload: unknown) {
   assertWriter(actor);
   const input = billActionSchema.parse(payload);
+  let vendorVat: BillVendorVatVerification | undefined;
+  if (input.action === "submit") {
+    const source = await db.bill.findUnique({ where: { id }, include: { lines: true } });
+    if (!source) throw new HttpError(404, "Bill not found.");
+    await assertBillAccess(actor, source);
+    if (source.version !== input.version) throw new HttpError(409, "The bill has changed. Refresh before taking action.");
+    if (!["DRAFT", "REJECTED", "PENDING_APPROVAL"].includes(source.status)) throw new HttpError(409, "Only an unfinished bill can be saved for synchronization.");
+    vendorVat = await prepareBillVendorVatVerification(actor, source.companyId, {
+      vendorId: source.vendorId, currency: source.currency, vatRate: source.vatRate, lines: source.lines, billId: id, version: source.version,
+    });
+  }
   const updated = await db.$transaction(
     async (tx) => {
       const bill = await tx.bill.findUnique({
@@ -691,7 +808,7 @@ export async function actOnBill(actor: Actor, id: string, payload: unknown) {
           "The bill has changed. Refresh before taking action.",
         );
       if (input.action === "submit")
-        return finalizeBillInTransaction(tx, actor, id, input.version);
+        return finalizeBillInTransaction(tx, actor, id, input.version, vendorVat, { billId: id, version: input.version });
       const data: Prisma.BillUncheckedUpdateManyInput = {
         version: { increment: 1 },
       };

@@ -28,10 +28,11 @@ import {
   buildBooksPayload,
   snapshotHash,
 } from "@/lib/integrations/books";
+import { buildBooksUpdatePayload, type BooksUpdateRemote } from "@/lib/integrations/books-update";
 
 const store = vi.hoisted(() => ({
-  bill: { findUnique: vi.fn() },
-  integrationJob: { findUnique: vi.fn() },
+  bill: { findUnique: vi.fn(), findUniqueOrThrow: vi.fn() },
+  integrationJob: { findUnique: vi.fn(), findMany: vi.fn() },
   liveSyncAuthorization: { findUnique: vi.fn() },
   user: { findFirst: vi.fn() },
   companyIntegrationDestination: { findFirst: vi.fn() },
@@ -41,6 +42,10 @@ const privateRead = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/db", () => ({ db: store }));
 vi.mock("@/lib/services/documents", () => ({
   readPrivateDocument: privateRead,
+}));
+vi.mock("@/lib/integrations/oauth", async importOriginal => ({
+  ...await importOriginal<typeof import("@/lib/integrations/oauth")>(),
+  accessToken: vi.fn(async () => "FICTIONAL-GUARD-ACCESS-TOKEN"),
 }));
 
 const now = new Date("2026-10-28T12:00:00.000Z");
@@ -343,11 +348,13 @@ describe("production POST requires the selected operation permission at transpor
     expect(guard).toHaveBeenCalledTimes(2);
     expect(guard).toHaveBeenNthCalledWith(1, {
       path: "/books/v3/bills",
+      method: "POST",
       body,
       form: undefined,
     });
     expect(guard).toHaveBeenNthCalledWith(2, {
       path: "/books/v3/bills",
+      method: "POST",
       body,
       form: undefined,
     });
@@ -887,6 +894,7 @@ function autonomousOperation() {
   job.payloadHash = snapshotHash(snapshot);
   store.integrationJob.findUnique.mockImplementation(async ({ where }) =>
     where.id === job.id || where.idempotencyKey === job.idempotencyKey ? job : null);
+  store.integrationJob.findMany.mockResolvedValue([job]);
   store.user.findFirst.mockResolvedValue({ id: bill.createdById });
   store.liveSyncAuthorization.findUnique.mockClear();
   return { ...fixture, snapshot, operation: { path: "/books/v3/bills", body: buildBooksPayload(snapshot, config) } };
@@ -939,5 +947,93 @@ describe("final-save autonomous source guard without per-bill approval", () => {
     store.companyIntegrationDestination.findFirst.mockResolvedValue(null);
     await expect(assertLiveJobWrite(job.id, job.leaseToken!, operation)).rejects.toMatchObject({ kind: "BLOCKED" });
     expect(store.liveSyncAuthorization.findUnique).not.toHaveBeenCalled();
+  });
+});
+
+function updateOperation() {
+  const source = autonomousOperation();
+  const { bill, config } = source;
+  const previous = { ...source.job, status: "SUCCEEDED", externalId: "999", leaseToken: null, leaseUntil: null } as IntegrationJob;
+  const previousSnapshot = source.snapshot;
+  bill.version += 1;
+  bill.paidAmount = new Prisma.Decimal(25);
+  bill.lines[0].description = "Corrected approved material";
+  bill.lines[0].unitPrice = new Prisma.Decimal(120);
+  bill.lines[0].lineTotal = new Prisma.Decimal(120);
+  bill.subtotal = new Prisma.Decimal(120); bill.vatAmount = new Prisma.Decimal(6); bill.total = new Prisma.Decimal(126);
+  const snapshot = approvedSnapshot(bill, "104");
+  snapshot.initiatedById = bill.createdById; snapshot.destination = previousSnapshot.destination;
+  snapshot.revision = { kind: "UPDATE_BILL", previousJobId: previous.id, previousPayloadHash: previous.payloadHash, externalId: "999",
+    paymentSourceHash: "c".repeat(64), documentSourceHash: "d".repeat(64), remoteLineIds: ["701"],
+    remoteDocuments: [{ document_id: "801", file_name: "preserved-provider-original.pdf" }],
+    remoteLastModified: "2026-10-28T12:00:00Z", preservedRemoteNotes: buildBooksPayload(previousSnapshot, config).notes };
+  const job = { ...source.job, id: "selected-update", operation: "UPDATE_BILL", externalId: "999", sourceVersion: bill.version,
+    idempotencyKey: `ZOHO:${bill.id}:UPDATE_BILL:${bill.version}`, snapshot, payloadHash: snapshotHash(snapshot) } as unknown as IntegrationJob;
+  let remote: BooksUpdateRemote = { bill_id: "999", vendor_id: "104", bill_number: previousSnapshot.invoiceNumber,
+    reference_number: `VX-BILL-${bill.id}`, currency_code: "AED", total: "105.00", tax_total: "5.00", date: "2026-10-28",
+    due_date: "2026-11-27", payment_terms: 30, payment_made: "25.00", vendor_credits_applied: "0.00", balance: "80.00",
+    status: "partially_paid", last_modified_time: snapshot.revision.remoteLastModified, notes: snapshot.revision.preservedRemoteNotes,
+    documents: structuredClone(snapshot.revision.remoteDocuments), line_items: [{ line_item_id: "701", account_id: "103", tax_id: "102",
+      description: "Fictional approved material", quantity: "1", rate: "100.00", is_billable: false }] };
+  store.bill.findUniqueOrThrow.mockImplementation(async () => bill);
+  store.integrationJob.findUnique.mockImplementation(async ({ where }) => where.id === job.id ? job :
+    where.id === previous.id || where.idempotencyKey === previous.idempotencyKey ? previous : null);
+  store.integrationJob.findMany.mockResolvedValue([job, previous]);
+  const network = vi.fn<Fetch>(async (url, init) => {
+    expect(init?.method ?? "GET").toBe("GET");
+    const path = new URL(url).pathname;
+    if (path === "/books/v3/organizations/100") return response({ code: 0, organization });
+    expect(path).toBe("/books/v3/bills/999");
+    return response({ code: 0, bill: remote });
+  });
+  vi.stubGlobal("fetch", network);
+  const operation = { method: "PUT" as const, path: "/books/v3/bills/999", body: buildBooksUpdatePayload(snapshot, buildBooksPayload(snapshot, config)) };
+  return { bill, job, previous, snapshot, operation, network, remote,
+    changeRemote: (patch: Partial<BooksUpdateRemote>) => { remote = { ...remote, ...patch }; } };
+}
+
+describe("saved existing-bill UPDATE final authority guard", () => {
+  it("permits only the latest exact-ID update after a fresh GET baseline and preserves its predecessor", async () => {
+    const h = updateOperation(), original = JSON.stringify(h.previous);
+    await expect(assertLiveJobWrite(h.job.id, h.job.leaseToken!, h.operation)).resolves.toBeUndefined();
+    expect(h.network.mock.calls.some(([url]) => new URL(url).pathname === "/books/v3/bills/999")).toBe(true);
+    expect(JSON.stringify(h.previous)).toBe(original);
+  });
+  it.each([
+    { last_modified_time: "2026-10-28T12:00:01Z" }, { documents: [] },
+    { line_items: [{ line_item_id: "702", account_id: "103", tax_id: "102", description: "Fictional approved material", quantity: "1", rate: "100" }] },
+    { is_locked: true }, { payment_made: "106", vendor_credits_applied: "0", balance: "-1" },
+  ])("rejects changed provider stamp, originals, line identity or money %#", async changed => {
+    const h = updateOperation(); h.changeRemote(changed);
+    await expect(assertLiveJobWrite(h.job.id, h.job.leaseToken!, h.operation)).rejects.toMatchObject({ kind: "BLOCKED" });
+    expect(h.network.mock.calls.every(([, init]) => (init?.method ?? "GET") === "GET")).toBe(true);
+  });
+  it("rejects a mismatched predecessor hash and a newer current mutation before any remote call", async () => {
+    const h = updateOperation(); h.previous.payloadHash = "e".repeat(64);
+    await expect(assertLiveJobWrite(h.job.id, h.job.leaseToken!, h.operation)).rejects.toMatchObject({ kind: "BLOCKED" });
+    expect(h.network).not.toHaveBeenCalled();
+    h.previous.payloadHash = h.snapshot.revision!.previousPayloadHash;
+    store.integrationJob.findMany.mockResolvedValue([{ ...h.job, id: "newer-update" }, h.job, h.previous]);
+    await expect(assertLiveJobWrite(h.job.id, h.job.leaseToken!, h.operation)).rejects.toMatchObject({ kind: "BLOCKED" });
+    expect(h.network).not.toHaveBeenCalled();
+  });
+  it.each(["method", "path", "body"])("refuses altered outgoing %s without a provider write", async field => {
+    const h = updateOperation();
+    const changed = field === "method" ? { ...h.operation, method: "POST" as const } : field === "path"
+      ? { ...h.operation, path: "/books/v3/bills/998" } : { ...h.operation, body: { ...h.operation.body, bill_number: "OTHER" } };
+    await expect(assertLiveJobWrite(h.job.id, h.job.leaseToken!, changed)).rejects.toMatchObject({ kind: "BLOCKED" });
+    expect(h.network).not.toHaveBeenCalled();
+  });
+  it.each(["lease", "payment", "membership", "latest"])("rechecks %s authority after the provider GET", async changed => {
+    const h = updateOperation();
+    h.network.mockImplementation(async () => {
+      if (changed === "lease") h.job.leaseToken = "another-lease";
+      if (changed === "payment") h.bill.paidAmount = new Prisma.Decimal(127);
+      if (changed === "membership") store.user.findFirst.mockResolvedValue(null);
+      if (changed === "latest") store.integrationJob.findMany.mockResolvedValue([{ ...h.job, id: "newer-update" }, h.job, h.previous]);
+      return response({ code: 0, bill: h.remote });
+    });
+    await expect(assertLiveJobWrite(h.job.id, "selected-worker-lease", h.operation)).rejects.toBeInstanceOf(Error);
+    expect(h.network).toHaveBeenCalled();
   });
 });

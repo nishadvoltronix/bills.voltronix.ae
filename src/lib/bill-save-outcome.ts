@@ -1,5 +1,6 @@
 export type BillSaveState = {
   status: string;
+  syncOperation?: "CREATE_BILL" | "UPDATE_BILL";
   syncRecords?: readonly {
     target?: string;
     status: string;
@@ -17,6 +18,15 @@ export function savedBillNotice(bill: BillSaveState, manualEntryOnly: boolean): 
   if (["DRAFT", "REJECTED"].includes(bill.status))
     return { tone: "success", message: "Draft saved. It has not been sent to Zoho Books." };
   const sync = bill.syncRecords?.find(record => record.target === "ZOHO");
+  if (bill.syncOperation === "UPDATE_BILL") {
+    if (sync?.status === "SYNCED" && sync.externalId)
+      return { tone: "success", message: "Bill changes saved and synchronized with Zoho Books." };
+    if (sync?.status === "PENDING")
+      return { tone: "info", message: "Bill changes saved. Zoho Books update queued. Confirmation of the changes is pending." };
+    if (sync?.status === "UNKNOWN")
+      return { tone: "error", message: "Bill changes saved. The Zoho Books update result is uncertain. Reconcile the existing bill before retrying." };
+    return { tone: "error", message: `Bill changes saved, but the changes have not synchronized with Zoho Books. ${sync?.lastError || "Check the synchronization details before retrying the update."}` };
+  }
   if (sync?.status === "SYNCED" && sync.externalId)
     return { tone: "success", message: "Bill saved and synchronized with Zoho Books." };
   if (sync?.status === "PENDING")
@@ -37,6 +47,7 @@ export function savedBillState(value: unknown, expected: { id: string; companyId
   if (bill.id !== expected.id || bill.companyId !== expected.companyId || bill.jobId !== expected.jobId ||
     typeof bill.status !== "string" || !["DRAFT", "REJECTED", "PENDING_APPROVAL", "READY", "APPROVED", "CANCELLED"].includes(bill.status) ||
     !Array.isArray(bill.syncRecords)) return null;
+  if (bill.syncOperation !== undefined && !["CREATE_BILL", "UPDATE_BILL"].includes(String(bill.syncOperation))) return null;
   const records = [];
   for (const value of bill.syncRecords) {
     if (!value || typeof value !== "object") return null;
@@ -48,5 +59,6 @@ export function savedBillState(value: unknown, expected: { id: string; companyId
       externalId: typeof record.externalId === "string" ? record.externalId : null,
       lastError: typeof record.lastError === "string" ? record.lastError : null });
   }
-  return { status: bill.status, syncRecords: records };
+  return { status: bill.status, syncRecords: records,
+    ...(bill.syncOperation === "CREATE_BILL" || bill.syncOperation === "UPDATE_BILL" ? { syncOperation: bill.syncOperation } : {}) };
 }
