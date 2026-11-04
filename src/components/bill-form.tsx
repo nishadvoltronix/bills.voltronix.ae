@@ -207,6 +207,9 @@ function BillForm({
   const [attachmentNotice, setAttachmentNotice] = useState<{ mode: "ai" | "manual"; message: string } | null>(null);
   const selectionInFlight = useRef(false);
   const [busy, setBusy] = useState(false);
+  const [saveProgress, setSaveProgress] = useState("");
+  const busyLabel = saveProgress.startsWith("Uploading") ? "Uploading…" : saveProgress.includes("sync") ? "Queuing sync…"
+    : saveProgress.startsWith("Opening") ? "Opening…" : "Saving…";
   const [error, setError] = useState("");
   const [savedId, setSavedId] = useState<string | null>(null);
   const [savedVersion, setSavedVersion] = useState<number | null>(null);
@@ -414,7 +417,10 @@ function BillForm({
   }
   async function attach(id: string, startingVersion: number) {
     let expectedVersion = startingVersion;
-    for (const file of fileSelections.current.filter(file => file.status !== "stored")) {
+    const pending = fileSelections.current.filter(file => file.status !== "stored");
+    const completed = fileSelections.current.length - pending.length;
+    for (const [index, file] of pending.entries()) {
+      setSaveProgress(`Uploading original ${completed + index + 1} of ${fileSelections.current.length}…`);
       updateFile(file.id, { status: "uploading", message: undefined });
       try {
         const data = new FormData();
@@ -437,19 +443,23 @@ function BillForm({
     return expectedVersion;
   }
   async function finalize(id: string, expectedVersion: number) {
-    const { bill: current } = await api<{ bill: Bill }>(`/api/bills/${id}`);
-    if (current.version !== expectedVersion || !["DRAFT", "REJECTED", "PENDING_APPROVAL"].includes(current.status))
-      throw new Error("This saved bill changed. Open it and review its current details before continuing.");
+    setSaveProgress(manualEntryOnly ? "Finalizing bill…" : "Saving and queuing Zoho Books sync…");
+    // Submit enforces current access, version and status on the server. The
+    // preceding upload response already supplies the exact expected version.
     const result = await api<{ bill?: Bill } | null>(`/api/bills/${id}/actions`, {
       method: "POST",
       body: JSON.stringify({ action: "submit", version: expectedVersion }),
     });
-    return result?.bill ?? null;
+    const saved = result?.bill;
+    if (!saved || saved.id !== id || saved.companyId !== companyId || saved.jobId !== jobId || saved.currency !== currency ||
+      saved.version !== expectedVersion + 1 || !["READY", "APPROVED"].includes(saved.status))
+      throw new Error("The saved bill result could not be verified. Open this bill before retrying.");
+    return saved;
   }
   function openSavedBill(id: string, isDraft: boolean, completedBill?: Bill | null) {
     if (!isDraft && !bill && !review && ["ADMIN", "ACCOUNTS"].includes(user.role)) {
+      setSaveProgress("Opening payment entry…");
       router.push(`/bills/${encodeURIComponent(id)}/payment?entry=1&saved=1`);
-      router.refresh();
       return;
     }
     if (repeatJobEntry && onSaved) {
@@ -532,6 +542,7 @@ function BillForm({
     autofill.stop();
     saveInFlight.current = true;
     setBusy(true);
+    setSaveProgress(finalizedEdit ? "Saving bill changes…" : "Saving bill…");
     try {
       const payload = {
         companyId,
@@ -622,6 +633,7 @@ function BillForm({
     if (!savedId || savedVersion === null || busy || saveInFlight.current) return;
     saveInFlight.current = true;
     setBusy(true);
+    setSaveProgress("Finishing saved bill…");
     setError("");
     let nextStep = recovery;
     let expectedVersion = savedVersion;
@@ -705,6 +717,7 @@ function BillForm({
           </p>
           {recovery === "attachment" && <InvoiceAttachmentPicker id="recovery-invoice-files" files={files} existing={existingDocuments}
             busy={busy} checking={checkingFiles} locked={uncertainUpload} onFiles={selectAttachments} onRemove={removeAttachment} />}
+          {busy && saveProgress && <p role="status">{saveProgress}</p>}
           <div className="button-row">
             <Button onClick={resumeSavedBill} disabled={busy || checkingFiles || (recovery === "attachment" && !files.length && !existingDocuments.length)}>
               {busy && <LoaderCircle className="spin" size={16} />}
@@ -1335,6 +1348,7 @@ function BillForm({
               </label>
             )}
           </fieldset>
+          {busy && saveProgress && <p className="field-hint" role="status" aria-live="polite">{saveProgress}</p>}
           <footer className="books-form-footer">
             <div className="books-footer-actions">
               <Button
@@ -1344,7 +1358,7 @@ function BillForm({
                 disabled={busy || checkingFiles || vendorResolving || jobs.loading || vendorTaxConflict || autofill.waiting}
               >
                 {busy ? <LoaderCircle size={15} className="spin" /> : <Send size={15} />}
-                {saveLabel}
+                {busy ? busyLabel : saveLabel}
               </Button>
               {!finalizedEdit && <Button
                 name="intent"

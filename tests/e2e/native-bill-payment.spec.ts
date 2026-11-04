@@ -104,6 +104,32 @@ test("confirmed partial then full payment refreshes history and Paid state, with
   expect(state.actions).toHaveLength(2); expect(state.unexpected).toEqual([]);
 });
 
+test("the shared receipt accepts a same-version status refresh after a confirmed payment without losing payment data", async ({ page }) => {
+  const initial = fixture(); initial.syncRecords = [{ id: "same-version-sync", target: "ZOHO", status: "PENDING", externalId: null }];
+  const state = await setup(page, initial, true);
+  const outcome = page.getByRole("group", { name: "Saved bill confirmation", exact: true });
+  await expect(outcome).toContainText("Provider confirmation is pending");
+  state.action = async body => {
+    expect(body).toEqual({ action: "payment", version: 1, amount: "25.00", reference: "FICTIONAL-SAME-VERSION" });
+    state.bill = { ...state.bill, version: 2, paidAmount: "25.00", outstanding: "80.00", paymentStatus: "PARTIALLY_PAID",
+      payments: [{ id: "same-version-payment", amount: "25.00", reference: "FICTIONAL-SAME-VERSION", createdAt: "2026-11-04T12:00:00Z" }] };
+    return { json: { bill: state.bill } };
+  };
+  await page.getByLabel("Payment amount (AED)", { exact: true }).fill("25.00");
+  await page.getByLabel("Payment reference", { exact: true }).fill("FICTIONAL-SAME-VERSION");
+  await page.getByRole("button", { name: "Confirm payment", exact: true }).click();
+  await expect(page.getByText("Payment recorded successfully.", { exact: true })).toBeVisible();
+  await expect(outcome.getByRole("button", { name: "Refresh saved bill status", exact: true })).toBeEnabled();
+  state.bill = { ...state.bill, syncRecords: [{ id: "same-version-sync", target: "ZOHO", status: "SYNCED", externalId: "fictional-external-bill" }] };
+  await page.getByLabel("Payment reference", { exact: true }).fill("KEEP-NEXT-PAYMENT");
+  await outcome.getByRole("button", { name: "Refresh saved bill status", exact: true }).click();
+  await expect(outcome).toContainText("Bill saved and synchronized with Zoho Books.");
+  await expect(page.getByLabel("Payment amount (AED)", { exact: true })).toHaveValue("80.00");
+  await expect(page.getByLabel("Payment reference", { exact: true })).toHaveValue("KEEP-NEXT-PAYMENT");
+  await expect(page.getByRole("cell", { name: "FICTIONAL-SAME-VERSION", exact: true })).toBeVisible();
+  expect(state.bill.version).toBe(2); expect(state.actions).toHaveLength(1); expect(state.unexpected).toEqual([]);
+});
+
 for (const failure of [
   { status: 409, message: "The bill has changed. Refresh before taking action." },
   { status: 422, message: "Payment exceeds the outstanding amount." },

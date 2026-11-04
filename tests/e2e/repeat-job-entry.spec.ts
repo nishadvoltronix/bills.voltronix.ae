@@ -21,7 +21,9 @@ type Payload = { companyId: string; vendorId: string; jobId: string; invoiceNumb
   discount: string; vatRate: string; notes: string; lines: NonNullable<Bill["lines"]>; submit: boolean; version?: number };
 type Fixture = { creates: Payload[]; updates: Payload[]; attachments: string[]; uploads: { billId: string; fileName: string; version: number }[]; submits: string[]; searches: number;
   unexpected: string[]; bills: Map<string, Bill>; failCreate: boolean; failAttachment: boolean; failFinalize: boolean;
-  holdAttachment: Promise<void> | null; finalizedSync: "PENDING" | "FAILED" | "SYNCED";
+  holdCreate: Promise<void> | null; holdAttachment: Promise<void> | null; holdFinalize: Promise<void> | null;
+  holdBillRead: Promise<void> | null; billReads: { id: string; status: string; version: number }[]; activeBillReads: number; maxActiveBillReads: number;
+  finalizedSync: "PENDING" | "FAILED" | "SYNCED";
   attachmentFault: { name: string; kind: "reject" | "lost_after_store" } | null; vendorVat?: Vendor["booksVat"] };
 
 function storedBill(id: string, input: Payload): Bill {
@@ -33,7 +35,8 @@ function storedBill(id: string, input: Payload): Bill {
 
 async function fixture(page: Page): Promise<Fixture> {
   const state: Fixture = { creates: [], updates: [], attachments: [], uploads: [], submits: [], searches: 0,
-    unexpected: [], bills: new Map(), failCreate: false, failAttachment: false, failFinalize: false, holdAttachment: null, finalizedSync: "PENDING", attachmentFault: null };
+    unexpected: [], bills: new Map(), failCreate: false, failAttachment: false, failFinalize: false, holdCreate: null, holdAttachment: null,
+    holdFinalize: null, holdBillRead: null, billReads: [], activeBillReads: 0, maxActiveBillReads: 0, finalizedSync: "PENDING", attachmentFault: null };
   await page.route("**/api/**", async route => {
     const request = route.request(), url = new URL(request.url()), path = url.pathname, method = request.method();
     if (method === "GET" && path === "/api/companies") return route.fulfill({ json: { companies: [company,
@@ -69,6 +72,7 @@ async function fixture(page: Page): Promise<Fixture> {
       expect(input).toMatchObject({ companyId: company.id, jobId: job.id, vendorId: vendor.id, submit: false });
       state.creates.push(input);
       if (state.failCreate) { state.failCreate = false; return route.fulfill({ status: 503, json: { error: "Fictional create interruption." } }); }
+      if (state.holdCreate) await state.holdCreate;
       const bill = storedBill(`repeat-created-${state.creates.length}`, input);
       state.bills.set(bill.id, bill);
       return route.fulfill({ status: 201, json: { bill } });
@@ -76,7 +80,14 @@ async function fixture(page: Page): Promise<Fixture> {
     const match = /^\/api\/bills\/([^/]+)(?:\/(attachment|actions))?$/.exec(path);
     if (match && state.bills.has(match[1])) {
       const bill = state.bills.get(match[1])!;
-      if (method === "GET" && !match[2]) return route.fulfill({ json: { bill } });
+      if (method === "GET" && !match[2]) {
+        state.billReads.push({ id: bill.id, status: bill.status, version: bill.version });
+        state.activeBillReads++; state.maxActiveBillReads = Math.max(state.maxActiveBillReads, state.activeBillReads);
+        try {
+          if (state.holdBillRead) await state.holdBillRead;
+          return await route.fulfill({ json: { bill } });
+        } finally { state.activeBillReads--; }
+      }
       if (method === "PATCH" && !match[2]) {
         const input = request.postDataJSON() as Payload;
         state.updates.push(input);
@@ -119,6 +130,7 @@ async function fixture(page: Page): Promise<Fixture> {
         state.submits.push(bill.id);
         expect(request.postDataJSON()).toEqual({ action: "submit", version: bill.version });
         if (state.failFinalize) { state.failFinalize = false; return route.fulfill({ status: 503, json: { error: "Fictional finalization interruption." } }); }
+        if (state.holdFinalize) await state.holdFinalize;
         bill.status = "READY"; bill.version++;
         bill.syncRecords = [{ id: `${bill.id}-sync`, target: "ZOHO", status: state.finalizedSync, organizationId,
           externalId: state.finalizedSync === "SYNCED" ? "998899001" : null,
@@ -253,6 +265,100 @@ test("two consecutive saves reset every invoice field while retaining the verifi
     expect(state.unexpected).toEqual([]);
     await page.setViewportSize({ width: 360, height: 780 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  } finally { release(); }
+});
+
+test("one click reports each save stage, blocks duplicate submits and skips redundant bill reads before payment", async ({ page }) => {
+  const state = await fixture(page); state.finalizedSync = "SYNCED";
+  let create!: () => void, upload!: () => void, finalize!: () => void;
+  state.holdCreate = new Promise<void>(resolve => { create = resolve; });
+  state.holdAttachment = new Promise<void>(resolve => { upload = resolve; });
+  state.holdFinalize = new Promise<void>(resolve => { finalize = resolve; });
+  const progress = (text: string) => page.getByRole("status").filter({ hasText: new RegExp(`^${text}…$`) });
+  try {
+    await page.goto(`/bills/new?jobId=${job.id}`); await fill(page, "FICTIONAL-FAST-SAVE");
+    await page.getByRole("button", { name: "Save and sync", exact: true }).click();
+    await expect(progress("Saving bill")).toBeVisible();
+    await expect(page.locator('.books-footer-actions button[value="submit"]')).toBeDisabled();
+    await page.locator("form.books-bill-form").evaluate(form => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(state.creates).toHaveLength(1); expect(state.attachments).toEqual([]);
+    create();
+    await expect(progress("Uploading original 1 of 1")).toBeVisible();
+    expect(state.submits).toEqual([]); expect(state.billReads).toEqual([]);
+    upload();
+    await expect(progress("Saving and queuing Zoho Books sync")).toBeVisible();
+    expect(state.submits).toHaveLength(1); expect(state.billReads).toEqual([]);
+    finalize(); await paymentStep(page);
+    await expect(page.getByRole("group", { name: "Saved bill confirmation", exact: true })).toContainText("synchronized with Zoho Books");
+    await expect.poll(() => state.billReads.length).toBe(1);
+    await page.waitForTimeout(350);
+    expect(state.billReads).toEqual([{ id: "repeat-created-1", status: "READY", version: 3 }]);
+    expect([state.creates.length, state.attachments.length, state.submits.length]).toEqual([1, 1, 1]);
+    expect(state.bills.get("repeat-created-1")).toMatchObject({ paidAmount: "0.00", payments: [] });
+    expect(state.unexpected).toEqual([]);
+  } finally { create(); upload(); finalize(); }
+});
+
+for (const changed of ["identity", "version"] as const) test(`an unverified finalized ${changed} response keeps the existing saved bill for recovery`, async ({ page }) => {
+  const state = await fixture(page);
+  await page.route("**/api/bills/repeat-created-1/actions", async route => {
+    if (route.request().method() !== "POST") return route.fallback();
+    const saved = state.bills.get("repeat-created-1")!;
+    expect(route.request().postDataJSON()).toEqual({ action: "submit", version: saved.version });
+    state.submits.push(saved.id); saved.version++; saved.status = "READY";
+    saved.syncRecords = [{ id: "unverified-sync", target: "ZOHO", status: "PENDING", externalId: null }];
+    return route.fulfill({ json: { bill: { ...saved, ...(changed === "identity" ? { id: "wrong-saved-bill" } : { version: saved.version - 1 }) } } });
+  });
+  await page.goto(`/bills/new?jobId=${job.id}`); await fill(page, `FICTIONAL-UNVERIFIED-${changed.toUpperCase()}`);
+  await page.getByRole("button", { name: "Save and sync", exact: true }).click();
+  await expect(page.getByText("The saved bill result could not be verified. Open this bill before retrying.", { exact: false })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Open saved bill", exact: true })).toHaveAttribute("href", "/bills/repeat-created-1");
+  await expect(page).toHaveURL(new RegExp(`/bills/new\\?jobId=${job.id}$`));
+  await page.waitForTimeout(350);
+  expect([state.creates.length, state.attachments.length, state.submits.length]).toEqual([1, 1, 1]);
+  expect(state.bills.size).toBe(1); expect(state.billReads).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("shared payment status polls quickly, slows down, avoids overlap and hidden reads, then expires", async ({ page }) => {
+  await page.clock.install();
+  const state = await fixture(page);
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  try {
+    await page.goto(`/bills/new?jobId=${job.id}`); await fill(page, "FICTIONAL-FAST-POLL");
+    await page.getByRole("button", { name: "Save and sync", exact: true }).click(); await paymentStep(page);
+    const outcome = page.getByRole("group", { name: "Saved bill confirmation", exact: true });
+    await expect(outcome).toContainText("Provider confirmation is pending");
+    await page.clock.pauseAt((await page.evaluate(() => Date.now())) + 250);
+    expect(state.billReads).toHaveLength(1);
+    await page.getByLabel("Payment reference", { exact: true }).fill("KEEP-UNSAVED-PAYMENT");
+    await page.clock.runFor(1000); await expect.poll(() => state.billReads.length).toBe(2);
+    await expect(outcome.getByRole("button", { name: "Refresh saved bill status", exact: true })).toBeEnabled();
+    await page.clock.runFor(1000); await expect.poll(() => state.billReads.length).toBe(3);
+    await expect(outcome.getByRole("button", { name: "Refresh saved bill status", exact: true })).toBeEnabled();
+    state.holdBillRead = held;
+    await page.clock.runFor(1000); await expect.poll(() => state.billReads.length).toBe(4);
+    await page.clock.runFor(6000); expect(state.billReads).toHaveLength(4); expect(state.maxActiveBillReads).toBe(1);
+    state.holdBillRead = null; release();
+    await expect(outcome.getByRole("button", { name: "Refresh saved bill status", exact: true })).toBeEnabled();
+    await page.clock.runFor(18000);
+    await expect(outcome.getByRole("button", { name: "Refresh saved bill status", exact: true })).toBeEnabled();
+    const slowerReads = state.billReads.length;
+    await page.clock.runFor(3000); await expect.poll(() => state.billReads.length).toBe(slowerReads + 1);
+    await expect(outcome.getByRole("button", { name: "Refresh saved bill status", exact: true })).toBeEnabled();
+    await page.evaluate(() => Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" }));
+    const hiddenReads = state.billReads.length;
+    await page.clock.runFor(9000); expect(state.billReads).toHaveLength(hiddenReads);
+    await page.evaluate(() => Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" }));
+    await page.clock.runFor(3000); await expect.poll(() => state.billReads.length).toBe(hiddenReads + 1);
+    await page.clock.runFor(125000);
+    await expect(outcome).toContainText("Confirmation is still pending. Refresh the status or open the saved bill.");
+    await expect(outcome.getByRole("button", { name: "Refresh saved bill status", exact: true })).toBeEnabled();
+    const expiredReads = state.billReads.length;
+    await page.clock.runFor(15000); expect(state.billReads).toHaveLength(expiredReads);
+    expect(state.maxActiveBillReads).toBe(1);
+    await expect(page.getByLabel("Payment reference", { exact: true })).toHaveValue("KEEP-UNSAVED-PAYMENT");
+    expect([state.creates.length, state.attachments.length, state.submits.length]).toEqual([1, 1, 1]); expect(state.unexpected).toEqual([]);
   } finally { release(); }
 });
 

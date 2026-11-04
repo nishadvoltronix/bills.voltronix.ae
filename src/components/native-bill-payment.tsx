@@ -41,8 +41,9 @@ export function NativeBillPaymentRecord({ bill, refreshing = false, refreshError
   const [unverifiedSource, setUnverifiedSource] = useState<Bill | null>(null);
   const verificationBlocked = unverifiedSource === bill;
   // The POST response is persisted server data. A slower prior GET must not
-  // replace it while the refreshed bill is on its way back.
-  const current = confirmed && confirmed.version >= bill.version ? confirmed : bill;
+  // replace it while the refreshed bill is on its way back. An equal-version
+  // GET can still refresh sync status, which has its own independent lifecycle.
+  const current = confirmed && confirmed.version > bill.version ? confirmed : bill;
   const finalized = ["READY", "APPROVED"].includes(current.status);
   const entryJob = fromEntry ? { id: current.jobId, companyId: current.companyId, jobNumber: current.job?.jobNumber ?? "this job" } : null;
   const nextBillHref = entryJob ? `/bills/new?${new URLSearchParams({ jobId: entryJob.id })}` : null;
@@ -88,7 +89,8 @@ export function NativeBillPaymentRecord({ bill, refreshing = false, refreshError
     {saved && entryJob && <div role="group" aria-label="Saved bill confirmation">
       <SavedBillOutcome key={current.id} receipt={{ id: current.id, invoiceNumber: current.invoiceNumber, isDraft: !finalized,
         outcome: savedBillState(current, { id: current.id, companyId: current.companyId, jobId: current.jobId }) }}
-        job={entryJob} manualEntryOnly={manualEntryOnly} continuation="payment" navigationBusy={busy} />
+        job={entryJob} manualEntryOnly={manualEntryOnly} continuation="payment" navigationBusy={busy}
+        billRead={refresh ? { bill: current, refreshing, error: refreshError, reload: refresh } : undefined} />
     </div>}
     {entryJob && <nav className="button-row" aria-label="Bill entry navigation">
       {busy ? <>
