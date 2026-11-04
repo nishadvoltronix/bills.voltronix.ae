@@ -107,6 +107,33 @@ describe("company vendor directory on disposable MySQL", () => {
     await expect(searchBillVendors(actor, { companyId: companyA })).rejects.toMatchObject({ status: 403 });
   });
 
+  it("uses search_text across provider pages and excludes notes-only matches without database writes", async () => {
+    const before = await Promise.all([db.vendor.count(), db.vendorBooksMapping.count(), db.bill.count()]);
+    const queries: URLSearchParams[] = [];
+    const provider = new ZohoTransport(getConfig("ZOHO", process.env, organizationA), async () => "fictional-token", async (url, init) => {
+      expect(init?.method).toBe("GET");
+      const query = new URL(url).searchParams; queries.push(query);
+      expect(query.get("organization_id")).toBe(organizationA);
+      expect(query.get("search_text")).toBe("Needle");
+      expect(query.get("filter_by")).toBe("Status.All");
+      expect(query.has("contact_name")).toBe(false); expect(query.has("contact_name_contains")).toBe(false);
+      const page = Number(query.get("page"));
+      return new Response(JSON.stringify({ code: 0, contacts: [{
+        contact_id: page === 1 ? "201" : "202", contact_type: "vendor", status: "inactive", currency_code: "JPY",
+        contact_name: page === 1 ? "Other supplier" : "Needle supplier", notes: "Needle PRIVATE",
+      }], page_context: { page, per_page: 100, has_more_page: page === 1 } }));
+    });
+    const first = await listCompanyVendorDirectory(actor, { companyId: companyA, q: "Needle" }, provider);
+    expect(first).toMatchObject({ vendors: [], hasMore: true, warning: null });
+    const second = await listCompanyVendorDirectory(actor, { companyId: companyA, q: "Needle", page: 2 }, provider);
+    expect(second).toMatchObject({ hasMore: false, warning: null });
+    expect(second.vendors).toMatchObject([{ externalVendorId: "202", companyId: companyA, name: "Needle supplier", status: "inactive", currency: "JPY" }]);
+    expect(queries.map(query => query.get("page"))).toEqual(["1", "2"]);
+    expect(JSON.stringify([first, second])).not.toContain("PRIVATE");
+    expect(await Promise.all([db.vendor.count(), db.vendorBooksMapping.count(), db.bill.count()])).toEqual(before);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("rejects a company outside current memberships", async () => {
     const outside = await createTestCompany(`directory outside ${tag}`);
     await expect(listCompanyVendorDirectory(actor, { companyId: outside.id })).rejects.toMatchObject({ status: 403 });

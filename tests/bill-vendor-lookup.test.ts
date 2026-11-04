@@ -123,21 +123,35 @@ describe("company-specific bill vendor search", () => {
     expect(store.vendor.create).not.toHaveBeenCalled(); expect(store.vendorBooksMapping.create).not.toHaveBeenCalled();
   });
 
-  it("promotes a verified exact provider name beyond a broad first page without losing contains matches", async () => {
+  it("uses provider search_text and keeps later exact-name results reachable through pagination", async () => {
     const fetcher = vi.fn<Fetch>(async url => {
-      const exact = new URL(url).searchParams.has("contact_name");
-      return new Response(JSON.stringify(page([contact({ contact_id: exact ? "2002" : "2001", contact_name: exact ? "Acme" : "Acme Industrial" })], !exact)));
+      const query = new URL(url).searchParams, number = Number(query.get("page"));
+      expect(query.get("search_text")).toBe("Acme");
+      expect(query.has("contact_name")).toBe(false); expect(query.has("contact_name_contains")).toBe(false);
+      return new Response(JSON.stringify({ code: 0, contacts: number === 1
+        ? [contact({ contact_name: "Acme Industrial" }), contact({ contact_id: "2003", contact_name: "Other supplier", notes: "Acme" })]
+        : [contact({ contact_id: "2004", contact_name: "Acme Tools" }), contact({ contact_id: "2002", contact_name: "Acme" })],
+      page_context: { page: number, per_page: 25, has_more_page: number === 1 } }));
     });
-    const result = await searchBillVendors(actor, { companyId: "company-a", q: "Acme" }, new ZohoTransport(getConfig("ZOHO", process.env, "1001"), async () => "fictional-token", fetcher));
-    expect(result.vendors.map(row => row.name)).toEqual(["Acme", "Acme Industrial"]);
-    expect(result.hasMore).toBe(true); expect(fetcher).toHaveBeenCalledTimes(2);
+    const transport = new ZohoTransport(getConfig("ZOHO", process.env, "1001"), async () => "fictional-token", fetcher);
+    const first = await searchBillVendors(actor, { companyId: "company-a", q: "Acme" }, transport);
+    expect(first.vendors.map(row => row.name)).toEqual(["Acme Industrial"]);
+    expect(first.hasMore).toBe(true); expect(fetcher).toHaveBeenCalledTimes(1);
+    const second = await searchBillVendors(actor, { companyId: "company-a", q: "Acme", page: 2 }, transport);
+    expect(second.vendors.map(row => row.name)).toEqual(["Acme", "Acme Tools"]);
+    expect(second.hasMore).toBe(false); expect(fetcher).toHaveBeenCalledTimes(2);
     expect(fetcher.mock.calls.every(([, options]) => options?.method === "GET")).toBe(true);
+    expect(store.vendor.create).not.toHaveBeenCalled(); expect(store.vendorBooksMapping.create).not.toHaveBeenCalled();
   });
 
-  it("keeps valid contains results if the optional exact-name read fails", async () => {
-    const fetcher = vi.fn<Fetch>(async url => new Response(JSON.stringify(new URL(url).searchParams.has("contact_name") ? { code: 123, message: "PRIVATE" } : page([contact({ contact_name: "Acme Industrial" })], true))));
+  it("excludes notes-only provider matches without hiding the next matching search page", async () => {
+    const fetcher = vi.fn<Fetch>(async url => {
+      expect(new URL(url).searchParams.get("search_text")).toBe("Acme");
+      return new Response(JSON.stringify(page([contact({ contact_name: "Unrelated supplier", notes: "Acme PRIVATE" })], true)));
+    });
     const result = await searchBillVendors(actor, { companyId: "company-a", q: "Acme" }, new ZohoTransport(getConfig("ZOHO", process.env, "1001"), async () => "fictional-token", fetcher));
-    expect(result.vendors).toMatchObject([{ name: "Acme Industrial" }]); expect(result.warning).toContain("Load more");
+    expect(result).toMatchObject({ vendors: [], hasMore: true, warning: null, page: 1 });
+    expect(fetcher).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(result)).not.toContain("PRIVATE");
   });
 
@@ -191,7 +205,7 @@ describe("company-specific bill vendor search", () => {
       expect.objectContaining({ name: "Books unrelated local", booksMappingRequired: true }),
     ]));
     const query = new URL(fetcher.mock.calls[0][0]).searchParams;
-    expect(Object.fromEntries(query)).toEqual({ contact_type: "vendor", filter_by: "Status.All", contact_name_contains: "Books", per_page: "25", page: "1", organization_id: "1001" });
+    expect(Object.fromEntries(query)).toEqual({ contact_type: "vendor", filter_by: "Status.All", search_text: "Books", per_page: "25", page: "1", organization_id: "1001" });
     expect(JSON.stringify(result)).not.toContain("PRIVATE ADDRESS");
     expect(store.vendor.create).not.toHaveBeenCalled();
   });

@@ -41,7 +41,7 @@ async function fixture() {
 }
 function provider(config: ZohoConfig, existing: Contact[] = []) {
   const contacts = new Map(existing.map(contact => [contact.contact_id, contact]));
-  const control = { losePostResponse: false, rejectMarker: false, rejectDetail: false, currencyCode: "AED", onSearch: undefined as (() => Promise<void>) | undefined };
+  const control = { losePostResponse: false, rejectMarker: false, rejectDetail: false, ignoreNameFilters: false, currencyCode: "AED", onSearch: undefined as (() => Promise<void>) | undefined };
   const fetcher = vi.fn<Fetch>(async (url, options) => {
     const parsed = new URL(url), path = parsed.pathname;
     expect(parsed.searchParams.get("organization_id")).toBe(config.organizationId);
@@ -57,9 +57,13 @@ function provider(config: ZohoConfig, existing: Contact[] = []) {
     }
     if (path === "/books/v3/contacts") {
       if (control.onSearch) await control.onSearch();
-      if (control.rejectMarker && parsed.searchParams.has("search_text")) return Response.json({ code: 57, message: "Fictional authorization rejection" }, { status: 401 });
+      if (control.rejectMarker && parsed.searchParams.get("search_text")?.startsWith("VX-VENDOR-")) return Response.json({ code: 57, message: "Fictional authorization rejection" }, { status: 401 });
+      if (control.ignoreNameFilters && (parsed.searchParams.has("contact_name_contains") || parsed.searchParams.has("contact_name"))) {
+        return Response.json({ code: 0, contacts: Array.from({ length: 200 }, (_, index) => ({ contact_id: String(700000 + index) })),
+          page_context: { page: Number(parsed.searchParams.get("page")), has_more_page: true } });
+      }
       const query = parsed.searchParams.get("search_text") ?? parsed.searchParams.get("contact_name_contains") ?? "";
-      const rows = [...contacts.values()].filter(contact => parsed.searchParams.has("search_text") ? contact.notes.includes(query) : contact.contact_name.includes(query));
+      const rows = [...contacts.values()].filter(contact => contact.contact_name.includes(query) || (parsed.searchParams.has("search_text") && contact.notes.includes(query)));
       return Response.json({ code: 0, contacts: rows.map(({ contact_id }) => ({ contact_id })), page_context: { page: 1, has_more_page: false } });
     }
     const contact = contacts.get(path.split("/").at(-1)!);
@@ -98,6 +102,31 @@ describe("durable supplier synchronization on disposable MySQL and mocked provid
     const result = await createVendorAndSync(f.actor, f.input, remote.factory);
     expect(result.sync).toMatchObject({ status: "SYNCED", externalVendorId: "880001" }); expect(remote.posts()).toHaveLength(0);
   });
+  it("searches the full supplier name using search_text when the provider ignores name-specific filters", async () => {
+    const f = await fixture(), remote = provider(f.config);
+    remote.control.ignoreNameFilters = true;
+    const result = await createVendorAndSync(f.actor, f.input, remote.factory);
+    expect(result.sync.status).toBe("SYNCED"); expect(remote.posts()).toHaveLength(1);
+    const searches = remote.fetcher.mock.calls.filter(([url, options]) => new URL(url).pathname === "/books/v3/contacts" && options?.method !== "POST")
+      .map(([url]) => new URL(url));
+    expect(searches).toHaveLength(1);
+    expect(searches[0].searchParams.get("search_text")).toBe(f.input.name);
+    expect(searches[0].searchParams.get("contact_type")).toBe("vendor");
+    expect(searches[0].searchParams.get("per_page")).toBe("200");
+    expect(searches[0].searchParams.has("contact_name_contains")).toBe(false);
+    expect(searches[0].searchParams.has("contact_name")).toBe(false);
+  });
+  it("does not reuse a differently named supplier returned because its notes contain the searched name", async () => {
+    const f = await fixture();
+    const unrelated = existingContact("Different fictional supplier", f.input.email, { notes: `Historical reference to ${f.input.name}` });
+    const remote = provider(f.config, [unrelated]);
+    const result = await createVendorAndSync(f.actor, f.input, remote.factory);
+    expect(result.sync.status).toBe("SYNCED"); expect(remote.posts()).toHaveLength(1);
+    expect(result.sync.externalVendorId).not.toBe(unrelated.contact_id);
+    expect(remote.fetcher.mock.calls.some(([url]) => new URL(url).pathname === `/books/v3/contacts/${unrelated.contact_id}`)).toBe(true);
+    expect(await db.vendorBooksMapping.findFirst({ where: { vendorId: result.vendor.id } })).toMatchObject({ externalVendorId: result.sync.externalVendorId });
+    expect(remote.contacts.get(unrelated.contact_id)).toEqual(unrelated);
+  });
   it("keeps a lost POST result UNKNOWN then reconciles by exact marker using GETs only", async () => {
     const f = await fixture(), remote = provider(f.config); remote.control.losePostResponse = true;
     const result = await createVendorAndSync(f.actor, f.input, remote.factory);
@@ -105,7 +134,9 @@ describe("durable supplier synchronization on disposable MySQL and mocked provid
     const first = await db.vendorBooksSync.findFirstOrThrow({ where: { vendorId: result.vendor.id } }); expect(first.submittedAt).not.toBeNull();
     remote.control.losePostResponse = false;
     expect((await synchronizeVendor(f.actor, result.vendor.id, remote.factory)).status).toBe("SYNCED"); expect(remote.posts()).toHaveLength(1);
-    expect(remote.fetcher.mock.calls.some(([url]) => new URL(url).searchParams.has("search_text"))).toBe(true);
+    const searchTerms = remote.fetcher.mock.calls.map(([url]) => new URL(url).searchParams.get("search_text")).filter(Boolean);
+    expect(searchTerms).toContain(f.input.name);
+    expect(searchTerms.at(-1)).toBe((first.snapshot as { marker: string }).marker);
   });
   it("never erases submission evidence when a later read-only reconciliation loses authorization", async () => {
     const f = await fixture(), remote = provider(f.config); remote.control.losePostResponse = true;

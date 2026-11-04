@@ -205,12 +205,14 @@ export async function searchBillVendors(actor: Actor, payload: unknown, provided
     } else {
       try {
         const response = contactPage.safeParse(await transportFor(before, provided).request("/books/v3/contacts", {
-          method: "GET", query: { contact_type: "vendor", filter_by: "Status.All", ...(input.q ? { contact_name_contains: input.q } : {}), per_page: "25", page: String(input.page) },
+          method: "GET", query: { contact_type: "vendor", filter_by: "Status.All", ...(input.q ? { search_text: input.q } : {}), per_page: "25", page: String(input.page) },
         }));
         if (!response.success || (response.data.page_context?.page !== undefined && response.data.page_context.page !== input.page) || (input.page > 1 && response.data.page_context?.page !== input.page)) throw blocked("BOOKS_VENDOR_RESPONSE_INVALID", "Books returned an invalid vendor search response.");
         const seen = new Set<string>();
         const excluded = new Set<string>();
         const remote: NonNullable<ReturnType<typeof visibleContact>>[] = [];
+        // search_text can also match notes or other contact fields. A bill's
+        // vendor suggestions must still match the supplier name itself.
         for (const row of response.data.contacts) {
           const parsed = visibleContact(row);
           const rowId = z.object({ contact_id: externalId }).safeParse(row);
@@ -223,23 +225,6 @@ export async function searchBillVendors(actor: Actor, payload: unknown, provided
           remote.push(parsed);
         }
         remote.splice(25);
-        // Promote an exact name that lies beyond the first contains-result page.
-        // Both documented filters remain GET-only; the browser can still load all pages.
-        if (input.page === 1 && input.q && response.data.page_context?.has_more_page && !remote.some(row => fold(row.name) === fold(input.q))) {
-          try {
-            const exact = contactPage.safeParse(await transportFor(before, provided).request("/books/v3/contacts", { method: "GET", query: { contact_type: "vendor", filter_by: "Status.All", contact_name: input.q, per_page: "25", page: "1" } }));
-            if (!exact.success || (exact.data.page_context?.page !== undefined && exact.data.page_context.page !== 1)) throw blocked("BOOKS_VENDOR_RESPONSE_INVALID", "Books returned an invalid exact-name response.");
-            const exactIds = new Set<string>();
-            const exactRows: typeof remote = [];
-            for (const raw of exact.data.contacts.slice(0, 25)) {
-              const row = visibleContact(raw); if (!row || fold(row.name) !== fold(input.q)) continue;
-              if (exactIds.has(row.externalVendorId)) throw blocked("BOOKS_VENDOR_RESPONSE_INVALID", "Books repeated an exact-name identity.");
-              exactIds.add(row.externalVendorId);
-              if (!remote.some(other => other.externalVendorId === row.externalVendorId)) exactRows.push(row);
-            }
-            remote.unshift(...exactRows);
-          } catch { warning = "Exact-name matching could not be completed. Load more vendors or retry the search."; }
-        }
         const mapped = remote.length ? await db.vendorBooksMapping.findMany({
           where: { ...before.destination, externalVendorId: { in: remote.map(row => row.externalVendorId) }, vendor: { companyId: input.companyId } },
           select: { externalVendorId: true, vendor: { select: localFields } },
@@ -383,7 +368,7 @@ export async function listCompanyVendorDirectory(actor: Actor, payload: unknown,
   else {
     try {
       const response = directoryPage.safeParse(await transportFor(before, provided).request("/books/v3/contacts", {
-        method: "GET", query: { contact_type: "vendor", filter_by: "Status.All", ...(input.q ? { contact_name_contains: input.q } : {}),
+        method: "GET", query: { contact_type: "vendor", filter_by: "Status.All", ...(input.q ? { search_text: input.q } : {}),
           page: String(input.page), per_page: "100", sort_column: "contact_name", sort_order: "A" },
       }));
       if (!response.success || response.data.page_context.page !== input.page ||

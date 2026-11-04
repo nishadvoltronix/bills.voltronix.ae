@@ -153,7 +153,9 @@ async function candidates(transport:ZohoTransport,query:Record<string,string>) {
   throw block("VENDOR_SEARCH_INCOMPLETE","Too many matching Books suppliers. Review the supplier identity before synchronization.");
 }
 async function findExisting(transport:ZohoTransport,snapshot:VendorSyncSnapshot,reconciliation:boolean) {
-  const ids=await candidates(transport,reconciliation?{search_text:snapshot.marker}:{contact_name_contains:snapshot.vendor.name.slice(0,100)});
+  // Some Books organizations ignore name-specific filters. Text search is
+  // bounded and complete here; the exact supplier name is still checked below.
+  const ids=await candidates(transport,{search_text:reconciliation?snapshot.marker:snapshot.vendor.name.slice(0,100)});
   if(ids.length>50)throw block("VENDOR_SEARCH_INCOMPLETE","Too many similar suppliers require administrator review; no contact was created.");
   const contacts=await Promise.all(ids.map(id=>readContact(transport,id)));
   const exact=contacts.filter(c=>fold(c.contact_name)===fold(snapshot.vendor.name));

@@ -176,7 +176,25 @@ describe("company vendor directory", () => {
     const { transport, fetcher } = connection(page([contact({ contact_name: "100% supplier" }), contact({ contact_id: "2002", contact_name: "100 other supplier" })]));
     const remote = await listCompanyVendorDirectory(actor, { companyId: "company-a", q: "%" }, transport);
     expect(remote.vendors.map(row => row.name)).toEqual(expect.arrayContaining(["100% supplier", "100%_\\ supplier"]));
-    expect(new URL(fetcher.mock.calls[0][0]).searchParams.get("contact_name_contains")).toBe("%");
+    expect(new URL(fetcher.mock.calls[0][0]).searchParams.get("search_text")).toBe("%");
+    expect(new URL(fetcher.mock.calls[0][0]).searchParams.has("contact_name_contains")).toBe(false);
+  });
+
+  it("uses search_text on each provider page but exposes only matching supplier names", async () => {
+    const { transport, fetcher } = connection(page([
+      contact({ contact_name: "Other supplier", notes: "Needle PRIVATE" }),
+      contact({ contact_id: "2002", contact_name: "Needle supplier", status: "inactive" }),
+      contact({ contact_id: "2003", contact_name: "Needle customer", contact_type: "customer" }),
+    ], 2, true));
+    const result = await listCompanyVendorDirectory(actor, { companyId: "company-a", q: "Needle", page: 2 }, transport);
+    expect(result).toMatchObject({ companyId: "company-a", page: 2, hasMore: true, warning: null });
+    expect(result.vendors).toMatchObject([{ externalVendorId: "2002", name: "Needle supplier", status: "inactive" }]);
+    expect(Object.fromEntries(new URL(fetcher.mock.calls[0][0]).searchParams)).toEqual({
+      organization_id: "1001", contact_type: "vendor", filter_by: "Status.All", search_text: "Needle",
+      page: "2", per_page: "100", sort_column: "contact_name", sort_order: "A",
+    });
+    expect(JSON.stringify(result)).not.toContain("PRIVATE");
+    expect(store.vendor.create).not.toHaveBeenCalled(); expect(store.vendorBooksMapping.create).not.toHaveBeenCalled();
   });
 
   it("preserves the existing unconfigured demo sandbox local mode with an explicit warning", async () => {
