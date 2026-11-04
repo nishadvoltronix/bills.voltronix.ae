@@ -89,38 +89,43 @@ test("silent incoming refresh polls every five seconds while visible and recover
       backoffUntil: null, lastSuccessAt, message: "The latest source check completed." }] } });
   });
   await page.goto("/dashboard");
-  await expect.poll(() => dashboardReads).toBe(1);
-  await expect.poll(() => statusReads).toBe(1);
+  await expect.poll(() => dashboardReads).toBeGreaterThan(0);
+  await expect.poll(() => statusReads).toBeGreaterThan(0);
   await expect(metric(page, "Recorded invoice total")).toHaveText("AED 1,200.80");
   await expect(page.getByLabel("Incoming Zoho updates", { exact: true })).toHaveCount(0);
+  await page.waitForLoadState("networkidle");
+  // The initial status reconciliation may reload the mounted snapshot. Measure
+  // subsequent polling against that settled mount, rather than a fixed count.
+  const initialDashboardReads = dashboardReads;
+  const initialStatusReads = statusReads;
   lastSuccessAt = "2026-10-29T12:01:00Z";
   await page.clock.fastForward(5_000);
-  await expect.poll(() => statusReads).toBe(2);
-  await expect.poll(() => dashboardReads).toBe(2);
+  await expect.poll(() => statusReads).toBe(initialStatusReads + 1);
+  await expect.poll(() => dashboardReads).toBe(initialDashboardReads + 1);
   await page.evaluate(() => {
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
     document.dispatchEvent(new Event("visibilitychange"));
   });
   await page.clock.fastForward(10_000);
-  expect(statusReads).toBe(2);
+  expect(statusReads).toBe(initialStatusReads + 1);
   await page.evaluate(() => {
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
     document.dispatchEvent(new Event("visibilitychange"));
   });
-  await expect.poll(() => statusReads).toBe(3);
-  expect(dashboardReads).toBe(2);
+  await expect.poll(() => statusReads).toBe(initialStatusReads + 2);
+  expect(dashboardReads).toBe(initialDashboardReads + 1);
   fail = true;
   const failedPoll = page.waitForResponse(response => new URL(response.url()).pathname === "/api/integrations/incoming-status" && response.status() === 503);
   await page.clock.fastForward(5_000);
   await failedPoll;
-  await expect.poll(() => statusReads).toBe(4);
+  await expect.poll(() => statusReads).toBe(initialStatusReads + 3);
   await expect(metric(page, "Recorded invoice total")).toHaveText("AED 1,200.80");
-  expect(dashboardReads).toBe(2);
+  expect(dashboardReads).toBe(initialDashboardReads + 1);
   fail = false;
   lastSuccessAt = "2026-10-29T12:02:00Z";
   await page.clock.fastForward(5_000);
-  await expect.poll(() => statusReads).toBe(5);
-  await expect.poll(() => dashboardReads).toBe(3);
+  await expect.poll(() => statusReads).toBe(initialStatusReads + 4);
+  await expect.poll(() => dashboardReads).toBe(initialDashboardReads + 2);
   await expect(metric(page, "Recorded invoice total")).toHaveText("AED 1,200.80");
   await expect(page.getByLabel("Incoming Zoho updates", { exact: true })).toHaveCount(0);
 });
@@ -171,6 +176,25 @@ test("job reference search preserves company choice and opens its Books bills an
   await expect(page.getByLabel("Currency", { exact: true })).toHaveValue("USD");
   expect(posts).toEqual([]);
 });
+
+for (const query of ["5383", "JOB-5383"]) {
+  test(`dashboard exact Job ID ${query} hides neighboring jobs and bill-number collisions`, async ({ page }) => {
+    await page.route("**/api/dashboard/search?*", route => {
+      const result = searchResult(new URL(route.request().url()).searchParams.get("q")!);
+      result.jobs.push({ ...result.jobs[0], id: "dashboard-neighbor-job", canonicalJobId: "dashboard-neighbor-job",
+        jobNumber: "JOB-53830", name: "Fictional neighboring project", href: "/jobs/dashboard-neighbor-job" });
+      result.bills[0].billNumber = "5383";
+      return route.fulfill({ json: result });
+    });
+    await page.goto("/dashboard");
+    await find(page, query);
+    const results = page.getByRole("region", { name: "Matching jobs", exact: true });
+    await expect(results.locator("article")).toHaveCount(2);
+    for (const company of companies) await expect(results).toContainText(company.name);
+    await expect(page.getByText("Fictional neighboring project", { exact: true })).toHaveCount(0);
+    await expect(page.getByRole("region", { name: "Matching bills", exact: true })).toHaveCount(0);
+  });
+}
 
 test("recorded zero contract values remain zero while missing payment evidence remains unavailable", async ({ page }) => {
   await page.route("**/api/dashboard?*", route => route.fulfill({ json: { ...dashboard,

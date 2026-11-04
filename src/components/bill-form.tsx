@@ -15,6 +15,7 @@ import {
   X,
 } from "lucide-react";
 import { calculateBill } from "@/lib/finance";
+import { matchesExactJobSearch, parseExactJobSearch } from "@/lib/job-search";
 import { BOOKS_NO_VAT_NAME, type BooksSelection } from "@/lib/books-selection";
 import {
   PAYMENT_TERMS,
@@ -243,15 +244,18 @@ function BillForm({
       termsError = errorMessage(e);
     }
   }
+  const exactJobSearch = parseExactJobSearch(jobQuery);
   const matchingJobs =
     availableJobs.filter(
       (job) =>
         job.companyId === companyId &&
-        (job.id === jobId ||
+        (exactJobSearch ? matchesExactJobSearch(exactJobSearch, job) : job.id === jobId ||
           `${job.id} ${job.externalCrmId ?? ""} ${job.jobNumber} ${job.name} ${job.customer}`
             .toLowerCase()
             .includes(jobQuery.toLowerCase())),
     ) ?? [];
+  const hiddenSelectedJob = availableJobs.find(job => job.id === jobId && job.companyId === companyId &&
+    !matchingJobs.some(match => match.id === job.id));
   function updateLine(
     key: number,
     field: "description" | "quantity" | "unitPrice",
@@ -741,7 +745,7 @@ function BillForm({
                       aria-label="Search job ID or name"
                       value={jobQuery}
                       onChange={(e) => setJobQuery(e.target.value)}
-                      placeholder="Search job ID or name"
+                      placeholder="Full job ID or part of its name"
                     />
                     <Select
                       id="bill-job"
@@ -759,6 +763,9 @@ function BillForm({
                       <option value="">
                         {jobs.loading ? "Loading jobs…" : "Select a job"}
                       </option>
+                      {hiddenSelectedJob && <option value={hiddenSelectedJob.id} hidden>
+                        {hiddenSelectedJob.jobNumber} · {hiddenSelectedJob.name}
+                      </option>}
                       {matchingJobs.map((job) => (
                         <option key={job.id} value={job.id}>
                           {job.jobNumber} · {job.name}

@@ -5,6 +5,7 @@ import { useState } from "react";
 import { ArrowUpRight, BriefcaseBusiness, LoaderCircle, Plus, ReceiptText, Search, X } from "lucide-react";
 import { money, useApi } from "./api";
 import { useUser } from "./app-shell";
+import { matchesExactJobSearch, parseExactJobSearch } from "@/lib/job-search";
 import { Badge, Button, Card, EmptyState, ErrorState, Field, Input } from "./ui";
 import type { DashboardSearchResult } from "./types";
 import styles from "./dashboard-search.module.css";
@@ -36,12 +37,15 @@ export function DashboardSearch({ companyId = "" }: { companyId?: string }) {
     results.bills.some(row => !/^\/bills\/(?:books\/)?[^/?#]+$/.test(row.href) || !row.companyId || !row.companyName ||
       row.relatedJobs?.some(job => job.companyId !== row.companyId || !historyHref(job))));
   const error = state.error || (wrongScope ? "Search results did not match your selection. Search again." : null);
+  const exactJobSearch = parseExactJobSearch(submitted?.query ?? "");
+  const jobs = (results?.jobs ?? []).filter(job => !exactJobSearch || matchesExactJobSearch(exactJobSearch, job));
+  const bills = exactJobSearch ? [] : results?.bills ?? [];
   const canCreate = user.role !== "MANAGEMENT";
 
   return <Card className={styles.card}>
     <div className={styles.heading}>
       <span className={styles.icon}><Search size={21} /></span>
-      <div><h2>Find a job or bill</h2><p>Search a job ID, bill number or job name to review its bill history and attachments, or add a bill.</p></div>
+      <div><h2>Find a job or bill</h2><p>Enter the full job ID for that job only, or search a bill number or part of a job name.</p></div>
     </div>
     <form className={styles.form} role="search" aria-label="Find a job or bill" onSubmit={event => {
       event.preventDefault();
@@ -64,11 +68,11 @@ export function DashboardSearch({ companyId = "" }: { companyId?: string }) {
       {state.loading ? <p className={styles.message} role="status">Searching jobs and bills…</p>
         : error ? <ErrorState message={error} retry={state.reload} />
           : results && <>
-            {!results.jobs.length && !results.bills.length ? <EmptyState title="No matching job or bill"
-              description="Check the reference or try part of the job ID, invoice number or job name." /> : <>
-              {results.jobs.length > 0 && <section aria-label="Matching jobs" className={styles.group}>
-                <h3>{results.jobs.some(job => job.referenceKind === "CRM_DEAL") ? "Jobs and CRM deals" : "Jobs"} <Badge>{results.jobs.length}</Badge></h3>
-                {results.jobs.map(job => <article key={job.id} className={styles.row}>
+            {!jobs.length && !bills.length ? <EmptyState title="No matching job or bill"
+              description="Check the full job ID, or try part of the invoice number or job name." /> : <>
+              {jobs.length > 0 && <section aria-label="Matching jobs" className={styles.group}>
+                <h3>{jobs.some(job => job.referenceKind === "CRM_DEAL") ? "Jobs and CRM deals" : "Jobs"} <Badge>{jobs.length}</Badge></h3>
+                {jobs.map(job => <article key={job.id} className={styles.row}>
                   <BriefcaseBusiness size={18} className={styles.resultIcon} />
                   <div className={styles.identity}>
                     <strong>{historyReference(job)}</strong>
@@ -88,9 +92,9 @@ export function DashboardSearch({ companyId = "" }: { companyId?: string }) {
                   </div>
                 </article>)}
               </section>}
-              {results.bills.length > 0 && <section aria-label="Matching bills" className={styles.group}>
-                <h3>Bills <Badge>{results.bills.length}</Badge></h3>
-                {results.bills.map(bill => {
+              {bills.length > 0 && <section aria-label="Matching bills" className={styles.group}>
+                <h3>Bills <Badge>{bills.length}</Badge></h3>
+                {bills.map(bill => {
                   const relatedJobs = bill.relatedJobs?.length ? bill.relatedJobs : bill.jobId ? [{ id: bill.jobId,
                     jobNumber: bill.jobNumber || bill.jobId, companyId: bill.companyId, companyName: bill.companyName,
                     canonicalJobId: bill.jobId, href: `/jobs/${encodeURIComponent(bill.jobId)}` }] : [];

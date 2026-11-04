@@ -325,6 +325,7 @@ export type DashboardSearchResult = {
   jobs: {
     id: string;
     canonicalJobId: string | null;
+    externalCrmId?: string | null;
     jobNumber: string | null;
     name: string;
     companyId: string | null;

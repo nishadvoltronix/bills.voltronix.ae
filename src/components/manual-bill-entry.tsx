@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { ArrowRight, LoaderCircle, Plus, Search } from "lucide-react";
 import { api, errorMessage, money, useApi } from "./api";
 import { useManualEntryOnly, useUser } from "./app-shell";
+import { matchesExactJobSearch, parseExactJobSearch } from "@/lib/job-search";
 import type { Company, DashboardSearchResult, Job } from "./types";
 import { Button, Card, EmptyState, Field, Input, LoadingPanel, Notice, PageHeader, Table } from "./ui";
 import styles from "./manual-bill-entry.module.css";
@@ -63,15 +64,18 @@ export function ManualBillEntry() {
       bill.relatedJobs?.some(job => job.companyId !== bill.companyId || !historyHref(job))))
     ? "Search results could not be verified for your companies. Retry the search." : null;
   const matchesError = matches.error || matchesScopeError;
-  const jobs = matchesScopeError ? [] : matches.data?.jobs ?? [];
-  const bills = matchesScopeError ? [] : matches.data?.bills ?? [];
+  const exactJobSearch = parseExactJobSearch(submittedQuery);
+  const savedJobs = matchesScopeError ? [] : matches.data?.jobs ?? [];
+  const jobs = exactJobSearch ? savedJobs.filter(job => matchesExactJobSearch(exactJobSearch, job)) : savedJobs;
+  const bills = matchesScopeError || exactJobSearch ? [] : matches.data?.bills ?? [];
   const crmSearchReady = !manualEntryOnly && searchReady && submittedQuery.length >= 2;
   const crm = useApi<CrmJobSearch>(crmSearchReady ? `/api/jobs/search?${params}` : null);
   const crmScopeError = crm.data && (crm.data.companyId !== null || crm.data.jobs.some((job) =>
     !companyNames.has(job.companyId) || !job.externalCrmId || !job.crmOrganizationId || !job.booksOrganizationId ||
     !job.sourceId || !job.dataCenter || !["production", "sandbox"].includes(job.environment)))
     ? "CRM results could not be verified for your companies. Retry the search." : null;
-  const crmJobs = crmScopeError ? [] : crm.data?.jobs ?? [];
+  const crmMatches = crmScopeError ? [] : crm.data?.jobs ?? [];
+  const crmJobs = exactJobSearch ? crmMatches.filter(job => matchesExactJobSearch(exactJobSearch, job)) : crmMatches;
   const crmError = crm.error || crmScopeError;
   const hideEmptySavedResults = crmSearchReady && !!matches.data && !matches.loading &&
     !matchesError && jobs.length === 0 && bills.length === 0 && (crm.loading || crmJobs.length > 0);
@@ -153,7 +157,7 @@ export function ManualBillEntry() {
           <Search size={17} />Search
         </Button>
       </form>
-      <p id="manual-job-query-hint" className={styles.searchHint}>Enter at least 2 characters, for example 5383, JOB-5383, an invoice number or a project name.</p>
+      <p id="manual-job-query-hint" className={styles.searchHint}>Enter the full job ID, for example 5383 or JOB-5383, to show only that job. You can also search an invoice number or part of a project name.</p>
       <p className="manual-job-search-note">Search saved jobs and bills across your authorized companies. Choose the exact job and company to review its history; an unlinked bill cannot select a job.</p>
       {manualEntryOnly && user.role === "ADMIN" && <Link className="text-link" href="/jobs">Add or manage jobs</Link>}
     </Card>

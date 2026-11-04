@@ -13,6 +13,7 @@ import {
 import { crmJobSnapshotFilter } from "./crm-job-import";
 import { loadBooksProjectHistory } from "./books-project-history";
 import { assertBooksOwnerScopeCurrent, ownedBooksBillIds } from "./bill-ownership";
+import { matchesExactJobSearch, parseExactJobSearch } from "@/lib/job-search";
 
 const maximum = 20;
 type RelatedJob = { id: string; canonicalJobId: string | null; href: string; jobNumber: string | null;
@@ -106,6 +107,48 @@ export async function searchDashboard(actor: Actor, params: URLSearchParams) {
       422,
       "Narrow the company selection before searching this job inventory.",
     );
+  const exactJob = parseExactJobSearch(query);
+  if (exactJob) {
+    // A full job reference is a job lookup. Invoice numbers, customer names and
+    // project-history text cannot introduce another job into this result.
+    const nativeFields = exactJob.kind === "JOB_NUMBER" ? ["jobNumber"] : ["id", "externalCrmId"];
+    const snapshotFields = exactJob.kind === "JOB_NUMBER" ? ["normalizedJobNumber"] : ["id", "externalCrmId"];
+    const [nativeIds, snapshotIds] = await Promise.all([
+      matchingIds("Job", nativeFields, nativeFields,
+        Prisma.sql`(${sqlScope}) AND (isDemo = 0 OR externalCrmId IS NOT NULL)`, query, exactJob.identifiers, true),
+      authorizedSnapshots.length ? matchingIds("CrmJobSnapshot", snapshotFields, snapshotFields,
+        Prisma.sql`id IN (${Prisma.join(authorizedSnapshots.map(row => row.id))})`, query, exactJob.identifiers, true) : [],
+    ]);
+    const [nativeJobs, snapshotJobs] = await Promise.all([
+      db.job.findMany({ where: { ...scope, id: { in: nativeIds }, AND: [realJobFilter] }, select: jobSelect }),
+      snapshotScope && snapshotIds.length ? db.crmJobSnapshot.findMany({
+        where: { AND: [snapshotScope, { id: { in: snapshotIds }, canonicalJobId: null, isStale: false }] }, include: { company },
+      }) : [],
+    ]);
+    const jobs = [
+      ...nativeJobs.filter(job => matchesExactJobSearch(exactJob, job)).map(job => ({
+        id: job.id, canonicalJobId: job.id as string | null, jobNumber: job.jobNumber,
+        externalCrmId: job.externalCrmId, displayReference: job.jobNumber, referenceKind: "JOB" as const,
+        name: job.name, companyId: job.companyId as string | null,
+        companyName: job.company.name.replace(/^\[CONNECTION CHECK\]\s*/, ""),
+        customer: job.customer, currency: job.currency, canCreateBill: canCreateBill(actor), href: `/jobs/${job.id}`,
+      })),
+      ...snapshotJobs.filter(job => matchesExactJobSearch(exactJob, job)).map(job => ({
+        id: job.id, canonicalJobId: null, jobNumber: job.jobNumber ?? job.normalizedJobNumber,
+        externalCrmId: job.externalCrmId, displayReference: job.jobNumber ?? job.normalizedJobNumber ?? job.externalCrmId,
+        referenceKind: job.jobNumber || job.normalizedJobNumber ? "JOB" as const : "CRM_DEAL" as const,
+        name: job.name ?? "Imported CRM job", companyId: job.companyId,
+        companyName: job.company?.name.replace(/^\[CONNECTION CHECK\]\s*/, "") ?? "Unassigned company",
+        customer: job.customerName ?? "", currency: job.currencyCode ?? "", canCreateBill: false, href: `/jobs/crm/${job.id}`,
+      })),
+    ].sort((a, b) => a.displayReference.localeCompare(b.displayReference) || a.id.localeCompare(b.id));
+    await freshFinancialActor(actor);
+    if (JSON.stringify(scope) !== JSON.stringify(await companyFilter(actor, requestedCompanyId)) ||
+      JSON.stringify(snapshotScope) !== JSON.stringify(importedAllowed ? await crmJobSnapshotFilter(actor, requestedCompanyId) : null))
+      throw new HttpError(403, "Your company access changed. Search again.");
+    if (importedAllowed) await assertBooksOwnerScopeCurrent(actor, ownedIds, requestedCompanyId);
+    return { query, jobs: jobs.slice(0, maximum), bills: [], hasMore: nativeIds.length > maximum || snapshotIds.length > maximum || jobs.length > maximum };
+  }
   const identifiers = [
     ...new Set([
       query,

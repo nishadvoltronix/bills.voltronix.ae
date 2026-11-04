@@ -25,6 +25,7 @@ import { describeBooksAttachments } from "@/lib/services/books-attachments";
 import { loadBooksProjectHistory } from "./books-project-history";
 import { presentProjectHistory } from "./books-project-history-presentation";
 import { assertBooksOwnerScopeCurrent } from "./bill-ownership";
+import { matchesExactJobSearch, parseExactJobSearch } from "@/lib/job-search";
 import {
   aggregateAmounts,
   booksFinancialAmounts,
@@ -153,9 +154,10 @@ export async function listJobs(actor: Actor, q = "", companyId?: string) {
   if (q.length > 200) throw new HttpError(422, "Search is too long.");
   const ledger = await loadFinancialLedger(actor, companyId);
   const query = q.normalize("NFKC").trim().toUpperCase();
+  const exactJob = parseExactJobSearch(q);
   return ledger.jobs
     .filter(
-      (job) =>
+      (job) => exactJob ? matchesExactJobSearch(exactJob, job) :
         !query ||
         job.id === q ||
         job.externalCrmId === q ||

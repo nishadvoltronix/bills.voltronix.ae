@@ -109,7 +109,10 @@ describe("CRM company job search", () => {
     expect(result.jobs).toHaveLength(1);
     expect(result.jobs[0]).toMatchObject({ id: linked.id, companyId: "company-a", crmOrganizationId: "9001", booksOrganizationId: "1001", externalCrmId: "5001", jobNumber: "JOB-5384", stage: "Closed Won", contractValue: "2200.00" });
     expect(result.jobs[0].sourceId).toMatch(/^[a-f0-9]{64}$/);
-    expect(new URL(remote.fetcher.mock.calls[1][0]).searchParams.get("criteria")).toBe("((Books_Organization_ID:equals:1001)and(JobDealNumber:starts_with:JOB-5384))");
+    const criteria = new URL(remote.fetcher.mock.calls[1][0]).searchParams.get("criteria");
+    expect(criteria).toContain("Books_Organization_ID:equals:1001");
+    expect(criteria).toContain("JobDealNumber:equals:JOB-5384");
+    expect(criteria).not.toContain("starts_with");
     expect(JSON.stringify(result)).not.toContain("PRIVATE"); expect(store.job.create).not.toHaveBeenCalled(); expect(store.$transaction).not.toHaveBeenCalled();
   });
 
@@ -121,21 +124,28 @@ describe("CRM company job search", () => {
 
   it("supports an exact external record ID without exposing another company's record", async () => {
     const externalCrmId = "9000000000000005001";
-    const remote = connection({ records: [], exact: record({ id: externalCrmId }) });
+    const remote = connection({ records: [
+      record({ id: "5008", JobDealNumber: externalCrmId }),
+      record({ id: `${externalCrmId}0`, JobDealNumber: "JOB-53840" }),
+    ], exact: record({ id: externalCrmId }) });
     const own = await searchCrmJobs(actor, { companyId: "company-a", q: externalCrmId }, remote.transport);
     expect(own.jobs).toMatchObject([{ externalCrmId, jobNumber: "JOB-5384" }]);
     expect(remote.fetcher.mock.calls.map(call => new URL(call[0]).pathname)).toContain(`/crm/v8/Deals/${externalCrmId}`);
-    expect(new URL(remote.fetcher.mock.calls[1][0]).searchParams.get("criteria")).toBe(`((Books_Organization_ID:equals:1001)and(JobDealNumber:starts_with:${externalCrmId}))`);
+    expect(own.jobs).toHaveLength(1);
+    expect(new URL(remote.fetcher.mock.calls[1][0]).searchParams.get("criteria")).toBe(`((Books_Organization_ID:equals:1001)and(JobDealNumber:equals:${externalCrmId}))`);
     const foreign = await searchCrmJobs(actor, { companyId: "company-b", q: externalCrmId }, remote.transport);
     expect(foreign.jobs).toEqual([]); expect(foreign.warning).toBeNull();
   });
 
-  it.each([["5383", "5383"], ["538", "5383"], ["005383", "005383"]])("finds raw and JOB-prefixed job numbers for %s without treating them as CRM record IDs", async (q, digits) => {
+  it.each([["5383", "5383"], ["538", "538"], ["005383", "005383"], ["job-5383", "5383"]])("finds only exact raw and JOB-prefixed job numbers for %s without treating them as CRM record IDs", async (q, digits) => {
     const remote = connection({ records: [
       record({ id: "5101", JobDealNumber: `JOB-${digits}` }), record({ id: "5102", JobDealNumber: digits }),
       record({ id: "5103", JobDealNumber: `JOB-${digits}`, Books_Organization_ID: "1002", Deal_Name: "FOREIGN PRIVATE" }),
       record({ id: "5104", JobDealNumber: `OTHER-${digits}` }),
       record({ id: "5105", JobDealNumber: digits.startsWith("00") ? "JOB-5383" : "JOB-005383" }),
+      record({ id: "5106", JobDealNumber: `JOB-${digits}0` }),
+      record({ id: "5107", JobDealNumber: `JOB-1${digits}` }),
+      record({ id: "5108", JobDealNumber: "OTHER-JOB", Deal_Name: `Fictional ${q} job` }),
     ] });
     const result = await searchCrmJobs(actor, { companyId: "company-a", q }, remote.transport);
     expect(result.warning).toBeNull();
@@ -144,8 +154,29 @@ describe("CRM company job search", () => {
     expect(JSON.stringify(result)).not.toContain("FOREIGN");
     const requests = remote.fetcher.mock.calls.map(call => new URL(call[0]));
     expect(requests.map(url => url.pathname)).toEqual(["/crm/v8/org", "/crm/v8/Deals/search"]);
-    expect(requests[1].searchParams.get("criteria")).toBe(`((Books_Organization_ID:equals:1001)and((JobDealNumber:starts_with:${q})or(JobDealNumber:starts_with:JOB-${q})))`);
+    const criteria = requests[1].searchParams.get("criteria");
+    expect(criteria).toContain("Books_Organization_ID:equals:1001");
+    expect(criteria).toContain(`JobDealNumber:equals:${digits}`);
+    expect(criteria).toContain(`JobDealNumber:equals:JOB-${digits}`);
+    expect(criteria).not.toContain("starts_with");
     expect(store.job.create).not.toHaveBeenCalled(); expect(store.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("returns no CRM jobs when a numeric reference has only neighboring numbers or matching names", async () => {
+    const remote = connection({ records: [record({ JobDealNumber: "JOB-5383" }),
+      record({ id: "5111", JobDealNumber: "JOB-1538" }), record({ id: "5112", JobDealNumber: "5380" }),
+      record({ id: "5113", JobDealNumber: "UNRELATED", Deal_Name: "Fictional job 538" })] });
+    const result = await searchCrmJobs(actor, { companyId: "company-a", q: "538" }, remote.transport);
+    expect(result).toMatchObject({ jobs: [], warning: null, hasMore: false });
+    expect(store.job.create).not.toHaveBeenCalled();
+  });
+
+  it("matches an explicit alphanumeric JOB reference exactly while keeping free-text prefix search", async () => {
+    const rows = [record({ JobDealNumber: "JOB-ALPHA" }), record({ id: "5121", JobDealNumber: "JOB-ALPHA-1" })];
+    const exact = await searchCrmJobs(actor, { companyId: "company-a", q: "job-alpha" }, connection({ records: rows }).transport);
+    expect(exact.jobs.map(job => job.jobNumber)).toEqual(["JOB-ALPHA"]);
+    const prefix = await searchCrmJobs(actor, { companyId: "company-a", q: "JOB" }, connection({ records: rows }).transport);
+    expect(prefix.jobs.map(job => job.jobNumber)).toEqual(["JOB-ALPHA", "JOB-ALPHA-1"]);
   });
 
   it("masks all source financial fields for current DATA_ENTRY users", async () => {
@@ -247,8 +278,8 @@ describe("automatic company identification from authorized CRM sources", () => {
     ]);
     expect(new Set(result.jobs.map(job => job.sourceId)).size).toBe(2);
     const criteria = remote.fetcher.mock.calls.map(call => new URL(call[0])).filter(url => url.pathname.endsWith("/search")).map(url => url.searchParams.get("criteria"));
-    const jobCondition = q === "5384" ? "((JobDealNumber:starts_with:5384)or(JobDealNumber:starts_with:JOB-5384))" : "(JobDealNumber:starts_with:JOB-5384)";
-    expect(criteria).toEqual(expect.arrayContaining(["1001", "1002"].map(org => `((Books_Organization_ID:equals:${org})and${jobCondition})`)));
+    for (const org of ["1001", "1002"]) expect(criteria.some(value => value?.includes(`Books_Organization_ID:equals:${org}`)
+      && value.includes("JobDealNumber:equals:JOB-5384") && value.includes("JobDealNumber:equals:5384") && !value.includes("starts_with"))).toBe(true);
     expect(remote.fetcher.mock.calls.map(call => new URL(call[0]).pathname).every(path => path === "/crm/v8/org" || path === "/crm/v8/Deals/search")).toBe(true);
     expect(criteria).toHaveLength(2); expect(jobs).toEqual([]); expect(store.$transaction).not.toHaveBeenCalled();
   });

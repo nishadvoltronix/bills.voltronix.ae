@@ -6,6 +6,7 @@ import { z } from "zod";
 import type { Actor } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { HttpError } from "@/lib/http";
+import { matchesExactJobSearch, parseExactJobSearch } from "@/lib/job-search";
 import { billScope, canCreateBill, canViewFinancialSummary } from "@/lib/permissions";
 import { booksConfigurationHash, centers, getConfig, IntegrationError, productionBooksRuntimeReady, type CrmMapping, type DataCenter, type ZohoConfig } from "@/lib/integrations/config";
 import { connectionFingerprint } from "@/lib/integrations/connection-fingerprint";
@@ -181,16 +182,18 @@ async function searchCompanyCrmJobs(actor: Actor, input: { companyId: string; q:
       ready(before);
       const transport = transportFor(before, provided);
       await verifyOrganization(transport);
-      // Short digit strings are business job numbers, including their JOB- shorthand.
-      // Longer numeric input retains the separate full CRM record-ID lookup.
-      const jobQueries = /^\d{1,14}$/.test(input.q) ? [input.q, `JOB-${input.q}`] : [input.q];
-      const isCrmRecordQuery = /^\d{15,30}$/.test(input.q);
+      const exactSearch = parseExactJobSearch(input.q);
+      const jobQueries = exactSearch?.identifiers ?? [input.q];
+      // Numeric CRM record IDs have their own exact GET. Business references
+      // never use record IDs or job names as evidence of a matching job number.
+      const crmRecordId = exactSearch?.kind === "RECORD_ID"
+        ? exactSearch.identifiers.find(identifier => /^\d{15,30}$/.test(identifier)) : undefined;
       const response = searchPage(await transport.request(`/crm/v8/${before.mapping.jobModule}/search`, { method: "GET",
-        query: { criteria: criteria(before, jobQueries, "starts_with"), fields: fields(before.mapping), per_page: "25", page: "1" } }), 25);
+        query: { criteria: criteria(before, jobQueries, exactSearch ? "equals" : "starts_with"), fields: fields(before.mapping), per_page: "25", page: "1" } }), 25);
       const rows = response.data;
-      if (isCrmRecordQuery) {
+      if (crmRecordId) {
         try {
-          const exact = await readExact(transport, before, input.q);
+          const exact = await readExact(transport, before, crmRecordId);
           if (exact[companyField] === before.destinations[0].organizationId && !rows.some(row => row.id === exact.id)) rows.unshift(exact);
         } catch (error) {
           if (!(error instanceof IntegrationError && error.code === "REMOTE_NOT_FOUND")) throw error;
@@ -204,8 +207,8 @@ async function searchCompanyCrmJobs(actor: Actor, input: { companyId: string; q:
         // Search text equals can include similar values; the company field is exact.
         if (raw[companyField] !== before.destinations[0].organizationId) return [];
         const job = providerJob(raw, before);
-        return jobQueries.some(query => normalized(job.jobNumber).startsWith(normalized(query))) ||
-          (isCrmRecordQuery && job.externalCrmId === input.q) ? [job] : [];
+        return (exactSearch ? matchesExactJobSearch(exactSearch, job)
+          : jobQueries.some(query => normalized(job.jobNumber).startsWith(normalized(query)))) ? [job] : [];
       });
       const locals = matches.length ? await db.job.findMany({ where: { companyId: input.companyId, externalCrmId: { in: matches.map(job => job.externalCrmId) } }, select: { id: true, externalCrmId: true } }) : [];
       result.jobs = matches.slice(0, 25).map(job => ({ ...job, ...selection(before),

@@ -571,6 +571,71 @@ test("numeric job lookup preserves 5383 while selecting canonical JOB-5383 and p
   await expect(page.getByLabel("Currency", { exact: true })).toHaveValue("AED");
 });
 
+for (const query of ["5383", "JOB-5383"]) {
+  test(`exact Job ID ${query} excludes neighboring references and invoice-only matches`, async ({ page }) => {
+    const exact = { ...jobA, jobNumber: "JOB-5383" };
+    const neighbors = [
+      { ...jobB, jobNumber: "JOB-15383", name: "Fictional leading digit neighbor" },
+      { ...jobA, id: "manual-neighbor-suffix", jobNumber: "JOB-53830", name: "Fictional trailing digit neighbor" },
+    ];
+    const exactCrm = { ...crmA, jobNumber: exact.jobNumber };
+    const neighborCrm = { ...crmB, jobNumber: neighbors[0].jobNumber, name: neighbors[0].name };
+    await page.route("**/api/dashboard/search?*", route => route.fulfill({
+      json: searchEnvelope(new URL(route.request().url()).searchParams.get("q")!, [exact, ...neighbors], [billMatch(neighbors[0], "INV-5383-UNRELATED")]),
+    }));
+    await page.route("**/api/jobs/search?*", route => route.fulfill({ json: crmEnvelope([exactCrm, neighborCrm]) }));
+    await openManual(page);
+    await find(page, query);
+    await expect(jobLink(page, exact)).toBeVisible();
+    await expect(crmAction(page, exactCrm)).toBeVisible();
+    await expect(page.getByRole("table", { name: "Matching jobs", exact: true }).locator("tbody tr")).toHaveCount(1);
+    await expect(page.getByRole("table", { name: "Zoho CRM matches", exact: true }).locator("tbody tr")).toHaveCount(1);
+    for (const neighbor of neighbors) await expect(page.getByText(neighbor.name, { exact: true })).toHaveCount(0);
+    await expect(page.getByRole("region", { name: "Matching bills", exact: true })).toHaveCount(0);
+    await expect(page.getByText("INV-5383-UNRELATED", { exact: true })).toHaveCount(0);
+  });
+}
+
+test("exact Job ID preserves separate authorized company choices and leaves unknown IDs empty", async ({ page }) => {
+  const sameReference = [{ ...jobA, jobNumber: "JOB-5383" }, { ...jobB, jobNumber: "JOB-5383" }];
+  const remote = [{ ...crmA, jobNumber: "JOB-5383" }, { ...crmB, jobNumber: "JOB-5383" }];
+  await page.route("**/api/dashboard/search?*", route => route.fulfill({
+    json: searchEnvelope(new URL(route.request().url()).searchParams.get("q")!, sameReference, [billMatch(jobA, "5383")]),
+  }));
+  await page.route("**/api/jobs/search?*", route => route.fulfill({ json: crmEnvelope(remote) }));
+  await openManual(page);
+  await find(page, "5383");
+  for (const job of sameReference) await expect(jobLink(page, job)).toBeVisible();
+  for (const match of remote) await expect(crmAction(page, match)).toBeVisible();
+  await find(page, "53830");
+  await expect(page.getByRole("heading", { name: "No saved matching job or bill", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "No matching CRM job", exact: true })).toBeVisible();
+  await expect(page.getByRole("table")).toHaveCount(0);
+});
+
+test("job selector shows only the exact Job ID without silently replacing its existing allocation", async ({ page }) => {
+  const exact = { ...jobA, jobNumber: "JOB-5383" };
+  const selected = { ...jobA, id: "manual-selected-neighbor", jobNumber: "JOB-53830", name: "Fictional current allocation" };
+  const nameOnly = { ...jobA, id: "manual-name-neighbor", jobNumber: "JOB-9900", name: "Fictional 5383 installation" };
+  const elsewhere = { ...jobB, jobNumber: "JOB-5383" };
+  await page.route(/\/api\/jobs(?:\?.*)?$/, route => route.fulfill({ json: { jobs: [exact, selected, nameOnly, elsewhere] } }));
+  await page.route(`**/api/jobs/${selected.id}`, route => route.fulfill({ json: detail(selected) }));
+  await page.goto(`/bills/new?jobId=${selected.id}`);
+  const allocation = page.getByLabel(/^Job \/ project/);
+  await expect(allocation).toHaveValue(selected.id);
+  await page.getByRole("textbox", { name: "Search job ID or name", exact: true }).fill("5383");
+  await expect(allocation.locator("option:not([hidden])")).toHaveCount(2);
+  await expect(allocation.locator(`option[value="${exact.id}"]`)).not.toHaveAttribute("hidden");
+  await expect(allocation.locator(`option[value="${selected.id}"]`)).toHaveAttribute("hidden", "");
+  await expect(allocation.locator(`option[value="${nameOnly.id}"]`)).toHaveCount(0);
+  await expect(allocation.locator(`option[value="${elsewhere.id}"]`)).toHaveCount(0);
+  await expect(allocation).toHaveValue(selected.id);
+  await allocation.selectOption(exact.id);
+  await expect(allocation).toHaveValue(exact.id);
+  await page.getByRole("textbox", { name: "Search job ID or name", exact: true }).fill("Fictional 5383");
+  await expect(allocation.locator(`option[value="${nameOnly.id}"]`)).toHaveCount(1);
+});
+
 test("an ambiguous job reference shows both companies and uses the explicitly selected match for bill prefill", async ({ page }) => {
   const savedJobs = [{ ...jobA, jobNumber: reference }, { ...jobB, jobNumber: reference }];
   const remoteJobs = [{ ...crmA, jobNumber: reference }, { ...crmB, jobNumber: reference }];

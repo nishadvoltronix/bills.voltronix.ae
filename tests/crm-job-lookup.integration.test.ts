@@ -75,6 +75,27 @@ afterAll(async () => {
 });
 
 describe("shared CRM job resolution on disposable MySQL", () => {
+  it("shows only the exact numeric job reference across authorized companies even when CRM returns neighboring jobs", async () => {
+    const rows = [record("87911", booksA, "JOB-5383"), record("87912", booksB, "5383"),
+      record("87913", booksA, "JOB-53830"), record("87914", booksA, "JOB-15383"),
+      record("87915", booksA, "JOB-005383"), record("87916", booksA, "UNRELATED", "Fictional job 5383")];
+    const remote = connection(rows);
+    const before = await db.job.count({ where: { companyId: { in: companyIds } } });
+    for (const q of ["5383", "job-5383"]) {
+      const result = await searchCrmJobs(actor, { q }, remote.transport);
+      expect(result).toMatchObject({ companyId: null, warning: null, hasMore: false });
+      expect(result.jobs.map(job => [job.companyId, job.externalCrmId])).toEqual([[companyA, "87911"], [companyB, "87912"]]);
+    }
+    const own = await searchCrmJobs(restricted, { q: "5383" }, remote.transport);
+    expect(own.jobs.map(job => job.externalCrmId)).toEqual(["87911"]);
+    expect((await searchCrmJobs(actor, { q: "538" }, remote.transport)).jobs).toEqual([]);
+    expect((await searchCrmJobs(actor, { q: "005383" }, remote.transport)).jobs.map(job => job.externalCrmId)).toEqual(["87915"]);
+    expect(remote.fetcher.mock.calls.filter(([url]) => new URL(url).pathname.endsWith("/search"))
+      .every(([url]) => !new URL(url).searchParams.get("criteria")!.includes("starts_with"))).toBe(true);
+    expect(await db.job.count({ where: { companyId: { in: companyIds } } })).toBe(before);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("automatically searches authorized company sources without mixing their identities or revealing inaccessible matches", async () => {
     const query = `AUTO-${tag}`;
     const rows = [record("87901", booksA, query, "Fictional automatic Alpha"), record("87902", booksB, query, "Fictional automatic Beta")];

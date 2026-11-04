@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Job, Prisma } from "@prisma/client";
 import type { Actor } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { getJob } from "@/lib/services/catalog";
+import { getJob, listJobs } from "@/lib/services/catalog";
 import { booksAttachmentMetadataHash } from "@/lib/services/books-attachments";
 import { searchDashboard } from "@/lib/services/dashboard-search";
 import { createBill, getBill, listBills, updateBill } from "@/lib/services/bills";
@@ -256,6 +256,75 @@ afterAll(async () => {
 });
 
 describe("manual job lookup through confirmed bill identity", () => {
+  it("returns only exact job references across authorized companies and never expands an ID through invoices or names", async () => {
+    const exactA = await job(companyA, "JOB-5383", "Fictional exact site");
+    const exactB = await job(companyB, "5383", "Fictional exact second company");
+    await job(companyA, "JOB-15383", "Fictional neighboring number");
+    await job(companyA, "JOB-53830", "Fictional neighboring suffix");
+    await job(companyA, "JOB-91234", "Fictional site named 5383");
+    await native(jobOtherA, "5383");
+    await native(jobOtherA, "JOB-5383");
+    await mirror(companyA, "905383", "5383");
+    await native(jobOtherA, "7356");
+    await job(companyA, "JOB-17356", "Fictional customer 7356");
+    const before = await Promise.all([db.job.count(), db.bill.count(), db.integrationJob.count()]);
+    for (const reference of ["5383", "JOB-5383", "job5383", " job - 5383 "]) {
+      const all = await searchDashboard(admin, query(reference));
+      expect(all.jobs.map(row => row.id).sort()).toEqual([exactA.id, exactB.id].sort());
+      expect(all).toMatchObject({ bills: [], hasMore: false });
+      expect((await searchDashboard(admin, query(reference, companyA))).jobs.map(row => row.id)).toEqual([exactA.id]);
+      expect((await searchDashboard(entry, query(reference))).jobs.map(row => row.id)).toEqual([exactA.id]);
+      expect((await listJobs(admin, reference)).map(row => row.id).sort()).toEqual([exactA.id, exactB.id].sort());
+      expect((await listJobs(entry, reference)).map(row => row.id)).toEqual([exactA.id]);
+    }
+    await expect(searchDashboard(outsider, query("5383", companyA))).rejects.toMatchObject({ status: 404 });
+    expect(await searchDashboard(admin, query("7356", companyA))).toMatchObject({ jobs: [], bills: [], hasMore: false });
+    expect(await listJobs(admin, "7356", companyA)).toEqual([]);
+    expect(await Promise.all([db.job.count(), db.bill.count(), db.integrationJob.count()])).toEqual(before);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("finds complete legacy numeric job formats without reverting to substring search", async () => {
+    for (const [number, reference] of [["6021", "JOB6021"], ["6022", "JOB 6022"], ["6023", "JOB - 6023"]]) {
+      const target = await job(companyA, reference);
+      await job(companyA, `JOB-${number}0`);
+      const result = await searchDashboard(admin, query(number, companyA));
+      expect(result.jobs.map(row => row.id)).toEqual([target.id]);
+      expect(result.bills).toEqual([]);
+      expect((await listJobs(admin, number, companyA)).map(row => row.id)).toEqual([target.id]);
+    }
+  });
+
+  it("matches stored CRM job references exactly and preserves record-ID identity without invoice fallback", async () => {
+    const crmOrganizationId = `${organizationA}9`;
+    const run = await db.crmImportRun.create({ data: { crmOrganizationId, dataCenter: "US", environment: "production", sourceModule: "Deals",
+      initiatedById: admin.id, scopeHash: "d".repeat(64), mappingJson: {}, fieldsJson: [] } });
+    const snapshot = await db.crmJobSnapshot.create({ data: { companyId: companyA, crmOrganizationId, dataCenter: "US", environment: "production",
+      sourceModule: "Deals", externalCrmId: "1234567890123456789", jobNumber: "JOB-5483", normalizedJobNumber: "JOB-5483",
+      name: "Fictional imported job", customerName: "Fictional imported customer", currencyCode: "AED", linkStatus: "PENDING",
+      sourceRecordJson: {}, importRunId: run.id, lastSeenAt: new Date() } });
+    await db.crmJobSnapshot.create({ data: { companyId: companyA, crmOrganizationId, dataCenter: "US", environment: "production",
+      sourceModule: "Deals", externalCrmId: "1234567890123456790", jobNumber: "JOB-15483", normalizedJobNumber: "JOB-15483",
+      name: "Fictional 5483 name", customerName: "Fictional customer", currencyCode: "AED", linkStatus: "PENDING",
+      sourceRecordJson: {}, importRunId: run.id, lastSeenAt: new Date() } });
+    await native(jobOtherA, "5483");
+    for (const reference of ["5483", "job-5483", "1234567890123456789"]) {
+      const result = await searchDashboard(admin, query(reference, companyA));
+      expect(result.jobs).toEqual([expect.objectContaining({ id: snapshot.id, jobNumber: "JOB-5483", externalCrmId: snapshot.externalCrmId })]);
+      expect(result.bills).toEqual([]);
+    }
+    expect((await searchDashboard(outsider, query("5483"))).jobs).toEqual([]);
+    const local = await db.job.create({ data: { id: randomUUID(), companyId: companyA, jobNumber: "JOB-6456", name: "Fictional record-ID job",
+      customer: "Fictional customer", externalCrmId: "1234567890123456799" } });
+    await job(companyA, local.externalCrmId!);
+    for (const reference of [local.id, local.externalCrmId!]) {
+      const result = await searchDashboard(admin, query(reference, companyA));
+      expect(result.jobs.map(row => row.id)).toEqual([local.id]);
+      expect(result.bills).toEqual([]);
+    }
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("retains three original entrants under one job through edits, lists, search and a synchronized Books mirror", async () => {
     const writers = await Promise.all(["One", "Two", "Three"].map(async (name, index) => {
       const user = await db.user.create({ data: { email: `entry-author-${index}-${tag}@example.invalid`,
