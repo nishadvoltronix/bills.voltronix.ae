@@ -88,7 +88,13 @@ const navigation = [
     label: "Account security",
     href: "/account",
     icon: LockKeyhole,
-    roles: all,
+    roles: ["ADMIN"],
+  },
+  {
+    label: "User passwords",
+    href: "/account/users",
+    icon: LockKeyhole,
+    roles: ["ADMIN"],
   },
 ];
 export function Brand({ light = false }: { light?: boolean }) {
@@ -174,7 +180,7 @@ export function AppShell({
   const showOcr = user.role !== "ACCOUNTS" && ocrWorkspaceEnabled && !manualEntryOnly;
   const scopedNavigation = user.role === "ACCOUNTS" ? [
     { label: "Bill entry", href: "/bills/manual", icon: ReceiptText, roles: ["ACCOUNTS"], section: "WORKSPACE" },
-    ...navigation.filter((item) => ["/bills", "/vendors", "/account"].includes(item.href))
+    ...navigation.filter((item) => ["/bills", "/vendors"].includes(item.href))
       .map((item) => item.href === "/bills" ? { ...item, label: "Bills" } : item),
   ] : navigation;
   const nav = scopedNavigation.filter((item) => item.roles.includes(user.role) && canAccessRolePath(user.role, item.href) &&

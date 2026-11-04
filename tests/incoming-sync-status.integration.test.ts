@@ -90,6 +90,7 @@ describe("saved incoming synchronization status on disposable MySQL", () => {
 
   it("scopes Books rows and shared CRM company labels to each authorized reader and filter", async () => {
     const alpha = await getIncomingSyncStatus(reader);
+    expect(alpha.sources.find(source => source.kind === "BOOKS")?.processedCount).toBeNull();
     expect(ids(alpha)).toEqual([stateIds.booksA, stateIds.crm].sort());
     expect(alpha.sources.find(source => source.kind === "CRM")).toMatchObject({ companyId: null,
       companyName: companyA.name, processedCount: null });

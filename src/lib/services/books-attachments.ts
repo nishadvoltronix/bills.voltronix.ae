@@ -23,6 +23,7 @@ import {
 } from "@/lib/services/documents";
 import type { IncomingSyncInput } from "./incoming-sync-types";
 import { assertIncomingBooksContext } from "./incoming-books-context";
+import { assertBooksBillOwner } from "./bill-ownership";
 
 type BillSource = Pick<
   BooksBill,
@@ -437,6 +438,7 @@ async function readableAttachment(
     include: { bill: true },
   });
   if (!attachment) throw new HttpError(404, "Books attachment not found.");
+  await assertBooksBillOwner(actor, billId);
   if (!currentAttachment(attachment.bill, attachment))
     throw new HttpError(
       409,

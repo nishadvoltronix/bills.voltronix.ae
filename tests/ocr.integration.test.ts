@@ -355,6 +355,20 @@ describe("persisted OCR workflows on real MySQL with mocked provider", () => {
       version: review.version,
     });
   });
+  it("conceals another creator's duplicate from OCR read warnings while preserving universal save-time protection", async () => {
+    const number = `OCR-PRIVATE-DUPLICATE-${tag}`;
+    const existing = await createBill(other, input(number));
+    const review = await extracted(number);
+    expect(review.warnings).not.toContainEqual(expect.stringContaining("already exists"));
+    expect((await getOcrDocument(admin, review.id)).warnings).toContainEqual(expect.stringContaining("already exists"));
+    await expect(reviewOcrDocument(staff, review.id, {
+      version: review.version, confirmed: true, bill: input(number),
+    })).rejects.toMatchObject({ code: "P2002" });
+    expect(await db.bill.findUniqueOrThrow({ where: { id: existing.id } })).toMatchObject({ createdById: other.id });
+    expect(await db.ocrDocument.findUniqueOrThrow({ where: { id: review.id } })).toMatchObject({
+      status: "REVIEW_REQUIRED", billId: null, version: review.version,
+    });
+  });
   it("bounds attempts and preserves originals after permanent provider failures", async () => {
     const batch = await queued();
     const id = batch.documents[0].id;

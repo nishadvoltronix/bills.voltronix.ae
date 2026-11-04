@@ -5,6 +5,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON `billing_operational`.`Session` TO 'bill
 GRANT SELECT, INSERT, UPDATE, DELETE ON `billing_operational`.`LoginAttempt` TO 'billing_runtime'@'%';
 GRANT SELECT, INSERT, UPDATE, DELETE ON `billing_operational`.`Vendor` TO 'billing_runtime'@'%';
 GRANT SELECT, INSERT, UPDATE, DELETE ON `billing_operational`.`VendorBooksMapping` TO 'billing_runtime'@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE ON `billing_operational`.`VendorBooksSync` TO 'billing_runtime'@'%';
 GRANT SELECT, INSERT, UPDATE, DELETE ON `billing_operational`.`Job` TO 'billing_runtime'@'%';
 GRANT SELECT, INSERT, UPDATE, DELETE ON `billing_operational`.`Bill` TO 'billing_runtime'@'%';
 GRANT SELECT, INSERT, UPDATE, DELETE ON `billing_operational`.`BillLine` TO 'billing_runtime'@'%';

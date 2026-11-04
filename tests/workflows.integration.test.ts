@@ -82,7 +82,7 @@ describe("permissioned expense reports", () => {
       vendorId,
       category: "MATERIALS",
     });
-    const report = await expenseReport(management, filters);
+    const report = await expenseReport(admin, filters);
     expect(report.count).toBe(1);
     expect(report.totals).toEqual({
       invoiced: "199.50",
@@ -92,12 +92,13 @@ describe("permissioned expense reports", () => {
     });
     expect(report.rows[0].invoiceNumber).toBe(`REPORT-${tag}`);
     expect(exportExpenseReport(report)).toContain(`REPORT-${tag}`);
+    expect((await expenseReport(management, filters)).count).toBe(0);
     filters.set("from", "2026-11-01");
     filters.set("to", "2026-11-30");
-    const november = await expenseReport(management, filters);
+    const november = await expenseReport(admin, filters);
     expect(november.count).toBe(1);
     expect(november.totals.recognized).toBe("0.00");
-    const lifetime = await getJob(management, job.id);
+    const lifetime = await getJob(admin, job.id);
     expect(lifetime.job.recognizedExpenses).toBe("190.00");
     expect(lifetime.job.estimatedProfit).toBe("810.00");
     await expect(expenseReport(staff, filters)).rejects.toMatchObject({
@@ -191,11 +192,13 @@ describe("core bill workflow on real MySQL", () => {
       expect(await db.auditLog.count({ where: { entityId: saved.id, action: "SYNC_CONFIGURATION_BLOCKED" } })).toBe(0);
       const accountHistory = await getJob(accounts, job.id);
       expect(accountHistory.job).toMatchObject({ recognizedExpenses: null, outstanding: null, contractValue: null });
-      expect(accountHistory.bills).toEqual(expect.arrayContaining([expect.objectContaining({ id: saved.id, total: "199.50" })]));
+      expect(accountHistory.bills.some(bill => bill.id === saved.id)).toBe(false);
       expect((await getJob(admin, job.id)).job).toMatchObject({ recognizedExpenses: "190.00", outstanding: "199.50" });
-      await actOnBill(accounts, saved.id, { action: "payment", version: saved.version, amount: "50.00", reference: `MANUAL-PAY-${tag}` });
+      await expect(actOnBill(accounts, saved.id, { action: "payment", version: saved.version, amount: "50.00", reference: `FORBIDDEN-PAY-${tag}` })).rejects.toMatchObject({ status: 404 });
+      expect(await db.payment.count({ where: { billId: saved.id } })).toBe(0);
+      await actOnBill(admin, saved.id, { action: "payment", version: saved.version, amount: "50.00", reference: `MANUAL-PAY-${tag}` });
       expect((await getBill(staff, saved.id))).toMatchObject({ status: "READY", paidAmount: "50.00", outstanding: "149.50" });
-      expect((await expenseReport(management, new URLSearchParams({ jobId: job.id, currency: "AED" }))).totals)
+      expect((await expenseReport(admin, new URLSearchParams({ jobId: job.id, currency: "AED" }))).totals)
         .toEqual({ invoiced: "199.50", recognized: "190.00", paid: "50.00", outstanding: "149.50" });
       expect(network).not.toHaveBeenCalled();
     } finally {
@@ -339,6 +342,9 @@ describe("core bill workflow on real MySQL", () => {
     await expect(getBill(otherStaff, bill.id)).rejects.toMatchObject({
       status: 404,
     });
+    await expect(getBill(accounts, bill.id)).rejects.toMatchObject({ status: 404 });
+    await expect(getBill(management, bill.id)).rejects.toMatchObject({ status: 404 });
+    expect((await getBill(admin, bill.id)).id).toBe(bill.id);
     await expect(createBill(management, input())).rejects.toMatchObject({
       status: 403,
     });
@@ -435,7 +441,7 @@ describe("core bill workflow on real MySQL", () => {
   });
 
   it("tracks partial/full payments, blocks overpayment, and rolls back rejected mutations", async () => {
-    let bill = await createBill(staff, input({ submit: true }));
+    let bill = await createBill(accounts, input({ submit: true }));
     bill = await actOnBill(accounts, bill.id, {
       action: "payment",
       version: bill.version,
@@ -482,13 +488,15 @@ describe("core bill workflow on real MySQL", () => {
   it("recognizes finalized net costs immediately and removes cancelled costs", async () => {
     const before = (await getJob(admin, jobId)).job.recognizedExpenses;
     const bill = await createBill(staff, input({ submit: true }));
-    expect(Number((await getJob(management, jobId)).job.recognizedExpenses)).toBe(
+    expect(Number((await getJob(admin, jobId)).job.recognizedExpenses)).toBe(
       Number(before) + 190,
     );
     const accountHistory = await getJob(accounts, jobId);
     expect(accountHistory.job.recognizedExpenses).toBeNull();
-    expect(accountHistory.bills).toEqual(expect.arrayContaining([expect.objectContaining({ id: bill.id, total: "199.50" })]));
-    const cancelled = await actOnBill(accounts, bill.id, {
+    expect(accountHistory.bills.some(row => row.id === bill.id)).toBe(false);
+    await expect(actOnBill(accounts, bill.id, { action: "cancel", version: bill.version, reason: "Forbidden non-owner cancellation" })).rejects.toMatchObject({ status: 404 });
+    expect((await getBill(staff, bill.id)).status).toBe("READY");
+    const cancelled = await actOnBill(admin, bill.id, {
       action: "cancel",
       version: bill.version,
       reason: "Fictional cancellation",

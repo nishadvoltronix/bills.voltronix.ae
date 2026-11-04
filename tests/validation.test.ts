@@ -254,7 +254,7 @@ describe("role and ownership rules", () => {
     ).toBe(false);
     expect(
       canEditBill(accounts, { createdById: "entry", status: "REJECTED" }),
-    ).toBe(true);
+    ).toBe(false);
   });
   it("requires independent approval, including for administrators", () => {
     expect(
@@ -268,7 +268,7 @@ describe("role and ownership rules", () => {
         createdById: "entry",
         status: "PENDING_APPROVAL",
       }),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       canApproveBill(entry, {
         createdById: "another",

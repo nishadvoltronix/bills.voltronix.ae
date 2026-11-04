@@ -75,19 +75,19 @@ beforeEach(() => {
   store.company.findUnique.mockImplementation(async ({ where }: { where: { id: string } }) => companies.find(company => company.id === where.id) ?? null);
   store.companyIntegrationDestination.findMany.mockImplementation(async ({ where }: { where: { companyId: string } }) =>
     destinations.filter(item => item.companyId === where.companyId).map(({ organizationId, dataCenter, environment }) => ({ organizationId, dataCenter, environment })));
-  store.vendor.findMany.mockImplementation(async ({ where, take }: { where: Filter; take: number }) => vendors.filter(v => match(v, where)).slice(0, take).map(localView));
+  store.vendor.findMany.mockImplementation(async ({ where, skip = 0, take }: { where: Filter; skip?: number; take: number }) => vendors.filter(v => match(v, where)).slice(skip, skip + take).map(localView));
   store.vendor.findFirst.mockImplementation(async ({ where }: { where: Filter }) => { const vendor = vendors.find(v => match(v, where)); return vendor ? localView(vendor) : null; });
-  store.vendorBooksMapping.findMany.mockImplementation(async ({ where, take }: { where: Omit<Partial<Mapping>, "externalVendorId"> & { externalVendorId?: string | { in: string[] }; vendor: Filter }; take?: number }) => {
+  store.vendorBooksMapping.findMany.mockImplementation(async ({ where, skip = 0, take }: { where: Omit<Partial<Mapping>, "externalVendorId"> & { externalVendorId?: string | { in: string[] }; vendor: Filter }; skip?: number; take?: number }) => {
     return mappings.filter(mapping => {
       const vendor = vendors.find(v => v.id === mapping.vendorId)!;
       const wanted = where.externalVendorId;
       return mapping.organizationId === where.organizationId && mapping.dataCenter === where.dataCenter && mapping.environment === where.environment &&
         (!wanted || (typeof wanted === "string" ? mapping.externalVendorId === wanted : wanted.in.includes(mapping.externalVendorId))) && match(vendor, where.vendor);
-    }).slice(0, take).map(mapping => ({ externalVendorId: mapping.externalVendorId, vendor: localView(vendors.find(v => v.id === mapping.vendorId)!) }));
+    }).slice(skip, take === undefined ? undefined : skip + take).map(mapping => ({ externalVendorId: mapping.externalVendorId, vendor: localView(vendors.find(v => v.id === mapping.vendorId)!) }));
   });
-  store.vendorBooksMapping.findUnique.mockImplementation(async ({ where }: { where: { organizationId_dataCenter_environment_externalVendorId: Omit<Mapping, "id" | "vendorId"> } }) => {
-    const key = where.organizationId_dataCenter_environment_externalVendorId;
-    const mapping = mappings.find(item => item.organizationId === key.organizationId && item.dataCenter === key.dataCenter && item.environment === key.environment && item.externalVendorId === key.externalVendorId);
+  store.vendorBooksMapping.findUnique.mockImplementation(async ({ where }: { where: { organizationId_dataCenter_environment_externalVendorId?: Omit<Mapping, "id" | "vendorId">; vendorId_organizationId_dataCenter_environment?: Omit<Mapping, "id" | "externalVendorId"> } }) => {
+    const key = where.organizationId_dataCenter_environment_externalVendorId ?? where.vendorId_organizationId_dataCenter_environment!;
+    const mapping = mappings.find(item => item.organizationId === key.organizationId && item.dataCenter === key.dataCenter && item.environment === key.environment && ("externalVendorId" in key ? item.externalVendorId === key.externalVendorId : item.vendorId === key.vendorId));
     const vendor = mapping && vendors.find(v => v.id === mapping.vendorId);
     return mapping && vendor ? { ...mapping, vendor: { ...localView(vendor), externalZohoId: vendor.externalZohoId } } : null;
   });
@@ -103,6 +103,50 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllEnvs());
 
 describe("company-specific bill vendor search", () => {
+  it("pages both provider and pending-local feeds without truncating either or hiding safe local IDs", async () => {
+    for (let index = 0; index < 26; index++) local({ name: `Pending ${index}` });
+    local({ companyId: "company-b", name: "Foreign pending" });
+    const fetcher = vi.fn<Fetch>(async url => {
+      const number = Number(new URL(url).searchParams.get("page"));
+      return new Response(JSON.stringify({ code: 0, contacts: number === 1 ? [contact()] : [], page_context: { page: number, per_page: 25, has_more_page: false } }));
+    });
+    const transport = new ZohoTransport(getConfig("ZOHO", process.env, "1001"), async () => "fictional-token", fetcher);
+    const first = await searchBillVendors(actor, { companyId: "company-a" }, transport);
+    const second = await searchBillVendors(actor, { companyId: "company-a", page: 2 }, transport);
+    expect(first).toMatchObject({ page: 1, perPage: 25, hasMore: true, warning: null });
+    expect(first.vendors).toHaveLength(26);
+    expect(second).toMatchObject({ page: 2, perPage: 25, hasMore: false, warning: null });
+    expect(second.vendors).toHaveLength(1);
+    const pending = [...first.vendors, ...second.vendors].filter(row => !row.externalVendorId);
+    expect(new Set(pending.map(row => row.id)).size).toBe(26);
+    expect(pending.every(row => row.companyId === "company-a" && row.id && row.booksMappingRequired)).toBe(true);
+    expect(store.vendor.create).not.toHaveBeenCalled(); expect(store.vendorBooksMapping.create).not.toHaveBeenCalled();
+  });
+
+  it("promotes a verified exact provider name beyond a broad first page without losing contains matches", async () => {
+    const fetcher = vi.fn<Fetch>(async url => {
+      const exact = new URL(url).searchParams.has("contact_name");
+      return new Response(JSON.stringify(page([contact({ contact_id: exact ? "2002" : "2001", contact_name: exact ? "Acme" : "Acme Industrial" })], !exact)));
+    });
+    const result = await searchBillVendors(actor, { companyId: "company-a", q: "Acme" }, new ZohoTransport(getConfig("ZOHO", process.env, "1001"), async () => "fictional-token", fetcher));
+    expect(result.vendors.map(row => row.name)).toEqual(["Acme", "Acme Industrial"]);
+    expect(result.hasMore).toBe(true); expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher.mock.calls.every(([, options]) => options?.method === "GET")).toBe(true);
+  });
+
+  it("keeps valid contains results if the optional exact-name read fails", async () => {
+    const fetcher = vi.fn<Fetch>(async url => new Response(JSON.stringify(new URL(url).searchParams.has("contact_name") ? { code: 123, message: "PRIVATE" } : page([contact({ contact_name: "Acme Industrial" })], true))));
+    const result = await searchBillVendors(actor, { companyId: "company-a", q: "Acme" }, new ZohoTransport(getConfig("ZOHO", process.env, "1001"), async () => "fictional-token", fetcher));
+    expect(result.vendors).toMatchObject([{ name: "Acme Industrial" }]); expect(result.warning).toContain("Load more");
+    expect(JSON.stringify(result)).not.toContain("PRIVATE");
+  });
+
+  it("rejects a replayed first provider page while retaining the correctly paged pending locals", async () => {
+    for (let index = 0; index < 26; index++) local({ name: `Pending ${index}` });
+    const result = await searchBillVendors(actor, { companyId: "company-a", page: 2 }, connection(page([contact()])).transport);
+    expect(result.vendors).toHaveLength(1); expect(result.vendors[0]).toMatchObject({ booksMappingRequired: true, companyId: "company-a" });
+    expect(result.vendors[0].externalVendorId).toBeUndefined(); expect(result.warning).toBeTruthy();
+  });
   it("manual mode exposes the company's saved vendors without consulting its configured Books destination", async () => {
     vi.stubEnv("MANUAL_ENTRY_ONLY", "true");
     companies[0].isDemo = false;
@@ -139,11 +183,15 @@ describe("company-specific bill vendor search", () => {
     ]));
     const result = await searchBillVendors(actor, { companyId: "company-a", q: "Books" }, transport);
     expect(result).toMatchObject({ companyId: "company-a", organizationId: "1001", selectedVendor: null, warning: null, hasMore: false });
-    expect(result.vendors).toHaveLength(1);
-    expect(result.vendors[0]).toMatchObject({ id: null, name: "Books supplier", externalVendorId: "2001", ...destination });
+    expect(result.vendors).toHaveLength(4);
+    expect(result.vendors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ externalVendorId: "2001", selectable: true, ...destination }),
+      expect.objectContaining({ externalVendorId: "2003", selectable: false, unavailableReason: "Inactive in Zoho" }),
+      expect.objectContaining({ externalVendorId: "2004", selectable: false, unavailableReason: "Currency unavailable for bill entry" }),
+      expect.objectContaining({ name: "Books unrelated local", booksMappingRequired: true }),
+    ]));
     const query = new URL(fetcher.mock.calls[0][0]).searchParams;
-    expect(Object.fromEntries(query)).toEqual({ contact_type: "vendor", contact_name_contains: "Books", per_page: "25", page: "1", organization_id: "1001" });
-    expect(query.has("filter_by")).toBe(false);
+    expect(Object.fromEntries(query)).toEqual({ contact_type: "vendor", filter_by: "Status.All", contact_name_contains: "Books", per_page: "25", page: "1", organization_id: "1001" });
     expect(JSON.stringify(result)).not.toContain("PRIVATE ADDRESS");
     expect(store.vendor.create).not.toHaveBeenCalled();
   });
@@ -173,19 +221,20 @@ describe("company-specific bill vendor search", () => {
     expect(JSON.stringify(result)).not.toContain("PRIVATE PROVIDER RESPONSE");
   });
 
-  it("deduplicates exact mapped/provider identities and drops mapped vendors the provider identifies as inactive", async () => {
+  it("deduplicates mapped identities and keeps inactive providers visible but unselectable", async () => {
     const saved = local({ name: "Books supplier" }); mapped(saved);
     mapped(local({ name: "Inactive supplier" }), { externalVendorId: "2002" });
     const result = await searchBillVendors(actor, { companyId: "company-a" }, connection(page([contact(), contact({ contact_id: "2002", status: "inactive" })])).transport);
-    expect(result.vendors).toHaveLength(1);
-    expect(result.vendors[0].id).toBe(saved.id);
+    expect(result.vendors).toHaveLength(2);
+    expect(result.vendors.find(row => row.externalVendorId === "2001")?.id).toBe(saved.id);
+    expect(result.vendors.find(row => row.externalVendorId === "2002")).toMatchObject({ selectable: false, unavailableReason: "Inactive in Zoho" });
   });
 
   it("hydrates an exact-company existing unmapped vendor without a provider request", async () => {
     const saved = local({ name: "Historical supplier" });
     const { transport, fetcher } = connection(page([]));
     const result = await searchBillVendors(actor, { companyId: "company-a", vendorId: saved.id }, transport);
-    expect(result.selectedVendor).toEqual(localView(saved));
+    expect(result.selectedVendor).toEqual({ ...localView(saved), booksMappingRequired: true });
     expect(result.vendors).toEqual([]);
     expect(fetcher).not.toHaveBeenCalled();
     await expect(searchBillVendors(actor, { companyId: "company-b", vendorId: saved.id }, transport)).rejects.toMatchObject({ status: 404 });
@@ -280,7 +329,7 @@ describe("company-specific bill vendor search", () => {
     expect(store.vendorBooksMapping.create).not.toHaveBeenCalled();
     expect(store.auditLog.create).not.toHaveBeenCalled();
     const hydrated = await searchBillVendors(actor, { companyId: "company-a", vendorId: own.id }, transport);
-    expect(hydrated.selectedVendor).toEqual(localView(own));
+    expect(hydrated.selectedVendor).toEqual({ ...localView(own), booksMappingRequired: true });
   });
 
   it("bounds offline local suggestions and rechecks membership after reading them", async () => {
@@ -301,7 +350,7 @@ describe("company-specific bill vendor search", () => {
     expect(store.vendor.findMany.mock.calls[0][0].where.name.contains).toBe("\\%\\_\\\\");
     destinations = [{ companyId: "company-a", ...destination }];
     const providerResult = await searchBillVendors(actor, { companyId: "company-a", q: "%" }, connection(page([contact({ contact_name: "100% supplier" }), contact({ contact_id: "2002", contact_name: "100 other supplier" })])).transport);
-    expect(providerResult.vendors.map(item => item.name)).toEqual(["100% supplier"]);
+    expect(providerResult.vendors.map(item => item.name)).toEqual(expect.arrayContaining(["100% supplier", "100%_\\ supplier"]));
   });
 
   it("bounds results and pagination, and returns a fixed warning for unexpected provider shape", async () => {

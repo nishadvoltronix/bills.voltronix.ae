@@ -126,7 +126,7 @@ describe("real MySQL automatic final-save sync and preserved historical permissi
   it("preserves an existing historical actor-bound permission without silently enabling its general-worker path", async () => {
     const bill = await approvedBill();
     const preview = await previewLiveBillSync(admin, bill.id, organizationId);
-    await expect(queueBill(accounts, bill.id, "ZOHO", organizationId, confirmation(preview))).rejects.toMatchObject({ code: "LIVE_PERMISSION_REQUIRED" });
+    await expect(queueBill(accounts, bill.id, "ZOHO", organizationId, confirmation(preview))).rejects.toMatchObject({ status: 404 });
     const operation = await queueBill(admin, bill.id, "ZOHO", organizationId, confirmation(preview));
     await expect(queueBill(admin, bill.id, "ZOHO", organizationId, confirmation(preview))).rejects.toMatchObject({ code: "LIVE_PERMISSION_REQUIRED" });
     const other = await queuedBill(); const posts: string[] = [];
@@ -143,7 +143,9 @@ describe("real MySQL automatic final-save sync and preserved historical permissi
     const operation = await queueBill(staff, bill.id, "ZOHO", organizationId);
     expect(operation.initiatedById).toBe(staff.id);
     expect(await db.liveSyncAuthorization.count({ where: { billId: bill.id } })).toBe(0);
-    await actOnBill(accounts, bill.id, { action: "payment", version: bill.version, amount: "20", reference: `LOCAL-PAYMENT-${tag}` });
+    await expect(actOnBill(accounts, bill.id, { action: "payment", version: bill.version, amount: "20", reference: `FORBIDDEN-PAYMENT-${tag}` })).rejects.toMatchObject({ status: 404 });
+    expect(await db.payment.count({ where: { billId: bill.id } })).toBe(0);
+    await actOnBill(admin, bill.id, { action: "payment", version: bill.version, amount: "20", reference: `LOCAL-PAYMENT-${tag}` });
     await db.integrationJob.update({ where: { id: operation.id }, data: { nextAttemptAt: new Date(0) } });
     const posts: string[] = [];
     await processIntegrationJobs({ limit: 1, adapterFactory: fakeProvider(posts) });
@@ -177,7 +179,7 @@ describe("real MySQL automatic final-save sync and preserved historical permissi
     const outsider = await db.user.create({ data: { email: `outsider-${tag}@example.invalid`, name: "FICTIONAL different creator", role: "DATA_ENTRY", passwordHash: "not-a-login",
       memberships: { create: { companyId } } } });
     const bill = await approvedBill();
-    await expect(queueBill(outsider, bill.id, "ZOHO", organizationId)).rejects.toMatchObject({ status: 403 });
+    await expect(queueBill(outsider, bill.id, "ZOHO", organizationId)).rejects.toMatchObject({ status: 404 });
     const operation = await queueBill(staff, bill.id, "ZOHO", organizationId);
     await db.userCompanyMembership.update({ where: { userId_companyId: { userId: staff.id, companyId } }, data: { active: false } });
     const posts: string[] = [];

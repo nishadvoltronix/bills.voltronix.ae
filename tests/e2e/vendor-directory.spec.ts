@@ -8,7 +8,8 @@ const organizationA = "930000000001";
 const organizationB = "930000000002";
 type Row = { id: string | null; companyId: string; name: string; currency: string; email: string | null;
   trn: string | null; status: "active" | "inactive" | "local"; externalVendorId?: string;
-  organizationId?: string; dataCenter?: string; environment?: "production" | "sandbox" };
+  organizationId?: string; dataCenter?: string; environment?: "production" | "sandbox";
+  source?: "books" | "local"; booksMappingRequired?: boolean };
 type Directory = { companyId: string; organizationId: string | null; dataCenter: string | null;
   environment: "production" | "sandbox" | null; source: "books" | "local"; vendors: Row[];
   page: number; perPage: number; hasMore: boolean; warning: string | null };
@@ -269,4 +270,34 @@ test("prefills Add vendor with the selected company and preserves the explicit c
     trn: "100000000000039", currency: "AED" }]);
   await expect(companySelector(page)).toHaveValue(companyB);
   await expect(page.getByRole("heading", { name: "Add a workspace vendor", exact: true })).toHaveCount(0);
+});
+
+test("shows pending local suppliers beside Books and syncs only after an explicit user action", async ({ page }) => {
+  const pending: Row = { id: "directory-pending", companyId: companyA, name: "Fictional Pending Supplier", currency: "AED",
+    email: null, trn: null, status: "local", source: "local", booksMappingRequired: true };
+  let synced = false, writes = 0;
+  await page.route("**/api/vendors/directory?*", route => route.fulfill({ json: envelope(companyA,
+    [alpha, synced ? { ...alpha, id: pending.id, name: pending.name, externalVendorId: "940000000009" } : pending]) }));
+  await page.route("**/api/vendors/directory-pending/sync", route => {
+    expect(route.request().method()).toBe("POST"); expect(route.request().postDataJSON()).toEqual({});
+    writes++; synced = true; return route.fulfill({ json: { sync: { status: "SYNCED", message: "Confirmed in Books." } } });
+  });
+  await openDirectory(page, companyA);
+  await expect(rowFor(page, pending.name)).toContainText("Workspace · Books link pending");
+  expect(writes).toBe(0);
+  await rowFor(page, pending.name).getByRole("button", { name: "Sync vendor / check status", exact: true }).click();
+  await expect(page.getByText("Vendor saved and confirmed in Zoho Books.", { exact: true })).toBeVisible();
+  await expect(rowFor(page, pending.name)).toContainText("Zoho Books");
+  await expect(rowFor(page, pending.name)).toHaveCount(1); expect(writes).toBe(1);
+});
+
+test("retains an uncertain vendor create as a local warning without claiming remote success", async ({ page }) => {
+  await page.route(/\/api\/vendors$/, route => route.fulfill({ status: 201, json: { vendor: { id: "directory-unknown" },
+    sync: { status: "UNKNOWN", message: "The Books outcome is unknown. Check status before retrying." } } }));
+  await openDirectory(page, companyA); await page.getByRole("button", { name: "Add vendor", exact: true }).click();
+  await expect(page.getByText("Enter TRN for VAT-registered suppliers", { exact: true })).toBeVisible();
+  await page.getByRole("textbox", { name: "Vendor name", exact: true }).fill("Fictional uncertain supplier");
+  await page.getByRole("button", { name: "Create vendor", exact: true }).click();
+  await expect(page.getByText("Vendor saved locally. The Books outcome is unknown. Check status before retrying.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Vendor saved and confirmed in Zoho Books.", { exact: true })).toHaveCount(0);
 });

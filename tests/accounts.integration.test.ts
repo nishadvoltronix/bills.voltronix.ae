@@ -1,13 +1,16 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Actor } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { hashPassword, verifyPassword } from "@/lib/password";
+import { authenticationAttemptKey } from "@/lib/security/authentication-attempts";
 import { assertMySqlTestDatabase, createTestCompany } from "./company-fixtures";
 import {
   administerAccount,
   authenticateAccountOperator,
   changeOwnPassword,
+  listManagedUsers,
+  resetManagedUserPassword,
 } from "@/lib/services/accounts";
 
 const tag = randomUUID().slice(0, 8);
@@ -156,33 +159,34 @@ describe("audited account lifecycle", () => {
   });
 
   it("requires the current password for self-service changes and revokes every session on success", async () => {
-    await session(accounts.id);
-    await session(accounts.id);
+    const ownAdmin = await db.user.create({ data: { email: `self-admin-${tag}@example.invalid`, name: "Fictional self Admin", role: "ADMIN", passwordHash: await hashPassword(fixturePassword) } });
+    await session(ownAdmin.id);
+    await session(ownAdmin.id);
     const original = await db.user.findUniqueOrThrow({
-      where: { id: accounts.id },
+      where: { id: ownAdmin.id },
     });
     await expect(
-      changeOwnPassword(accounts, {
+      changeOwnPassword(ownAdmin, {
         currentPassword: "wrong-password",
         newPassword: "Fictional-new-personal-password-928!",
       }),
     ).rejects.toMatchObject({ status: 401 });
     expect(
-      (await db.user.findUniqueOrThrow({ where: { id: accounts.id } }))
+      (await db.user.findUniqueOrThrow({ where: { id: ownAdmin.id } }))
         .passwordHash,
     ).toBe(original.passwordHash);
-    const changed = await changeOwnPassword(accounts, {
+    const changed = await changeOwnPassword(ownAdmin, {
       currentPassword: fixturePassword,
       newPassword: "Fictional-new-personal-password-928!",
     });
     expect(changed).toEqual({ success: true, requiresSignIn: true });
-    expect(await db.session.count({ where: { userId: accounts.id } })).toBe(0);
+    expect(await db.session.count({ where: { userId: ownAdmin.id } })).toBe(0);
     expect(
       await db.auditLog.count({
         where: {
-          actorId: accounts.id,
+          actorId: ownAdmin.id,
           action: "PASSWORD_CHANGED",
-          entityId: accounts.id,
+          entityId: ownAdmin.id,
         },
       }),
     ).toBe(1);
@@ -190,7 +194,7 @@ describe("audited account lifecycle", () => {
 
   it("rate limits password-change guesses and does not permit resetting another account through payload fields", async () => {
     await expect(
-      changeOwnPassword(staff, {
+      changeOwnPassword(administrator, {
         currentPassword: "wrong",
         newPassword: "Fictional-strong-new-password-01",
         userId: administrator.id,
@@ -198,13 +202,13 @@ describe("audited account lifecycle", () => {
     ).rejects.toThrow();
     for (let count = 0; count < 5; count++)
       await expect(
-        changeOwnPassword(staff, {
+        changeOwnPassword(administrator, {
           currentPassword: "wrong",
           newPassword: "Fictional-strong-new-password-01",
         }),
       ).rejects.toMatchObject({ status: 401 });
     await expect(
-      changeOwnPassword(staff, {
+      changeOwnPassword(administrator, {
         currentPassword: "wrong",
         newPassword: "Fictional-strong-new-password-01",
       }),
@@ -256,10 +260,79 @@ describe("audited account lifecycle", () => {
       }),
     ).rejects.toThrow();
     await expect(
-      changeOwnPassword(accounts, {
+      changeOwnPassword(administrator, {
         currentPassword: fixturePassword,
         newPassword: fixturePassword,
       }),
     ).rejects.toThrow();
+  });
+
+  it("removes self-password changes from every non-Admin role without touching credentials or sessions", async () => {
+    for (const role of ["ACCOUNTS", "DATA_ENTRY", "MANAGEMENT"] as const) {
+      const user = await db.user.create({ data: { email: `managed-${role}-${tag}@example.invalid`, name: "Fictional managed user", role, passwordHash: await hashPassword(fixturePassword) } });
+      await session(user.id);
+      await expect(changeOwnPassword(user, { currentPassword: fixturePassword, newPassword: "Fictional-blocked-replacement-789!" })).rejects.toMatchObject({ status: 403 });
+      expect((await db.user.findUniqueOrThrow({ where: { id: user.id } })).passwordHash).toBe(user.passwordHash);
+      expect(await db.session.count({ where: { userId: user.id } })).toBe(1);
+    }
+  });
+
+  it("lists only safe users fully inside Admin company scope and performs an audited, reauthenticated reset", async () => {
+    const target = await db.user.create({ data: { email: `web-reset-${tag}@example.invalid`, name: "Fictional reset target", role: "ACCOUNTS", passwordHash: await hashPassword(fixturePassword) } });
+    await createTestCompany(`web reset allowed ${tag}`, [administrator, target]);
+    await session(target.id); await session(target.id);
+    const outsider = await db.user.create({ data: { email: `web-outsider-${tag}@example.invalid`, name: "Fictional outside user", role: "ACCOUNTS", passwordHash: target.passwordHash } });
+    await createTestCompany(`web outside ${tag}`, [outsider]);
+    const rows = await listManagedUsers(administrator);
+    expect(rows.some(user => user.id === target.id)).toBe(true);
+    expect(rows.some(user => user.id === outsider.id)).toBe(false);
+    for (const user of rows) expect(Object.keys(user).sort()).toEqual(["active", "email", "id", "name", "role"]);
+    const newPassword = "Fictional-admin-assigned-password-787!";
+    const payload = { adminCurrentPassword: fixturePassword, newPassword, confirmation: newPassword, reason: "Fictional staff identity verified by administrator" };
+    await expect(resetManagedUserPassword(administrator, outsider.id, payload)).rejects.toMatchObject({ status: 404 });
+    await expect(resetManagedUserPassword(administrator, administrator.id, payload)).rejects.toMatchObject({ status: 409 });
+    await expect(resetManagedUserPassword(administrator, target.id, { ...payload, confirmation: "Fictional-different-confirmation-788!" })).rejects.toThrow();
+    await expect(resetManagedUserPassword(administrator, target.id, { ...payload, adminCurrentPassword: "incorrect" })).rejects.toMatchObject({ status: 401 });
+    const attemptKeys = [authenticationAttemptKey("login", target.email), authenticationAttemptKey("password-change", target.id), authenticationAttemptKey("account-operator", target.email)];
+    await db.loginAttempt.createMany({ data: attemptKeys.map(key => ({ key, count: 5, windowStart: new Date(), lockedUntil: new Date(Date.now() + 60_000) })) });
+    expect(await resetManagedUserPassword(administrator, target.id, payload)).toMatchObject({ success: true, operation: "reset-password", revokedSessions: 2 });
+    const saved = await db.user.findUniqueOrThrow({ where: { id: target.id } });
+    expect(await verifyPassword(newPassword, saved.passwordHash)).toBe(true);
+    expect(await db.session.count({ where: { userId: target.id } })).toBe(0);
+    expect(await db.loginAttempt.count({ where: { key: { in: attemptKeys } } })).toBe(0);
+    const audit = await db.auditLog.findFirstOrThrow({ where: { entityId: target.id, action: "ACCOUNT_RESET_PASSWORD" }, orderBy: { createdAt: "desc" } });
+    expect(audit.details).toMatchObject({ source: "admin_user_management", revokedSessions: 2 });
+    expect(JSON.stringify(audit)).not.toContain(newPassword);
+    expect(JSON.stringify(audit)).not.toContain(fixturePassword);
+    expect(JSON.stringify(audit)).not.toContain(saved.passwordHash);
+    expect((await db.user.findUniqueOrThrow({ where: { id: outsider.id } })).passwordHash).toBe(outsider.passwordHash);
+  });
+
+  it("rechecks target company scope and Admin credential hash after password reauthentication", async () => {
+    const operator = await db.user.create({ data: { email: `web-race-admin-${tag}@example.invalid`, name: "Fictional scoped Admin", role: "ADMIN", passwordHash: await hashPassword(fixturePassword) } });
+    const target = await db.user.create({ data: { email: `web-race-user-${tag}@example.invalid`, name: "Fictional scope target", role: "ACCOUNTS", passwordHash: operator.passwordHash } });
+    await createTestCompany(`web race scope ${tag}`, [operator, target]);
+    const payload = { adminCurrentPassword: fixturePassword, newPassword: "Fictional-race-replacement-786!", confirmation: "Fictional-race-replacement-786!", reason: "Fictional reviewed account recovery" };
+    const originalDelete = db.loginAttempt.deleteMany.bind(db.loginAttempt);
+    const replacementHash = await hashPassword("Fictional-rotated-admin-password-785!");
+    const intercept = vi.spyOn(db.loginAttempt, "deleteMany").mockImplementation((...args) => (async () => {
+      const result = await originalDelete(...args);
+      await db.user.update({ where: { id: operator.id }, data: { passwordHash: replacementHash } });
+      return result;
+    })() as ReturnType<typeof db.loginAttempt.deleteMany>);
+    try { await expect(resetManagedUserPassword(operator, target.id, payload)).rejects.toMatchObject({ status: 409 }); }
+    finally { intercept.mockRestore(); }
+    expect((await db.user.findUniqueOrThrow({ where: { id: target.id } })).passwordHash).toBe(target.passwordHash);
+    await db.user.update({ where: { id: operator.id }, data: { passwordHash: operator.passwordHash } });
+    const outside = await createTestCompany(`web race outside ${tag}`, []);
+    const scopeIntercept = vi.spyOn(db.loginAttempt, "deleteMany").mockImplementation((...args) => (async () => {
+      const result = await originalDelete(...args);
+      await db.userCompanyMembership.create({ data: { userId: target.id, companyId: outside.id } });
+      return result;
+    })() as ReturnType<typeof db.loginAttempt.deleteMany>);
+    try { await expect(resetManagedUserPassword(operator, target.id, payload)).rejects.toMatchObject({ status: 404 }); }
+    finally { scopeIntercept.mockRestore(); }
+    expect((await listManagedUsers(operator)).some(user => user.id === target.id)).toBe(false);
+    expect((await db.user.findUniqueOrThrow({ where: { id: target.id } })).passwordHash).toBe(target.passwordHash);
   });
 });

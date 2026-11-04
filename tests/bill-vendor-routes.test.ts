@@ -51,7 +51,7 @@ describe("vendor autocomplete HTTP boundaries", () => {
     expect(response.headers.get("Cache-Control")).toBe("private, no-store");
     expect(mocks.requireUser).toHaveBeenCalledWith(["ADMIN", "ACCOUNTS", "DATA_ENTRY"]);
     expect(mocks.searchBillVendors).toHaveBeenCalledWith(actor, {
-      companyId: "company-a", q: "A&B 5%_", vendorId: "local-vendor-a",
+      companyId: "company-a", q: "A&B 5%_", vendorId: "local-vendor-a", page: 1,
     });
   });
 

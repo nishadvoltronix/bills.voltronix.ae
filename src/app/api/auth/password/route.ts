@@ -5,7 +5,7 @@ import { changeOwnPassword } from "@/lib/services/accounts";
 export async function POST(request: Request) {
   return handle(async () => {
     sameOrigin(request);
-    const actor = await requireUser();
+    const actor = await requireUser(["ADMIN"]);
     const result = await changeOwnPassword(
       actor,
       await readJson(request, 4096),

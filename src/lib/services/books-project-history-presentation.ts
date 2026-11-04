@@ -6,6 +6,7 @@ import { HttpError } from "@/lib/http";
 import { describeBooksAttachments } from "./books-attachments";
 import { freshFinancialActor, loadBooksEntryAuthors } from "./financial-ledger";
 import { loadBooksProjectHistory, type BooksProjectHistoryRelation } from "./books-project-history";
+import { booksBillOwnerScope } from "./bill-ownership";
 
 const relationIdentity = (relation: BooksProjectHistoryRelation) => JSON.stringify([
   relation.billId, relation.companyId, relation.organizationId, relation.dataCenter, relation.environment,
@@ -18,10 +19,11 @@ export async function presentProjectHistory(actor: Actor, relations: BooksProjec
   actor = await freshFinancialActor(actor);
   if (actor.role === "DATA_ENTRY" || !relations.length) return { booksBills: [], historyCompanies: [] };
   const scope = await companyFilter(actor);
+  const ownedScope = await booksBillOwnerScope(actor);
   const byId = new Map<string, BooksProjectHistoryRelation[]>();
   for (const relation of relations) byId.set(relation.billId, [...byId.get(relation.billId) ?? [], relation]);
   const rows = await db.booksBill.findMany({
-    where: { AND: [scope, { OR: relations.map((relation) => ({ id: relation.billId,
+    where: { AND: [scope, ownedScope, { OR: relations.map((relation) => ({ id: relation.billId,
       companyId: relation.companyId, organizationId: relation.organizationId, dataCenter: relation.dataCenter,
       environment: relation.environment })) }], isStale: false, detailFetchedAt: { not: null } },
     include: { company: { select: { name: true } }, attachments: true },

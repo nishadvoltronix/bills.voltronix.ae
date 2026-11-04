@@ -703,7 +703,7 @@ describe("selected live operation permission with mocked persisted state", () =>
         where: expect.objectContaining({
           id: permit.actorId,
           active: true,
-          OR: [{ role: { in: ["ADMIN", "ACCOUNTS"] } }],
+          OR: [{ role: "ADMIN" }],
           memberships: { some: { companyId: bill.companyId, active: true, company: { active: true } } },
         }),
       }),
@@ -908,7 +908,7 @@ describe("final-save autonomous source guard without per-bill approval", () => {
     const { bill, job, operation } = autonomousOperation();
     await expect(assertLiveJobWrite(job.id, job.leaseToken!, operation)).resolves.toBeUndefined();
     expect(store.user.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({
-      id: bill.createdById, OR: [{ role: { in: ["ADMIN", "ACCOUNTS"] } }, { id: bill.createdById, role: "DATA_ENTRY" }],
+      id: bill.createdById, OR: [{ role: "ADMIN" }, { id: bill.createdById, role: { in: ["ACCOUNTS", "DATA_ENTRY"] } }],
     }) }));
     bill.status = "APPROVED";
     await expect(assertLiveJobWrite(job.id, job.leaseToken!, operation)).resolves.toBeUndefined();

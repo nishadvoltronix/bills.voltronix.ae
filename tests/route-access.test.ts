@@ -5,7 +5,7 @@ import { AUTH_RESOURCE_PATH_HEADER, canAccessRoleApiPath } from "@/lib/route-acc
 
 describe("restricted accountant HTTP resources", () => {
   it.each([
-    "/api/auth/me", "/api/auth/password", "/api/auth/logout", "/api/companies",
+    "/api/auth/me", "/api/auth/logout", "/api/companies",
     "/api/bills", "/api/bills/bill_1", "/api/bills/bill_1/attachment", "/api/bills/books/book_1",
     "/api/bills/books/book_1/attachments/file_1", "/api/bills/options",
     "/api/vendors", "/api/vendors/search", "/api/vendors/resolve", "/api/vendors/directory",
@@ -17,6 +17,7 @@ describe("restricted accountant HTTP resources", () => {
   });
 
   it.each([
+    "/api/auth/password", "/api/account/users", "/api/account/users/user_1/password",
     "/api/dashboard", "/api/reports/bills", "/api/audit", "/api/operations", "/api/ocr",
     "/api/ocr/templates", "/api/ocr/batches/batch_1", "/api/ocr/documents/document_1/review",
     "/api/integrations/jobs", "/api/integrations/incoming-status", "/api/integrations/crm/authorization",
@@ -34,6 +35,11 @@ describe("restricted accountant HTTP resources", () => {
   it.each(["ADMIN", "MANAGEMENT", "DATA_ENTRY"])("preserves the existing resource policy for %s", role => {
     expect(canAccessRoleApiPath(role, "/api/dashboard")).toBe(true);
     expect(canAccessRoleApiPath(role, "/api/ocr")).toBe(true);
+  });
+
+  it.each(["ACCOUNTS", "MANAGEMENT", "DATA_ENTRY"])("restricts password resources to Admin for %s", role => {
+    for (const path of ["/api/auth/password", "/api/account/users", "/api/account/users/user_1/password"])
+      expect(canAccessRoleApiPath(role, path)).toBe(false);
   });
 
   it.each(["/api/dashboard", "/api/ocr/templates", "/bills/manual"])("replaces caller scope with actual pathname %s", pathname => {

@@ -25,9 +25,10 @@ beforeAll(async () => {
   const url = new URL(process.env.DATABASE_URL ?? "http://invalid");
   if (process.env.APP_ENV !== "test" || url.protocol !== "mysql:" || url.hostname !== "127.0.0.1" || !/^\/bills_test_/.test(url.pathname))
     throw new Error("Hub bridge tests require the isolated billing MySQL fixture database.");
-  const user = await db.user.create({ data: { name: "DEMO Hub reader", email: `hub-${tag}@example.invalid`, role: "MANAGEMENT", passwordHash: "not-a-login" } }); userId = user.id;
+  const user = await db.user.create({ data: { name: "DEMO Hub reader", email: `hub-${tag}@example.invalid`, role: "DATA_ENTRY", passwordHash: "not-a-login" } }); userId = user.id;
   creatorId = (await db.user.create({ data: { name: "DEMO bill creator", email: `hub-creator-${tag}@example.invalid`, role: "DATA_ENTRY", passwordHash: "not-a-login" } })).id;
-  companyId = (await db.company.create({ data: { name: `DEMO Hub company ${tag}`, memberships: { create: [{ userId }, { userId: creatorId }] } } })).id;
+  const approver = await db.user.create({ data: { name: "DEMO historical approver", email: `hub-approver-${tag}@example.invalid`, role: "ADMIN", passwordHash: "not-a-login" } });
+  companyId = (await db.company.create({ data: { name: `DEMO Hub company ${tag}`, memberships: { create: [{ userId }, { userId: creatorId }, { userId: approver.id }] } } })).id;
   otherCompanyId = (await db.company.create({ data: { name: `DEMO Other Hub company ${tag}` } })).id;
   await db.hubUserBinding.create({ data: { issuer, subject, billingUserId: userId } });
   await db.companyIntegrationDestination.create({ data: { companyId, target: "CRM", organizationId: organization, dataCenter: "US", environment: "sandbox" } });
@@ -36,7 +37,9 @@ beforeAll(async () => {
   await db.job.create({ data: { companyId: otherCompanyId, name: "DEMO Other job", customer: "DEMO", jobNumber: "DEMO-HUB-" + tag, externalCrmId: dealId, currency: "AED" } });
   await db.bill.create({ data: { companyId, vendorId, jobId, invoiceNumber: "DEMO-HUB-1", normalizedInvoiceNumber: "DEMO-HUB-1",
     invoiceDate: new Date("2026-10-28"), category: "OTHER", currency: "AED", status: "APPROVED", subtotal: "100.00", vatRate: "5.00",
-    vatAmount: "5.00", total: "105.00", paidAmount: "25.00", createdById: creatorId, approvedById: userId, approvedAt: now } });
+    vatAmount: "5.00", total: "105.00", paidAmount: "25.00", createdById: userId, approvedById: approver.id, approvedAt: now } });
+  // The original entry actor retains ownership after promotion to a reporting role.
+  await db.user.update({ where: { id: userId }, data: { role: "MANAGEMENT" } });
 });
 afterAll(() => db.$disconnect());
 
@@ -52,11 +55,27 @@ describe("real MySQL Hub Billing authorization", () => {
       { dealId: "88449998" }, { jobNumber: "DIFFERENT-JOB" }])
       await expect(readHubJobBilling(claims(change), db, now)).rejects.toMatchObject({ status: 404 });
   });
+  it("hides another original creator on the same job while retaining Admin company visibility", async () => {
+    const foreign = await db.bill.create({ data: { companyId, vendorId, jobId, invoiceNumber: "DEMO-HUB-FOREIGN", normalizedInvoiceNumber: "DEMO-HUB-FOREIGN",
+      invoiceDate: new Date("2026-10-28"), category: "OTHER", currency: "AED", status: "READY", subtotal: "7.00", vatRate: "0.00", vatAmount: "0.00", total: "7.00", createdById: creatorId } });
+    try {
+      const owned = await readHubJobBilling(claims(), db, now);
+      expect(owned.billCount).toBe(1); expect(owned.bills.some(bill => bill.id === foreign.id)).toBe(false);
+      expect(owned.summary.recognizedExpenses).toBe("100.00");
+      await db.user.update({ where: { id: userId }, data: { role: "ADMIN" } });
+      const all = await readHubJobBilling(claims(), db, now);
+      expect(all.billCount).toBe(2); expect(all.bills.some(bill => bill.id === foreign.id)).toBe(true);
+      expect(all.summary.recognizedExpenses).toBe("107.00");
+    } finally {
+      await db.user.update({ where: { id: userId }, data: { role: "MANAGEMENT" } });
+      await db.bill.delete({ where: { id: foreign.id } });
+    }
+  });
   it("includes a completed entry alongside historical approvals without inventing approval or payment", async () => {
     const ready = await db.bill.create({ data: { companyId, vendorId, jobId,
       invoiceNumber: "DEMO-HUB-READY", normalizedInvoiceNumber: "DEMO-HUB-READY",
       invoiceDate: new Date("2026-10-28"), category: "OTHER", currency: "AED", status: "READY",
-      subtotal: "100.00", vatRate: "5.00", vatAmount: "5.00", total: "105.00", createdById: creatorId } });
+      subtotal: "100.00", vatRate: "5.00", vatAmount: "5.00", total: "105.00", createdById: userId } });
     try {
       const result = await readHubJobBilling(claims(), db, now);
       expect(result.summary).toEqual({ recognizedExpenses: "200.00", grossPayable: "210.00", paid: "25.00", outstanding: "185.00" });
@@ -77,7 +96,7 @@ describe("real MySQL Hub Billing authorization", () => {
   it("bounds the detail list while totals and count cover all matching bills", async () => {
     await db.bill.createMany({ data: Array.from({ length: 101 }, (_, index) => ({ id: `hub-${tag}-${index}`, companyId, vendorId, jobId,
       invoiceNumber: `DEMO-HUB-MORE-${index}`, normalizedInvoiceNumber: `DEMO-HUB-MORE-${index}`, invoiceDate: new Date("2026-10-27"),
-      category: "OTHER", currency: "AED", status: "DRAFT" as const, subtotal: "1.00", vatAmount: "0.00", total: "1.00", createdById: creatorId })) });
+      category: "OTHER", currency: "AED", status: "DRAFT" as const, subtotal: "1.00", vatAmount: "0.00", total: "1.00", createdById: userId })) });
     const result = await readHubJobBilling(claims(), db, now);
     expect(result.billCount).toBe(102); expect(result.bills).toHaveLength(100); expect(result.truncated).toBe(true);
     expect(result.summary.outstanding).toBe("80.00");

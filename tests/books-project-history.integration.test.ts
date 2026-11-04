@@ -111,16 +111,14 @@ describe("source-verified project history on disposable MySQL", () => {
     expect(await financialCounts()).toEqual(before);
   });
 
-  it("preserves Accounts company-authorized bill history while withholding CRM contract values", async () => {
+  it("conceals imported bills and bill-derived legacy CRM history without native owner proof from Accounts", async () => {
     const original = await db.crmJobSnapshot.findUniqueOrThrow({ where: { id: snapshotA } });
     // An assigned profile without a canonical Job remains pending; READY requires both links.
     await db.crmJobSnapshot.update({ where: { id: snapshotA }, data: { companyId: companyA, linkStatus: "PENDING" } });
     try {
       const history = await loadBooksProjectHistory(accounts, companyA);
-      expect(history.relations).toEqual(expect.arrayContaining([expect.objectContaining({ billId: billA, companyId: companyA, snapshotId: snapshotA })]));
-      const profile = await getCrmJobSnapshot(accounts, snapshotA);
-      expect(profile).toMatchObject({ amount: null, approvedVariations: null });
-      expect(profile.booksBills).toEqual(expect.arrayContaining([expect.objectContaining({ id: billA, total: "50", href: `/bills/books/${billA}` })]));
+      expect(history.relations).toEqual([]);
+      await expect(getCrmJobSnapshot(accounts, snapshotA)).rejects.toMatchObject({ status: 404 });
       expect((await loadBooksProjectHistory(entry, companyA)).relations).toEqual([]);
       await expect(loadBooksProjectHistory(accounts, `unassigned-${tag}`)).rejects.toMatchObject({ status: 404 });
       expect(fetch).not.toHaveBeenCalled();

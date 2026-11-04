@@ -2,9 +2,11 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { api, errorMessage } from "./api";
+import { useUser } from "./app-shell";
 import { Button, Card, Field, Input, Notice, PageHeader } from "./ui";
 
 export function AccountSecurity() {
+  const user = useUser();
   const router = useRouter();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -32,6 +34,10 @@ export function AccountSecurity() {
       setBusy(false);
     }
   }
+  if (user.role !== "ADMIN") return <>
+    <PageHeader eyebrow="YOUR ACCOUNT" title="Account security" description="Your password is managed by an administrator." />
+    <Notice>Contact your administrator if you need a password change.</Notice>
+  </>;
   return (
     <>
       <PageHeader

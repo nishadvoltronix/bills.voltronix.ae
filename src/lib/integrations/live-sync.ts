@@ -4,6 +4,7 @@ import { Prisma, type IntegrationJob } from "@prisma/client";
 import type { Actor } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { HttpError } from "@/lib/http";
+import { billScope } from "@/lib/permissions";
 import { readPrivateDocument } from "@/lib/services/documents";
 import { approvedSnapshot, sourceInclude, type BillSource } from "./source-snapshot";
 import { booksMappingFingerprint, buildBooksPayload, snapshotHash, snapshotSchema } from "./books";
@@ -20,7 +21,7 @@ const lifetime = 10 * 60_000;
 
 export async function assertSynchronizationActor(store: Store, bill: BillSource, actorId: string, allowCreator = true) {
   const actor = await store.user.findFirst({ where: { id: actorId, active: true,
-    OR: [{ role: { in: ["ADMIN", "ACCOUNTS"] } }, ...(allowCreator ? [{ id: bill.createdById, role: "DATA_ENTRY" as const }] : [])],
+    OR: [{ role: "ADMIN" }, ...(bill.createdById ? [{ id: bill.createdById, role: { in: (allowCreator ? ["ACCOUNTS", "DATA_ENTRY"] : ["ACCOUNTS"]) as ("ACCOUNTS" | "DATA_ENTRY")[] } }] : [])],
     memberships: { some: { companyId: bill.companyId, active: true, company: { active: true } } } }, select: { id: true } });
   if (!actor) throw new HttpError(403, "Current company access and ownership or accounting access are required.");
 }
@@ -143,7 +144,7 @@ export async function previewLiveBillSync(actor: Actor, billId: string, organiza
   const config = getConfig("ZOHO", process.env, organizationId);
   return db.$transaction(async tx => {
     await tx.$queryRaw(Prisma.sql`SELECT \`id\` FROM \`Bill\` WHERE \`id\`=${billId} FOR UPDATE`);
-    const bill = await tx.bill.findUnique({ where: { id: billId }, include: sourceInclude });
+    const bill = await tx.bill.findFirst({ where: { id: billId, ...billScope(actor) }, include: sourceInclude });
     if (!bill) throw new HttpError(404, "Bill not found.");
     await assertLiveSource(tx, bill, config, actor.id);
     const previous = await tx.liveSyncAuthorization.findUnique({ where: { billId } });

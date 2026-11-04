@@ -49,6 +49,7 @@ const statements = {
   OcrDocument: `SELECT * FROM OcrDocument WHERE ${batchPredicate} ORDER BY id`,
   Vendor: `SELECT * FROM Vendor WHERE ${companyPredicate} ORDER BY id`,
   VendorBooksMapping: `SELECT * FROM VendorBooksMapping WHERE vendorId IN (SELECT id FROM Vendor WHERE ${companyPredicate}) ORDER BY id`,
+  VendorBooksSync: `SELECT * FROM VendorBooksSync WHERE vendorId IN (SELECT id FROM Vendor WHERE ${companyPredicate}) ORDER BY id`,
   Job: `SELECT * FROM Job WHERE ${companyPredicate} ORDER BY id`,
   OcrTemplate: `SELECT * FROM OcrTemplate WHERE vendorId IN (SELECT id FROM Vendor WHERE ${companyPredicate}) ORDER BY id`,
   ScannerSource: `SELECT * FROM ScannerSource WHERE ${companyPredicate} ORDER BY id`,
@@ -159,6 +160,7 @@ async function inventory(connection, directory, lock = false) {
   for (const table of [
     "IntegrationJob",
     "LiveSyncAuthorization",
+    "VendorBooksSync",
     "VendorBooksMapping",
     "OcrTemplate",
     "ScannerSource",

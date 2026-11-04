@@ -226,6 +226,24 @@ async function finalized(
   return bill;
 }
 let nextExternalId = 9000;
+describe("original creator ownership at the queue boundary", () => {
+  it("rejects same-company non-owner enqueue and retry before any provider request or queue change", async () => {
+    configure(); const bill = await finalized();
+    const job = await db.integrationJob.findFirstOrThrow({ where: { billId: bill.id } });
+    const before = await db.integrationJob.findMany({ where: { billId: bill.id }, orderBy: { id: "asc" } });
+    const attempts = await db.integrationAttempt.count({ where: { jobId: job.id } });
+    try {
+      await expect(queueBill(accounts, bill.id, "ZOHO", "100")).rejects.toMatchObject({ status: 404 });
+      await expect(scheduleIntegrationJob(accounts, job.id, { action: "retry" })).rejects.toMatchObject({ status: 404 });
+      expect(await db.integrationJob.findMany({ where: { billId: bill.id }, orderBy: { id: "asc" } })).toEqual(before);
+      expect(await db.integrationAttempt.count({ where: { jobId: job.id } })).toBe(attempts);
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      // Keep this generated fixture out of unrelated global worker scenarios.
+      await db.integrationJob.updateMany({ where: { billId: bill.id }, data: { status: "BLOCKED", errorCode: "FIXTURE_COMPLETE" } });
+    }
+  });
+});
 function fakeAdapter(
   overrides: Partial<SupplierBillAdapter> = {},
 ): SupplierBillAdapter & { externalId: string } {
@@ -365,7 +383,7 @@ describe("durable accounting outbox", () => {
       where: { id: first.id },
       data: { status: "UNKNOWN", needsReconciliation: true, attempts: 1 },
     });
-    await scheduleIntegrationJob(accounts, first.id, { action: "reconcile" });
+    await scheduleIntegrationJob(admin, first.id, { action: "reconcile" });
     expect(
       await db.syncRecord.findUnique({
         where: { billId_target: { billId: bill.id, target: "ZOHO" } },
@@ -614,7 +632,7 @@ describe("durable accounting outbox", () => {
     });
     vi.stubEnv("ZOHO_BOOKS_ORGANIZATION_ID", "999");
     await expect(
-      scheduleIntegrationJob(accounts, job.id, { action: "retry" }),
+      scheduleIntegrationJob(admin, job.id, { action: "retry" }),
     ).rejects.toMatchObject({ status: 409 });
     expect(fetch).not.toHaveBeenCalled();
   });
@@ -636,9 +654,9 @@ describe("durable accounting outbox", () => {
       errorCode: "MAPPING_CHANGED",
     });
     vi.stubEnv("ZOHO_BOOKS_WRITE_ENABLED", "false");
-    await expect(scheduleIntegrationJob(accounts, job.id, { action: "retry" }))
+    await expect(scheduleIntegrationJob(admin, job.id, { action: "retry" }))
       .rejects.toMatchObject({ code: "WRITES_DISABLED" });
-    await scheduleIntegrationJob(accounts, job.id, { action: "reconcile" });
+    await scheduleIntegrationJob(admin, job.id, { action: "reconcile" });
     const snapshot = snapshotSchema.parse(job.snapshot);
     const externalId = String(++nextExternalId);
     const provider = vi.fn(async (input: string | URL, init?: RequestInit) => {
@@ -690,7 +708,7 @@ describe("durable accounting outbox", () => {
     });
     expect(jobs).toHaveLength(1);
     expect(jobs[0].initiatedById).toBe(staff.id);
-    const repeated = await queueBill(accounts, bill.id, "ZOHO");
+    const repeated = await queueBill(admin, bill.id, "ZOHO");
     expect(repeated.id).toBe(jobs[0].id);
     expect(await db.integrationJob.count({ where: { billId: bill.id } })).toBe(
       1,
@@ -736,9 +754,9 @@ describe("durable accounting outbox", () => {
       await db.integrationJob.findUnique({ where: { id: job.id } }),
     ).toMatchObject({ status: "UNKNOWN", needsReconciliation: true });
     await expect(
-      scheduleIntegrationJob(accounts, job.id, { action: "retry" }),
+      scheduleIntegrationJob(admin, job.id, { action: "retry" }),
     ).rejects.toMatchObject({ status: 409 });
-    await scheduleIntegrationJob(accounts, job.id, { action: "reconcile" });
+    await scheduleIntegrationJob(admin, job.id, { action: "reconcile" });
     await processIntegrationJobs({ limit: 1, adapterFactory: () => adapter });
     expect(adapter.create).toHaveBeenCalledTimes(1);
     expect(adapter.reconcile).toHaveBeenCalledTimes(1);
@@ -756,7 +774,7 @@ describe("durable accounting outbox", () => {
       where: { id: job.id },
       data: { status: "UNKNOWN", needsReconciliation: true, attempts: 1 },
     });
-    await scheduleIntegrationJob(accounts, job.id, { action: "reconcile" });
+    await scheduleIntegrationJob(admin, job.id, { action: "reconcile" });
     const adapter = fakeAdapter({ reconcile: vi.fn().mockResolvedValue(null) });
     await processIntegrationJobs({ limit: 1, adapterFactory: () => adapter });
     expect(adapter.create).not.toHaveBeenCalled();
@@ -816,7 +834,7 @@ describe("durable accounting outbox", () => {
       where: { billId: bill.id, operation: "ATTACH_DOCUMENT" },
     });
     expect(attachment.status).toBe("FAILED");
-    await scheduleIntegrationJob(accounts, attachment.id, { action: "retry" });
+    await scheduleIntegrationJob(admin, attachment.id, { action: "retry" });
     await processIntegrationJobs({ limit: 1, adapterFactory: () => adapter });
     expect(adapter.create).toHaveBeenCalledTimes(1);
     expect(adapter.attach).toHaveBeenCalledTimes(2);
@@ -829,8 +847,9 @@ describe("durable accounting outbox", () => {
       await db.integrationAttempt.count({ where: { jobId: attachment.id } }),
     ).toBe(2);
   });
-  it("allows management queue visibility without snapshots or credential data and denies writes", async () => {
-    const result = await listIntegrationJobs(management);
+  it("keeps Admin cross-creator queue visibility sanitized and denies non-owner management records", async () => {
+    const result = await listIntegrationJobs(admin);
+    expect((await listIntegrationJobs(management)).jobs).toEqual([]);
     expect(result.jobs.length).toBeGreaterThan(0);
     expect(result.jobs[0]).not.toHaveProperty("snapshot");
     expect(result.jobs[0]).not.toHaveProperty("leaseToken");
@@ -845,7 +864,7 @@ describe("durable accounting outbox", () => {
   });
   it("refuses CRM posting until a supplier expense module is verified", async () => {
     const bill = await finalized();
-    await expect(queueBill(accounts, bill.id, "CRM")).rejects.toMatchObject({
+    await expect(queueBill(admin, bill.id, "CRM")).rejects.toMatchObject({
       code: "CRM_EXPENSE_MODULE_UNVERIFIED",
     });
   });
@@ -939,7 +958,7 @@ describe("explicit Books organization routing", () => {
         },
       });
       await expect(
-        queueBill(accounts, bill.id, "ZOHO", "100"),
+        queueBill(admin, bill.id, "ZOHO", "100"),
       ).rejects.toMatchObject({ status: 409 });
       expect(
         await db.integrationJob.count({ where: { billId: bill.id } }),
@@ -1023,11 +1042,11 @@ describe("explicit Books organization routing", () => {
     expect(await db.integrationJob.count({ where: { billId: bill.id } })).toBe(
       0,
     );
-    await expect(queueBill(accounts, bill.id, "ZOHO")).rejects.toMatchObject({
+    await expect(queueBill(admin, bill.id, "ZOHO")).rejects.toMatchObject({
       code: "ORGANIZATION_REQUIRED",
     });
-    const job = await queueBill(accounts, bill.id, "ZOHO", "100");
-    expect((await queueBill(accounts, bill.id, "ZOHO", "100")).id).toBe(job.id);
+    const job = await queueBill(admin, bill.id, "ZOHO", "100");
+    expect((await queueBill(admin, bill.id, "ZOHO", "100")).id).toBe(job.id);
     for (const status of ["FAILED", "UNKNOWN"] as const) {
       await db.integrationJob.update({
         where: { id: job.id },
@@ -1038,7 +1057,7 @@ describe("explicit Books organization routing", () => {
         },
       });
       await expect(
-        queueBill(accounts, bill.id, "ZOHO", "200"),
+        queueBill(admin, bill.id, "ZOHO", "200"),
       ).rejects.toMatchObject({ status: 409 });
     }
     expect(await db.integrationJob.count({ where: { billId: bill.id } })).toBe(
@@ -1050,12 +1069,12 @@ describe("explicit Books organization routing", () => {
       }),
     ).toMatchObject({ organizationId: "100" });
     await expect(
-      scheduleIntegrationJob(accounts, job.id, {
+      scheduleIntegrationJob(admin, job.id, {
         action: "reconcile",
         organizationId: "200",
       }),
     ).rejects.toMatchObject({ status: 409 });
-    await scheduleIntegrationJob(accounts, job.id, {
+    await scheduleIntegrationJob(admin, job.id, {
       action: "reconcile",
       organizationId: "100",
     });
@@ -1081,8 +1100,8 @@ describe("explicit Books organization routing", () => {
     configureMultiple();
     const bill = await finalized(false, scopedVendorId);
     const results = await Promise.allSettled([
-      queueBill(accounts, bill.id, "ZOHO", "100"),
-      queueBill(accounts, bill.id, "ZOHO", "200"),
+      queueBill(admin, bill.id, "ZOHO", "100"),
+      queueBill(admin, bill.id, "ZOHO", "200"),
     ]);
     expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
     const jobs = await db.integrationJob.findMany({
@@ -1102,8 +1121,8 @@ describe("explicit Books organization routing", () => {
     configureMultiple();
     const first = await finalized(false, scopedVendorId),
       second = await finalized(false, scopedVendorId);
-    await queueBill(accounts, first.id, "ZOHO", "100");
-    await queueBill(accounts, second.id, "ZOHO", "200");
+    await queueBill(admin, first.id, "ZOHO", "100");
+    await queueBill(admin, second.id, "ZOHO", "200");
     const organizations: string[] = [];
     await processIntegrationJobs({
       limit: 2,
@@ -1125,8 +1144,8 @@ describe("explicit Books organization routing", () => {
         where: { target: "ZOHO", externalId: "987654321", status: "SYNCED" },
       }),
     ).toBe(2);
-    const a = await listIntegrationJobs(management, "100"),
-      b = await listIntegrationJobs(management, "200");
+    const a = await listIntegrationJobs(admin, "100"),
+      b = await listIntegrationJobs(admin, "200");
     expect(a.jobs.some((j) => j.billId === first.id)).toBe(true);
     expect(a.jobs.some((j) => j.billId === second.id)).toBe(false);
     expect(b.jobs.some((j) => j.billId === second.id)).toBe(true);
@@ -1136,7 +1155,7 @@ describe("explicit Books organization routing", () => {
     configureMultiple("EU");
     const bill = await finalized(false, scopedVendorId);
     await expect(
-      queueBill(accounts, bill.id, "ZOHO", "100"),
+      queueBill(admin, bill.id, "ZOHO", "100"),
     ).rejects.toMatchObject({ code: "VENDOR_MAPPING_REQUIRED" });
     expect((await listBooksVendorMappings(admin, "100")).mappings).toHaveLength(
       0,
@@ -1157,7 +1176,7 @@ describe("explicit Books organization routing", () => {
     });
     const legacyBill = await finalized(false, unmapped);
     await expect(
-      queueBill(accounts, legacyBill.id, "ZOHO", "200"),
+      queueBill(admin, legacyBill.id, "ZOHO", "200"),
     ).rejects.toMatchObject({ code: "VENDOR_MAPPING_REQUIRED" });
   });
   it("preserves legacy null-organization uniqueness and refuses ambiguous external-ID confirmation", async () => {
@@ -1178,7 +1197,7 @@ describe("explicit Books organization routing", () => {
         },
       }),
     ).rejects.toMatchObject({ code: "P2002" });
-    await queueBill(accounts, duplicate.id, "ZOHO", "100");
+    await queueBill(admin, duplicate.id, "ZOHO", "100");
     await processIntegrationJobs({
       limit: 1,
       adapterFactory: () =>

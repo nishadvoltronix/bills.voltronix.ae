@@ -39,6 +39,6 @@ export async function getIncomingSyncStatus(actor: Actor, companyId?: string): P
         companyName: names.map(c => label(c.name)).join(" / "), status, lastSuccessAt: row.lastSuccessAt?.toISOString() ?? null,
         nextRunAt: settings.enabled ? row.nextRunAt.toISOString() : null, backoffUntil: row.backoffUntil?.toISOString() ?? null,
         isStale: !row.lastSuccessAt || now - row.lastSuccessAt.valueOf() > Math.max(settings.intervalSeconds * 3000, 900_000),
-        message: messages[status] ?? messages.BLOCKED, processedCount: row.target === "ZOHO" ? row.processedCount : null };
+        message: messages[status] ?? messages.BLOCKED, processedCount: actor.role === "ADMIN" && row.target === "ZOHO" ? row.processedCount : null };
     }) };
 }

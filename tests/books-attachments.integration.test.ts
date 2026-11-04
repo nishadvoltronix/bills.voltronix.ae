@@ -51,6 +51,12 @@ beforeAll(async () => {
     if (company === companyId) billId = bill.id;
     else otherBillId = bill.id;
   }
+  // This reader may see the imported copy only through its own confirmed native bill.
+  const vendor = await db.vendor.create({ data: { companyId, name: `Fictional owner supplier ${tag}` } });
+  const job = await db.job.create({ data: { companyId, jobNumber: `OWNER-${tag}`, name: "Fictional original owner job", customer: "Fictional customer" } });
+  await db.bill.create({ data: { companyId, vendorId: vendor.id, jobId: job.id, createdById: reader.id, invoiceNumber: `NATIVE-${tag}`,
+    normalizedInvoiceNumber: `NATIVE-${tag}`, invoiceDate: new Date("2026-10-01"), category: "MATERIALS", currency: "AED", status: "READY",
+    subtotal: "100", vatRate: "0", vatAmount: "0", total: "100", syncRecords: { create: { target: "ZOHO", organizationId, externalId: "1001", status: "SYNCED" } } } });
   nativeCounts = await ledgerCounts();
 });
 afterAll(async () => { vi.restoreAllMocks(); vi.unstubAllEnvs(); vi.unstubAllGlobals(); await db.$disconnect(); });

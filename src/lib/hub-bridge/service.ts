@@ -4,6 +4,7 @@ import Decimal from "decimal.js";
 import { db } from "@/lib/db";
 import { HttpError } from "@/lib/http";
 import { isRecognizedBillStatus } from "@/lib/finance";
+import { billScope } from "@/lib/permissions";
 import { hubNonceHash, type HubClaims } from "./verify";
 
 const unavailable = () => new HttpError(404, "Billing record unavailable.");
@@ -35,7 +36,7 @@ export async function readHubJobBilling(claims: HubClaims, store: PrismaClient =
       // Expired tokens fail before cleanup; a nonce remains unique throughout its lifetime.
       await tx.hubBridgeNonce.deleteMany({ where: { expiresAt: { lt: now } } });
       await tx.hubBridgeNonce.create({ data: { nonceHash: hubNonceHash(claims), expiresAt: new Date(claims.exp * 1000) } });
-      const where = { jobId: job.id, companyId: claims.companyId };
+      const where = { jobId: job.id, companyId: claims.companyId, ...billScope(actor) };
       if (await tx.bill.count({ where: { ...where, currency: { not: job.currency } } })) throw unavailable();
       const billCount = await tx.bill.count({ where });
       const totals = await tx.bill.aggregate({ where: { ...where, status: { in: ["READY", "APPROVED"] } },

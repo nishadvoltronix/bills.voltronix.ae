@@ -10,6 +10,9 @@ import { z } from "zod";
 import { db } from "@/lib/db";
 import type { Actor } from "@/lib/auth";
 import { HttpError } from "@/lib/http";
+import { billScope } from "@/lib/permissions";
+import { assertCurrentBillReader } from "@/lib/services/bill-ownership";
+import { companyFilter } from "@/lib/company";
 import { readPrivateDocument } from "@/lib/services/documents";
 import {
   BooksAdapter,
@@ -235,7 +238,11 @@ export async function queueBill(
 ) {
   financeRole(actor);
   return db.$transaction(
-    (tx) => enqueueTx(tx, billId, target, actor.id, organizationId, confirmation),
+    async (tx) => {
+      if (!await tx.bill.findFirst({ where: { id: billId, ...billScope(actor) }, select: { id: true } }))
+        throw new HttpError(404, "Bill not found.");
+      return enqueueTx(tx, billId, target, actor.id, organizationId, confirmation);
+    },
     {
       isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
       timeout: 20_000,
@@ -331,10 +338,12 @@ export async function listIntegrationJobs(
     );
   if (organizationId && !/^\d{1,30}$/.test(organizationId))
     throw new HttpError(422, "Invalid Books organization selection.");
+  await assertCurrentBillReader(actor);
+  const scope = await companyFilter(actor);
   const jobs = await db.integrationJob.findMany({
     where: {
       ...(organizationId ? { organizationId } : {}),
-      bill: { company: { active: true, memberships: { some: { userId: actor.id, active: true, user: { active: true } } } } },
+      bill: { ...scope, ...billScope(actor), company: { active: true, memberships: { some: { userId: actor.id, active: true, user: { active: true } } } } },
     },
     orderBy: { createdAt: "desc" },
     take: 100,
@@ -343,6 +352,9 @@ export async function listIntegrationJobs(
       history: { orderBy: { finishedAt: "desc" }, take: 10 },
     },
   });
+  await assertCurrentBillReader(actor);
+  if (JSON.stringify(scope) !== JSON.stringify(await companyFilter(actor)))
+    throw new HttpError(403, "Your company access changed. Reload this page.");
   return {
     jobs: jobs.map((job) => ({
       id: job.id,
@@ -383,7 +395,7 @@ export async function scheduleIntegrationJob(
     .parse(payload);
   return db.$transaction(
     async (tx) => {
-      const job = await tx.integrationJob.findFirst({ where: { id, bill: { company: { active: true, memberships: { some: { userId: actor.id, active: true, user: { active: true } } } } } } });
+      const job = await tx.integrationJob.findFirst({ where: { id, bill: { ...billScope(actor), company: { active: true, memberships: { some: { userId: actor.id, active: true, user: { active: true } } } } } } });
       if (!job) throw new HttpError(404, "Synchronization job not found.");
       const source = await tx.bill.findUniqueOrThrow({ where: { id: job.billId }, include: sourceInclude });
       await assertSynchronizationActor(tx, source, actor.id);

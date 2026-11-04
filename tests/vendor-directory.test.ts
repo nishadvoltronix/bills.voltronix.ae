@@ -61,9 +61,9 @@ beforeEach(() => {
     const org = where.target_organizationId.organizationId;
     return !grantPresent || org === "__legacy_unscoped__" ? null : { revokedAt: grantActive ? null : new Date(), connectionFingerprint: grantFingerprint ?? connectionFingerprint(getConfig("ZOHO", process.env, org)) };
   });
-  store.vendor.findMany.mockImplementation(async ({ where, skip, take }: { where: { companyId: string; name?: { contains: string } }; skip: number; take: number }) => {
+  store.vendor.findMany.mockImplementation(async ({ where, skip = 0, take }: { where: { companyId: string; name?: { contains: string }; booksMappings?: { none: { organizationId?: string; dataCenter?: string; environment?: string } } }; skip?: number; take: number }) => {
     const q = where.name?.contains.replace(/\\([\\%_])/g, "$1").toLowerCase();
-    return locals.filter(row => row.companyId === where.companyId && (!q || row.name.toLowerCase().includes(q)))
+    return locals.filter(row => row.companyId === where.companyId && (!q || row.name.toLowerCase().includes(q)) && (!where.booksMappings || !mappings.some(mapping => mapping.vendor.id === row.id && (!where.booksMappings!.none.organizationId || mapping.organizationId === where.booksMappings!.none.organizationId) && (!where.booksMappings!.none.dataCenter || mapping.dataCenter === where.booksMappings!.none.dataCenter) && (!where.booksMappings!.none.environment || mapping.environment === where.booksMappings!.none.environment))))
       .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id)).slice(skip, skip + take);
   });
   store.vendorBooksMapping.findMany.mockImplementation(async ({ where }: { where: Omit<Mapping, "externalVendorId" | "vendor"> & { externalVendorId: { in: string[] }; vendor: { companyId: string } } }) =>
@@ -77,6 +77,34 @@ afterEach(() => {
 });
 
 describe("company vendor directory", () => {
+  it("shows pending locals alongside a healthy Books page without duplicating a mapped identity", async () => {
+    const mapped = local(); mappings.push({ ...destination, externalVendorId: "2001", vendor: mapped });
+    const pending = local("company-a", "Pending supplier"); local("company-b", "Foreign pending");
+    const result = await listCompanyVendorDirectory(actor, { companyId: "company-a" }, connection(page([contact()])).transport);
+    expect(result.vendors).toHaveLength(2);
+    expect(result.vendors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: mapped.id, source: "books", externalVendorId: "2001" }),
+      expect.objectContaining({ id: pending.id, source: "local", status: "local", booksMappingRequired: true }),
+    ]));
+    expect(result.warning).toBeNull();
+  });
+
+  it("pages all pending local suppliers even after the provider's final page", async () => {
+    for (let index = 0; index < 101; index++) local("company-a", `Pending ${String(index).padStart(3, "0")}`);
+    const first = await listCompanyVendorDirectory(actor, { companyId: "company-a" }, connection(page([contact()])).transport);
+    const second = await listCompanyVendorDirectory(actor, { companyId: "company-a", page: 2 }, connection(page([], 2)).transport);
+    expect(first.vendors).toHaveLength(101); expect(first.hasMore).toBe(true);
+    expect(second.vendors).toHaveLength(1); expect(second.hasMore).toBe(false);
+    const locals = [...first.vendors, ...second.vendors].filter(row => row.source === "local");
+    expect(new Set(locals.map(row => row.id)).size).toBe(101);
+  });
+
+  it("retains visibly pending local records with a warning when the remote directory fails", async () => {
+    const pending = local();
+    const result = await listCompanyVendorDirectory(actor, { companyId: "company-a" }, connection({ code: 123, message: "PRIVATE" }).transport);
+    expect(result.vendors).toEqual([{ ...pending, source: "local", status: "local", booksMappingRequired: true }]);
+    expect(result.warning).toContain("Retry"); expect(JSON.stringify(result)).not.toContain("PRIVATE");
+  });
   it("manual mode lists saved company suppliers despite an existing provider destination", async () => {
     vi.stubEnv("MANUAL_ENTRY_ONLY", "true");
     companyDemo = false;
@@ -97,7 +125,7 @@ describe("company vendor directory", () => {
     const result = await listCompanyVendorDirectory(actor, { companyId: "company-a", page: 2 }, transport);
     expect(result).toMatchObject({ companyId: "company-a", ...destination, source: "books", page: 2, perPage: 100, hasMore: true, warning: null });
     expect(result.vendors).toMatchObject([{ id: linked.id, externalVendorId: "2001", status: "active", ...destination }, { id: null, externalVendorId: "2002", status: "inactive", currency: "JPY", ...destination }]);
-    expect(Object.fromEntries(new URL(fetcher.mock.calls[0][0]).searchParams)).toEqual({ contact_type: "vendor", page: "2", per_page: "100", sort_column: "contact_name", sort_order: "A", organization_id: "1001" });
+    expect(Object.fromEntries(new URL(fetcher.mock.calls[0][0]).searchParams)).toEqual({ contact_type: "vendor", filter_by: "Status.All", page: "2", per_page: "100", sort_column: "contact_name", sort_order: "A", organization_id: "1001" });
     expect(JSON.stringify(result)).not.toContain("PRIVATE ADDRESS");
     expect(store.user.findFirst.mock.calls[0][0].where.role.in).toContain("MANAGEMENT");
   });
@@ -147,7 +175,7 @@ describe("company vendor directory", () => {
     destinations = [{ companyId: "company-a", ...destination }];
     const { transport, fetcher } = connection(page([contact({ contact_name: "100% supplier" }), contact({ contact_id: "2002", contact_name: "100 other supplier" })]));
     const remote = await listCompanyVendorDirectory(actor, { companyId: "company-a", q: "%" }, transport);
-    expect(remote.vendors.map(row => row.name)).toEqual(["100% supplier"]);
+    expect(remote.vendors.map(row => row.name)).toEqual(expect.arrayContaining(["100% supplier", "100%_\\ supplier"]));
     expect(new URL(fetcher.mock.calls[0][0]).searchParams.get("contact_name_contains")).toBe("%");
   });
 
@@ -156,7 +184,7 @@ describe("company vendor directory", () => {
     const row = local();
     const result = await listCompanyVendorDirectory(actor, { companyId: "company-a" });
     expect(result).toMatchObject({ source: "local", organizationId: null, dataCenter: null, environment: null });
-    expect(result.vendors).toEqual([{ ...row, status: "local" }]); expect(result.warning).toContain("not configured");
+    expect(result.vendors).toEqual([{ ...row, status: "local", source: "local" }]); expect(result.warning).toContain("not configured");
   });
 
   it.each(["missing-profile", "disabled", "missing-grant", "revoked-grant", "changed-grant", "ambiguous"])("never mixes local records into a Books page when %s", async mode => {
@@ -170,7 +198,8 @@ describe("company vendor directory", () => {
     if (mode === "ambiguous") destinations.push({ companyId: "company-a", ...destination, organizationId: "1002" });
     const result = await listCompanyVendorDirectory(actor, { companyId: "company-a", page: 2 }, remote.transport);
     expect(result).toMatchObject({ source: "books", vendors: [], hasMore: false, page: 2 }); expect(result.warning).toBeTruthy();
-    expect(remote.fetcher).not.toHaveBeenCalled(); expect(store.vendor.findMany).not.toHaveBeenCalled(); expect(store.vendorBooksMapping.findMany).not.toHaveBeenCalled();
+    expect(remote.fetcher).not.toHaveBeenCalled(); expect(store.vendorBooksMapping.findMany).not.toHaveBeenCalled();
+    if (mode !== "ambiguous") expect(store.vendor.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { companyId: "company-a", booksMappings: { none: destination } }, skip: 100, take: 101 }));
   });
 
   it.each([

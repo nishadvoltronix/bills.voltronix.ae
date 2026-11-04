@@ -8,7 +8,8 @@ import { HttpError } from "@/lib/http";
 import { csv, parseReportFilters } from "@/lib/reports";
 import { getPaymentStatus, isRecognizedBillStatus } from "@/lib/finance";
 import { countOcrDuplicateWarnings } from "@/lib/services/ocr";
-import { canViewFinancialSummary, canViewOverview } from "@/lib/permissions";
+import { billScope, canViewFinancialSummary, canViewOverview } from "@/lib/permissions";
+import { assertCurrentBillReader } from "./bill-ownership";
 
 export async function expenseReport(actor: Actor, params: URLSearchParams) {
   if (!canViewFinancialSummary(actor))
@@ -17,10 +18,13 @@ export async function expenseReport(actor: Actor, params: URLSearchParams) {
       "Management reports are restricted to Admin and Management.",
     );
   const filters = parseReportFilters(params);
+  await assertCurrentBillReader(actor);
   const { from, to, ...conditions } = filters;
+  const scope = await companyFilter(actor, params.get("companyId") || undefined);
   const where: Prisma.BillWhereInput = {
     ...conditions,
-    ...(await companyFilter(actor, params.get("companyId") || undefined)),
+    ...scope,
+    ...billScope(actor),
   };
   if (from || to)
     where.invoiceDate = {
@@ -96,6 +100,9 @@ export async function expenseReport(actor: Actor, params: URLSearchParams) {
             .toFixed(2)
         : "0.00",
   }));
+  await assertCurrentBillReader(actor);
+  if (JSON.stringify(scope) !== JSON.stringify(await companyFilter(actor, params.get("companyId") || undefined)))
+    throw new HttpError(403, "Your company access changed. Reload this page.");
   return {
     filters,
     count: rows.length,
@@ -155,9 +162,11 @@ export function exportExpenseReport(
 
 export async function operationSummary(actor: Actor) {
   if (!canViewOverview(actor)) throw new HttpError(403, "Your role cannot view operation summaries.");
+  await assertCurrentBillReader(actor);
+  const scope = await companyFilter(actor);
   const createdBy = {
-    ...(await companyFilter(actor)),
-    ...(actor.role === "DATA_ENTRY" ? { createdById: actor.id } : {}),
+    ...scope,
+    ...billScope(actor),
   };
   const ocrScope = { batch: createdBy };
   const [review, failed, queued, syncFailures, syncUnknown, duplicates] =
@@ -173,6 +182,9 @@ export async function operationSummary(actor: Actor) {
       db.syncRecord.count({ where: { status: "UNKNOWN", bill: createdBy } }),
       countOcrDuplicateWarnings(actor),
     ]);
+  await assertCurrentBillReader(actor);
+  if (JSON.stringify(scope) !== JSON.stringify(await companyFilter(actor)))
+    throw new HttpError(403, "Your company access changed. Reload this page.");
   return {
     ocrReview: review,
     ocrFailed: failed,
@@ -181,6 +193,6 @@ export async function operationSummary(actor: Actor) {
     syncUnknown,
     duplicateWarnings: duplicates.count,
     duplicateScanTruncated: duplicates.truncated,
-    scope: actor.role === "DATA_ENTRY" ? "YOUR_DOCUMENTS" : "ORGANIZATION",
+    scope: actor.role === "ADMIN" ? "ORGANIZATION" : "YOUR_DOCUMENTS",
   };
 }

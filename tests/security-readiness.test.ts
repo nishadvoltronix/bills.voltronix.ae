@@ -55,6 +55,8 @@ const routes = [
   ["companies", () => import("@/app/api/companies/route"), ["GET"]],
   ["auth/me", () => import("@/app/api/auth/me/route"), ["GET"]],
   ["auth/password", () => import("@/app/api/auth/password/route"), ["POST"]],
+  ["account/users", () => import("@/app/api/account/users/route"), ["GET"]],
+  ["account/users/id/password", () => import("@/app/api/account/users/[id]/password/route"), ["POST"]],
   ["audit", () => import("@/app/api/audit/route"), ["GET"]],
   ["bills", () => import("@/app/api/bills/route"), ["GET", "POST"]],
   ["bills/id", () => import("@/app/api/bills/[id]/route"), ["GET", "PATCH"]],
@@ -370,6 +372,7 @@ describe("cross-role endpoint restrictions", () => {
           createdById: "fixture-DATA_ENTRY",
           companyId: { in: ["fixture-company"] },
         },
+        OR: [{ billId: null }, { bill: { createdById: "fixture-DATA_ENTRY" } }],
       },
       include: {
         batch: true,

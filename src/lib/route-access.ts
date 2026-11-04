@@ -6,9 +6,10 @@ export function canAccessRoleApiPath(
   role: string,
   pathname: string | null | undefined,
 ): boolean {
+  if (pathname && (/^\/api\/account\/users(?:\/|$)/.test(pathname) || /^\/api\/auth\/password\/?$/.test(pathname))) return role === "ADMIN";
   if (role !== "ACCOUNTS") return true;
   if (!pathname || pathname.length > 512) return false;
-  return /^\/api\/auth\/(?:me|logout|password)\/?$/.test(pathname) ||
+  return /^\/api\/auth\/(?:me|logout)\/?$/.test(pathname) ||
     /^\/api\/companies\/?$/.test(pathname) ||
     /^\/api\/(?:bills|vendors)(?:\/[A-Za-z0-9_-]+)*\/?$/.test(pathname) ||
     /^\/api\/documents\/[A-Za-z0-9_-]+\/?$/.test(pathname) ||

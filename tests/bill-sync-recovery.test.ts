@@ -4,6 +4,7 @@ import type { Actor } from "@/lib/auth";
 import { getBill } from "@/lib/services/bills";
 
 const store = vi.hoisted(() => ({
+  user: { findUnique: vi.fn() },
   bill: { findUnique: vi.fn() },
   userCompanyMembership: { findMany: vi.fn() },
   auditLog: { findMany: vi.fn() },
@@ -22,6 +23,7 @@ const operation = {
 
 beforeEach(() => {
   vi.resetAllMocks();
+  store.user.findUnique.mockResolvedValue({ active: true, role: actor.role });
   store.bill.findUnique.mockResolvedValue({
     id: "fictional-bill", companyId: "fictional-company", createdById: actor.id, status: "READY",
     invoiceDate: new Date("2026-10-30T00:00:00Z"), dueDate: null, usesBooksLineTaxes: false,
@@ -56,9 +58,24 @@ describe("bill synchronization recovery visibility", () => {
     expect(store.integrationJob.findMany).not.toHaveBeenCalled();
   });
 
-  it("does not expose another creator's synchronization details to Data Entry", async () => {
-    await expect(getBill({ ...actor, id: "another-creator", role: "DATA_ENTRY" }, "fictional-bill"))
+  it.each(["ACCOUNTS", "DATA_ENTRY", "MANAGEMENT"] as const)("does not expose another creator's synchronization details to %s", async role => {
+    store.user.findUnique.mockResolvedValue({ active: true, role });
+    await expect(getBill({ ...actor, id: "another-creator", role }, "fictional-bill"))
       .rejects.toMatchObject({ status: 404 });
     expect(store.integrationJob.findMany).not.toHaveBeenCalled();
+  });
+  it("does not release bill or operation metadata after the actor role changes during the read", async () => {
+    store.integrationJob.findMany.mockImplementationOnce(async () => {
+      store.user.findUnique.mockResolvedValue({ active: true, role: "MANAGEMENT" });
+      return [];
+    });
+    await expect(getBill(actor, "fictional-bill")).rejects.toMatchObject({ status: 403 });
+  });
+  it("does not release bill or operation metadata after membership revocation during the read", async () => {
+    store.integrationJob.findMany.mockImplementationOnce(async () => {
+      store.userCompanyMembership.findMany.mockResolvedValue([]);
+      return [];
+    });
+    await expect(getBill(actor, "fictional-bill")).rejects.toMatchObject({ status: 404 });
   });
 });

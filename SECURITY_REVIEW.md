@@ -2,6 +2,8 @@
 
 Current policy update, 28 October 2026: **Save and sync** replaces independent bill approval. Authorized writers may finalize their own bills; company membership, ownership, exact versions, original attachments and runtime/provider guards remain enforced. READY and historical APPROVED bills are financially recognized; payment is still a separate Accounts/Admin action. The production branch remains disabled locally. See [current validation](docs/APPROVAL_FREE_SYNC_VALIDATION.md) and [setup](docs/LIVE_SYNC_SETUP.md).
 
+Current ownership update, 3 November 2026: inside active company memberships, Admin can read all creators' bills; every non-Admin is restricted to the bill's original `createdById`. The rule also covers originals, history, search, aggregates, exports, payment and synchronization actions. Imported Books copies require a unique verified native owner; unowned or ambiguous imports are hidden from non-Admins. Shared job/vendor lookups remain available. Ownership and current access are enforced in server queries and rechecked before private results are released.
+
 The review below was performed against the earlier master specification on 2026-10-27 (Asia/Dubai). Its independent-approval and unsupported-production statements describe that historical milestone, not current workflow. This is an implementation review and automated-test record, not an independent penetration test or production certification. No production data, credentials, services, or DNS were changed during that review.
 
 ## Implemented controls
@@ -22,7 +24,9 @@ The actual combined test totals belong in `IMPLEMENTATION_STATUS.md`. Test names
 
 ## Account operations
 
-`POST /api/auth/password` requires an active session, same-origin request, the current password, and a different replacement of 14–128 characters. Success updates the hash, revokes all sessions, and requires sign-in again. Wrong-password attempts are rate limited. Login rechecks credentials transactionally so a password check started before recovery/deactivation cannot issue a session afterward using stale credentials.
+`POST /api/auth/password` is Admin-only and requires an active session, same-origin request, the current password, and a different replacement of 14–128 characters. Non-Admin passwords are managed by an administrator. Success updates the hash, revokes all sessions, and requires sign-in again. Wrong-password attempts are rate limited. Login rechecks credentials transactionally so a password check started before recovery/deactivation cannot issue a session afterward using stale credentials.
+
+Admin’s **User passwords** page at `/account/users` lists only safe user identity/status fields. A managed user’s active company access must be wholly inside the Admin’s current company access. Each reset requires the Admin’s current password, a confirmed replacement of at least 14 characters, and an audit reason. The transaction rechecks the Admin’s active role/password hash and the target’s current company scope, revokes the target’s sessions and authentication attempts, and records a password-free audit. The HTTP interface exposes password resets only; it cannot deactivate or reactivate users. Admins change their own password through Account security.
 
 Use `scripts/manage-user.ts` on the trusted host for `deactivate`, `reactivate`, `reset-password`, or `revoke-sessions`. Supply these values through the operator's secret manager/process environment, never shell arguments or chat:
 
@@ -33,7 +37,7 @@ Use `scripts/manage-user.ts` on the trusted host for `deactivate`, `reactivate`,
 
 Run `npm run user:manage` locally, or `node --conditions=react-server --import=tsx scripts/manage-user.ts` with authorized environment injection. Clear operator/provisioning variables afterward. The CLI does not accept email alone as administrator proof. Self-deactivation is refused; use an independent administrator. Accounts are deactivated, never deleted, to preserve historical financial attribution. Inactive-account recovery requires separate, audited reactivation before resetting the password.
 
-Recovery is operator-assisted: verify identity through an approved channel, record the reason, deliver the replacement securely, and have the user change it after sign-in. Delivery and forced first-use rotation are not automated. There is no email/SMS transport or anonymous reset-token flow. Maintain at least two approved administrators. Loss of all administrator credentials requires a separately authorized incident/bootstrap procedure using trusted host/database access and the existing provisioning CLI.
+Recovery is administrator-assisted: verify identity through an approved channel, record the reason, and deliver the replacement securely. Non-Admins cannot change the assigned password themselves. Delivery is not automated. There is no email/SMS transport or anonymous reset-token flow. Maintain at least two approved administrators. Loss of all administrator credentials requires a separately authorized incident/bootstrap procedure using trusted host/database access and the existing provisioning CLI.
 
 ## Production blockers and limitations
 

@@ -147,7 +147,7 @@ describe("real MySQL migration and restricted-runtime infrastructure", () => {
     const checks = await db.$queryRaw<
       Array<{ name: string; enforced: string }>
     >`SELECT CONSTRAINT_NAME AS name, ENFORCED AS enforced FROM information_schema.TABLE_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_TYPE='CHECK'`;
-    expect(checks).toHaveLength(60);
+    expect(checks).toHaveLength(63);
     expect(checks.every((check) => check.enforced === "YES")).toBe(true);
     expect(checks.map((check) => check.name)).toEqual(
       expect.arrayContaining([
@@ -183,6 +183,9 @@ describe("real MySQL migration and restricted-runtime infrastructure", () => {
         "BooksProjectAssociation_links_check",
         "BooksProjectAssociation_lease_check",
         "BooksProjectAssociation_failures_check",
+        "VendorBooksSync_status_check",
+        "VendorBooksSync_attempts_check",
+        "VendorBooksSync_snapshot_check",
       ]),
     );
     const indexes = await db.$queryRaw<

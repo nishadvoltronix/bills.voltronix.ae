@@ -29,6 +29,9 @@ export function VendorsPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [syncWarning, setSyncWarning] = useState("");
+  const [syncingVendor, setSyncingVendor] = useState<string | null>(null);
+  const working = busy || syncingVendor !== null;
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedQuery(q), 300);
     return () => clearTimeout(timer);
@@ -43,11 +46,11 @@ export function VendorsPage() {
     response.companyId !== companyId || response.page !== page || response.perPage !== 100 ||
     !["books", "local"].includes(response.source) ||
     (response.source === "local" && (response.organizationId !== null || response.dataCenter !== null || response.environment !== null)) ||
-    response.vendors.some((vendor) => vendor.companyId !== companyId || (response.source === "books"
-      ? !response.organizationId || !response.dataCenter || !response.environment || !vendor.externalVendorId ||
+    response.vendors.some((vendor) => vendor.companyId !== companyId || (vendor.externalVendorId
+      ? response.source !== "books" || vendor.source === "local" || !response.organizationId || !response.dataCenter || !response.environment ||
         vendor.organizationId !== response.organizationId || vendor.dataCenter !== response.dataCenter || vendor.environment !== response.environment ||
         !["active", "inactive"].includes(vendor.status)
-      : !vendor.id || vendor.status !== "local"))
+      : vendor.source === "books" || !vendor.id || vendor.status !== "local"))
   );
   const directory = !wrongScope ? response : null;
   const directoryError = state.error || (wrongScope
@@ -60,6 +63,25 @@ export function VendorsPage() {
     setDebouncedQuery("");
     setError("");
     setSuccess("");
+    setSyncWarning("");
+  }
+  function showSyncResult(sync: { status: string; message: string } | undefined, fallback: string) {
+    if (!sync || ["SYNCED", "LOCAL_ONLY"].includes(sync.status)) {
+      setSuccess(sync?.status === "SYNCED" ? "Vendor saved and confirmed in Zoho Books." : sync?.message || fallback);
+      setSyncWarning("");
+    } else {
+      setSuccess(""); setSyncWarning(`Vendor saved locally. ${sync.message}`);
+    }
+  }
+  async function syncVendor(vendorId: string) {
+    setSyncingVendor(vendorId); setError(""); setSuccess(""); setSyncWarning("");
+    try {
+      const result = await api<{ sync: { status: string; message: string } }>(`/api/vendors/${encodeURIComponent(vendorId)}/sync`, { method: "POST", body: "{}" });
+      if (!result.sync || !["SYNCED", "QUEUED", "PROCESSING", "UNKNOWN", "BLOCKED", "FAILED", "LOCAL_ONLY"].includes(result.sync.status) || !result.sync.message)
+        throw new Error("The vendor sync status could not be confirmed. Check its status before retrying.");
+      showSyncResult(result.sync, "Vendor sync status checked."); state.reload();
+    } catch (failure) { setError(errorMessage(failure)); }
+    finally { setSyncingVendor(null); }
   }
   async function create(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -67,7 +89,7 @@ export function VendorsPage() {
     setBusy(true);
     setError("");
     try {
-      await api("/api/vendors", {
+      const result = await api<{ sync?: { status: string; message: string } }>("/api/vendors", {
         method: "POST",
         body: JSON.stringify({
           companyId: form.get("companyId"),
@@ -78,7 +100,7 @@ export function VendorsPage() {
         }),
       });
       setAdding(false);
-      setSuccess("Vendor created in this workspace.");
+      showSyncResult(result.sync, "Vendor created in this workspace.");
       state.reload();
     } catch (e) {
       setError(errorMessage(e));
@@ -94,7 +116,7 @@ export function VendorsPage() {
         description="Choose a company to browse its vendor directory."
       >
         {canCreate && (
-          <Button type="button" disabled={busy} onClick={() => setAdding(!adding)}>
+          <Button type="button" disabled={working} onClick={() => setAdding(!adding)}>
             <Plus size={17} />
             {adding ? "Close form" : "Add vendor"}
           </Button>
@@ -110,13 +132,14 @@ export function VendorsPage() {
           {error}
         </Notice>
       )}
+      {syncWarning && <Notice onClose={() => setSyncWarning("")}>{syncWarning}</Notice>}
       {adding && canCreate && (
         <Card className="form-card inline-create">
           <div className="panel-heading compact">
             <h2>Add a workspace vendor</h2>
           </div>
           <form onSubmit={create}>
-            <fieldset disabled={busy} className="vendor-create-fields">
+            <fieldset disabled={working} className="vendor-create-fields">
             <div className="form-grid">
               <CompanySelect id="new-vendor-company" value={companyId} onChange={changeCompany} />
               <Field label="Vendor name" htmlFor="vendor-name" required>
@@ -137,7 +160,7 @@ export function VendorsPage() {
                   placeholder="accounts@supplier.com"
                 />
               </Field>
-              <Field label="Tax registration number" htmlFor="vendor-trn">
+              <Field label="Tax registration number" htmlFor="vendor-trn" hint="Enter TRN for VAT-registered suppliers">
                 <Input
                   id="vendor-trn"
                   name="trn"
@@ -154,7 +177,7 @@ export function VendorsPage() {
               </Field>
             </div>
             <div className="form-footer">
-              <p>{manualEntryOnly ? "Save a supplier for this company's manual bills." : "This creates a local vendor record in this workspace, not a Zoho Books contact."}</p>
+              <p>{manualEntryOnly ? "Save a supplier for this company's manual bills." : "Saving creates a supplier in this workspace and attempts to link it to Zoho Books. Its confirmed status appears after saving."}</p>
               <Button type="submit" disabled={busy}>
                 {busy && <LoaderCircle className="spin" size={16} />}Create
                 vendor
@@ -166,14 +189,14 @@ export function VendorsPage() {
       )}
       <Card className="vendor-directory-card">
         <div className="vendor-directory-filters" role="group" aria-label="Vendor directory filters">
-          <CompanySelect id="vendor-directory-company" value={companyId} onChange={changeCompany} disabled={busy} />
+          <CompanySelect id="vendor-directory-company" value={companyId} onChange={changeCompany} disabled={working} />
           <div className="search-input">
             <Search size={17} />
             <Input
               aria-label="Search vendors"
               placeholder="Search suppliers…"
               value={q}
-              disabled={!companyId || busy}
+              disabled={!companyId || working}
               maxLength={100}
               onChange={(e) => { setQ(e.target.value); setPage(1); }}
             />
@@ -184,7 +207,7 @@ export function VendorsPage() {
           {directory.source === "books"
             ? "Source: Zoho Books. Active and inactive vendors are included."
             : manualEntryOnly ? "Source: this workspace." : "Source: this workspace. This company has no configured Books vendor directory."}
-          {" "}Up to {directory.perPage} vendors per page.
+          {" "}Up to {directory.perPage} {directory.source === "books" ? "Books vendors, plus local suppliers awaiting a Books link" : "vendors"} per page.
         </p>}
         {!companyId ? (
           <EmptyState title="Select a company to view its vendors" description="Each company has its own vendor directory." />
@@ -207,9 +230,11 @@ export function VendorsPage() {
               <tr>
                 <th>Vendor name</th>
                 <th>Status</th>
+                <th>Source</th>
                 <th>Email</th>
                 <th>Tax registration number</th>
                 <th>Currency</th>
+                {canCreate && directory.source === "books" && <th>Books link</th>}
               </tr>
             </thead>
             <tbody>
@@ -226,11 +251,16 @@ export function VendorsPage() {
                   <td><Badge tone={v.status === "active" ? "success" : v.status === "inactive" ? "warning" : "neutral"}>
                     {v.status === "active" ? "Active" : v.status === "inactive" ? "Inactive" : "Local"}
                   </Badge></td>
+                  <td className="muted">{v.externalVendorId ? "Zoho Books" : v.booksMappingRequired ? "Workspace · Books link pending" : "Workspace"}</td>
                   <td className="muted">{v.email || "—"}</td>
                   <td className="muted">{v.trn || "—"}</td>
                   <td>
                     <Badge>{v.currency}</Badge>
                   </td>
+                  {canCreate && directory.source === "books" && <td>{v.id && !v.externalVendorId && <Button type="button" variant="secondary" size="sm"
+                    disabled={busy || syncingVendor !== null} onClick={() => void syncVendor(v.id!)}>
+                    {syncingVendor === v.id ? "Checking sync…" : "Sync vendor / check status"}
+                  </Button>}</td>}
                 </tr>
               ))}
             </tbody>
@@ -251,9 +281,9 @@ export function VendorsPage() {
         {companyId && <nav className="pagination" aria-label="Vendor directory pages">
           <span>Page {page}</span>
           <div>
-            <Button type="button" variant="secondary" size="sm" disabled={busy || loading || page <= 1}
+            <Button type="button" variant="secondary" size="sm" disabled={working || loading || page <= 1}
               onClick={() => setPage((current) => current - 1)}>Previous page</Button>
-            <Button type="button" variant="secondary" size="sm" disabled={busy || loading || !directory?.hasMore || !!directory?.warning}
+            <Button type="button" variant="secondary" size="sm" disabled={working || loading || !directory?.hasMore}
               onClick={() => setPage((current) => current + 1)}>Next page</Button>
           </div>
         </nav>}

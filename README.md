@@ -53,7 +53,7 @@ For this workspace, setup and migrations have already been performed. Fictional 
 - Persisted order numbers and payment terms: Due on Receipt and Net 7/15/30/45/60 calculate the due date from the bill date; Custom allows a chosen due date or none. Server validation rejects conflicting preset due dates, and edits retain existing values.
 - Search, pagination, sorting, bill-status/payment/job/vendor/category/date filters, and CSV export of the **current bill-list page**. CSV cells neutralize spreadsheet formulas.
 - Bill detail with line items, payment history, private downloads, Save and sync, synchronization readiness, and financial audit history.
-- Admin job creation and Admin/Accounts vendor creation. Local IDs are separate from reserved external CRM/Zoho mappings; no automatic creation of remote jobs.
+- Admin job creation and Admin/Accounts vendor creation. Suppliers created here are queued for their company's verified Zoho Books destination, with a visible synchronization result. Local IDs remain separate from external CRM/Zoho mappings; no automatic creation of remote jobs.
 - Direct finalization by an authorized bill writer, optional drafts, cancellation of unpaid bills, and separate partial/full payment recording with unique references.
 - Dashboard job-ID/bill-number search, scoped source profiles, and prefilled manual entry. Source-backed expenses, cash payments, credits and outstanding balances; job profit and budget signals are shown only with sufficient verified coverage.
 - Management currency/job filters, lifetime totals, monthly finalized expense trends, vendor expense breakdowns, budget watch, high-expense jobs, and OCR/synchronization attention counts.
@@ -64,31 +64,34 @@ For this workspace, setup and migrations have already been performed. Fictional 
 - Zoho Books supplier-bill mapping, encrypted OAuth/refresh rotation, finalized snapshots, durable synchronization and serialized attachment jobs, bounded retries, unknown-outcome reconciliation, and history. Sandbox writes retain their separate test authorization. The disabled-by-default production branch requires an operational HTTPS/database environment, verified real-company routing and current writer permissions. New jobs can run through the supervised queue worker without per-bill confirmation. Local connection-check workspaces cannot post.
 - Books synchronization currently blocks discounted bills and refuses to overwrite a different remote attachment; verified API mappings and authorized acceptance tests are needed for those cases. See [INTEGRATION_MAPPING.md](INTEGRATION_MAPPING.md).
 - Confirmed CRM field mapping: Deals.JobDealNumber for job ID, Amount for contract value, Deal_Name, Account_Name and Currency. The mapped import reads an existing CRM record and prevents local identifier collisions; no remote job is created. CRM supplier-expense posting requires an additional verified module/related-list design.
-- Self-service password changes revoke all sessions. Trusted operator account recovery/deactivation/reactivation/session-revocation commands are audited.
+- Admin password changes revoke all sessions. Admin-only user password resets require reauthentication and are audited; non-Admin passwords are administrator-managed. Trusted operator recovery/deactivation/reactivation/session-revocation commands remain available.
 
 The manual form follows the core layout of [Zoho Books New Bill](https://www.zoho.com/ae/books/help/bills/basic-functions.html). Save and sync replaces the former independent approval step. Reverse charge, per-line mixed tax and full Zoho ledger controls require additional accounting design.
 
 ## Roles and authorization
 
-All financial access now requires an active company membership, including Admin access. The role table below applies only inside authorized companies. Lists/reports use the authorized company union with an optional company filter. Creating a bill, job, vendor or OCR batch requires explicit company selection when the user belongs to more than one company. A bill cannot reference another company's vendor/job. Hub additionally enforces its own current job/task access. Branch and general Billing per-job assignments are not implemented.
+All financial access requires active company membership, including Admin access. Admin can read all creators' bills inside authorized companies. Accounts, Data Entry and Management can read only bills they originally entered; this also restricts documents, history, search, reports and synchronization metadata. A Books copy requires a unique verified link to that user's native bill; imports without owner proof are visible only to Admin. Job and vendor identities remain shared within authorized companies for bill entry.
+
+Creating a bill, job, vendor or OCR batch requires explicit company selection when the user belongs to more than one company. A bill cannot reference another company's vendor/job. Hub additionally enforces its own current job/task access. Branch and general Billing per-job assignments are not implemented.
 
 | Action                              | Admin | Accounts | Data Entry                | Management |
 | ----------------------------------- | ----- | -------- | ------------------------- | ---------- |
-| Read bills/documents                | All   | All      | Own bills only            | All        |
+| Read bills/documents                | All   | Own      | Own                       | Own        |
 | Create bills                        | Yes   | Yes      | Yes                       | No         |
-| Edit draft/rejected bills           | All   | All      | Own                       | No         |
-| Save and sync / queue Books         | All   | All      | Own                       | No         |
-| Record payments/cancel unpaid bills | Yes   | Yes      | No                        | No         |
+| Edit draft/rejected bills           | All   | Own      | Own                       | No         |
+| Save and sync / queue Books         | All   | Own      | Own                       | No         |
+| Record payments/cancel unpaid bills | All   | Own      | No                        | No         |
 | Create vendors                      | Yes   | Yes      | No                        | No         |
 | Create local jobs                   | Yes   | No       | No                        | No         |
-| Contract values/profitability       | All   | All      | Hidden; own expenses only | All        |
-| Organization audit log              | Yes   | Yes      | No                        | No         |
+| Job contract values                 | Yes   | Hidden   | Hidden                    | Yes        |
+| Expense summaries                   | All   | Per bill | Own                       | Own        |
+| Organization audit log              | Yes   | No       | No                        | No         |
 
-Checks run on every API request and on document downloads. UI visibility is only a convenience. Data Entry users see available job/vendor selectors, but not contract values or other staff's bill records. Writers may finalize their own bills; no separate reviewer approval is required. Historical approval records remain preserved.
+Checks run on every API request and on document downloads. UI visibility is only a convenience. Non-Admins cannot read another creator's bill by guessing its ID or opening a shared job. Writers may finalize their own bills; no separate reviewer approval is required. Historical approval records remain preserved.
 
 To provision another user through the trusted operator CLI, supply `ALLOW_USER_PROVISIONING=true`, `NEW_USER_EMAIL`, `NEW_USER_NAME`, `NEW_USER_ROLE`, and a unique `NEW_USER_PASSWORD` of at least 14 characters in your secure local environment, then run `npm run user:create`. No password is accepted through a public API, emitted to output, or substituted into command arguments. Clear these provisioning variables afterward. Existing users are never overwritten by this command.
 
-Use `/account` for a password change with current-password verification. For supervised recovery or deactivation, use `npm run user:manage` with the short-lived operator variables described in [SECURITY_REVIEW.md](SECURITY_REVIEW.md). There is no unauthenticated password-reset shortcut or email delivery service.
+Admins use `/account` to change their own password with current-password verification, and `/account/users` to reset passwords for authorized staff after reauthentication. Non-Admins contact their administrator. For supervised operator recovery or deactivation, use `npm run user:manage` with the short-lived operator variables described in [SECURITY_REVIEW.md](SECURITY_REVIEW.md). There is no unauthenticated password-reset shortcut or email delivery service.
 
 ## Accounting policy
 
@@ -164,6 +167,8 @@ For one scheduled Zoho setup session, use the [complete Books setup packet](docs
 The [CRM setup packet](docs/ZOHO_CRM_SETUP.md) describes its separate callback, read-only consent and exact company source bindings. Configure the verified CRM organization, data center, OAuth grant and mapping for incoming updates. `Deals.JobDealNumber` supplies the job reference and `Amount` supplies recorded contract value, never bill expense. The approved incoming worker retains all source inventory while only actual job references appear as jobs. The legacy import endpoint's restrictions remain separate from this authorized incoming flow.
 
 Multiple Books destinations use `ZOHO_BOOKS_ORGANIZATIONS_JSON`, with a separate `mapping` and optional approved `testAuthorization` in each profile. The protected authorization flow identifies each organization and its prerequisites. Vendor mapping and synchronization use the exact company-bound destination. Save and sync queues only a uniquely configured destination; missing or ambiguous setup remains visible on the saved bill. The first queue operation permanently binds that canonical bill to one organization, including retries and uncertain outcomes. The static callback stays the same; each organization requires its own consent flow and encrypted credential row. Existing unscoped credentials require reauthorization after migration 006; legacy supplier IDs are not guessed into scoped mappings.
+
+Supplier creation uses a durable, destination-bound `VendorBooksSync` operation. It checks for a uniquely matching existing supplier before creating a contact, verifies the saved currency/VAT details and returned identity, and reconciles uncertain submissions without sending another create request. Supplier creation requires `ZohoBooks.contacts.CREATE`; an older grant may need Admin reauthorization. The Vendors page exposes blocked/pending results and an explicit retry/check action. Reading a directory never creates contacts. Manual bill vendor search includes saved local suppliers and paginated Books suppliers; inactive or unsupported-currency contacts remain visible with a reason they cannot be selected. Legacy or conflicting supplier identities require review before any automatic creation.
 
 Each external destination must be explicitly assigned to an authorized company. The fictional seed binds only fictional Books destinations. The guarded local connection helper uses separate `[CONNECTION CHECK]` demo workspaces for configured real Books profiles; these are not verified accounting-company assignments and remain unable to post. Authorization services, mapping, queue, retries, history and workers enforce company binding. Outgoing production synchronization requires current writer access and operational permission; incoming read enablement does not change those requirements.
 

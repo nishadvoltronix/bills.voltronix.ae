@@ -407,7 +407,8 @@ describe("manual job lookup through confirmed bill identity", () => {
       (await searchDashboard(outsider, query("ambiguous-reference"))).jobs.map(
         (row) => row.id,
       ),
-    ).toEqual([jobB.id]);
+    ).toEqual([]);
+    expect((await searchDashboard(outsider, query("job-bravo"))).jobs.map(row => row.id)).toContain(jobB.id);
   });
 
   it("rejects conflicting confirmed identities and keeps differently scoped Books identities unassigned", async () => {
@@ -456,10 +457,7 @@ describe("manual job lookup through confirmed bill identity", () => {
     expect(
       await searchDashboard(entry, query("renamed-source-001", companyA)),
     ).toMatchObject({ jobs: [], bills: [] });
-    expect(
-      (await searchDashboard(manager, query("renamed-source-001", companyA)))
-        .jobs[0].canCreateBill,
-    ).toBe(false);
+    expect(await searchDashboard(manager, query("renamed-source-001", companyA))).toMatchObject({ bills: [], jobs: [] });
     await expect(
       searchDashboard(outsider, query("renamed-source-001", companyA)),
     ).rejects.toMatchObject({ status: 404 });

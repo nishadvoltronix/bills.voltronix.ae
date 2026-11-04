@@ -8,6 +8,7 @@ import {
 import { boundedBytes, boundedJson } from "./response";
 import { z } from "zod";
 import type { LocalLiveTestWriteCapability } from "./local-live-test";
+import type { VendorContactWriteCapability } from "./vendor-write";
 
 export type Fetch = (
   input: string | URL,
@@ -27,15 +28,23 @@ export function retryAfterSeconds(value: string | null, now = Date.now()) {
 }
 export class ZohoTransport {
   private localQuota: { remaining: number | null } | null = null;
+  private consumeVendorWrite?: () => void;
   constructor(
     readonly config: ZohoConfig,
     private readonly token: AccessToken,
     private readonly fetcher: Fetch = fetch,
     private readonly productionWriteGuard?: ProductionWriteGuard,
     private readonly localLiveTestCapability?: LocalLiveTestWriteCapability,
+    private readonly vendorContactWriteCapability?: VendorContactWriteCapability,
   ) {}
   /** Only the trusted exact-job capability can select the local one-bill test path. */
   async assertWritePermission(request?: ProductionWriteRequest) {
+    if (this.vendorContactWriteCapability) {
+      if (this.localLiveTestCapability) throw new IntegrationError("INVALID_WRITE_ENDPOINT", "Supplier creation is not part of a one-bill test.", "BLOCKED");
+      const { assertVendorContactWrite, consumeVendorContactWrite } = await import("./vendor-write");
+      this.consumeVendorWrite = () => consumeVendorContactWrite(this.vendorContactWriteCapability!);
+      await assertVendorContactWrite(this.vendorContactWriteCapability, this.config, request);
+    }
     if (this.localLiveTestCapability !== undefined) {
       const { assertLocalLiveTestWriteCapability } = await import("./local-live-test");
       await assertLocalLiveTestWriteCapability(this.localLiveTestCapability, this.config, request);
@@ -97,17 +106,18 @@ export class ZohoTransport {
     const method = options.method ?? "GET";
     if (method === "POST") {
       await this.assertWritePermission({ path, body: options.body, form: options.form });
-      if (this.config.environment === "production" && !this.productionWriteGuard)
+      if (this.config.environment === "production" && !this.productionWriteGuard && !this.vendorContactWriteCapability)
         throw new IntegrationError("LIVE_PERMISSION_REQUIRED", "Current source and access checks are required for this Books operation.", "BLOCKED");
       if (this.productionWriteGuard) await this.productionWriteGuard({ path, body: options.body, form: options.form });
       this.assertLocalWriteQuota(false);
       if (
         this.config.target !== "ZOHO" ||
-        !/^\/books\/v3\/bills(?:\/\d+\/attachment)?$/.test(path)
+        (!/^\/books\/v3\/bills(?:\/\d+\/attachment)?$/.test(path) &&
+          !(path === "/books/v3/contacts" && this.vendorContactWriteCapability))
       )
         throw new IntegrationError(
           "INVALID_WRITE_ENDPOINT",
-          "Only reviewed supplier-bill and attachment operations are permitted.",
+          "Only reviewed supplier, bill and attachment operations are permitted.",
           "BLOCKED",
         );
       const organization = await this.request(
@@ -149,6 +159,9 @@ export class ZohoTransport {
     }
     if (method === "POST") this.assertLocalWriteQuota(true);
     let response: Response;
+    if (method === "POST" && this.vendorContactWriteCapability) {
+      this.consumeVendorWrite!();
+    }
     try {
       response = await this.fetcher(url, {
         method,

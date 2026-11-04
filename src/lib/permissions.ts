@@ -16,7 +16,7 @@ export function canViewBill(
   actor: Actor,
   bill: Pick<BillAccess, "createdById">,
 ): boolean {
-  return actor.role !== "DATA_ENTRY" || bill.createdById === actor.id;
+  return actor.role === "ADMIN" || bill.createdById === actor.id;
 }
 
 export function canEditBill(actor: Actor, bill: BillAccess): boolean {
@@ -30,6 +30,7 @@ export function canEditBill(actor: Actor, bill: BillAccess): boolean {
 export function canApproveBill(actor: Actor, bill: BillAccess): boolean {
   return (
     ["ADMIN", "ACCOUNTS"].includes(actor.role) &&
+    canViewBill(actor, bill) &&
     bill.status === "PENDING_APPROVAL" &&
     actor.id !== bill.createdById
   );
@@ -62,5 +63,5 @@ export function canViewAuditLog(actor: Actor): boolean {
 
 /** Ownership restriction only. Every database query must also apply current company membership. */
 export function billScope(actor: Actor): { createdById?: string } {
-  return actor.role === "DATA_ENTRY" ? { createdById: actor.id } : {};
+  return actor.role === "ADMIN" ? {} : { createdById: actor.id };
 }

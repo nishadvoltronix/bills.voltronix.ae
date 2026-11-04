@@ -83,6 +83,7 @@ model User {
   initiatedIntegrationJobs IntegrationJob[] @relation("IntegrationJobInitiator")
   booksImportRuns       BooksImportRun[]
   crmImportRuns         CrmImportRun[]
+  initiatedVendorSyncs VendorBooksSync[] @relation("VendorSyncInitiator")
 }
 
 model Session {
@@ -119,6 +120,7 @@ model Vendor {
   bills          Bill[]
   ocrTemplates   OcrTemplate[]
   booksMappings  VendorBooksMapping[]
+  booksSyncs     VendorBooksSync[]
 
   @@unique([id, companyId])
   @@unique([companyId, externalCrmId])
@@ -141,6 +143,38 @@ model VendorBooksMapping {
   @@unique([vendorId, organizationId, dataCenter, environment], map: "VendorBooksMapping_vendor_destination_key")
   @@unique([organizationId, dataCenter, environment, externalVendorId], map: "VendorBooksMapping_destination_external_key")
   @@index([organizationId, dataCenter, environment])
+}
+
+model VendorBooksSync {
+  id               String   @id @default(cuid()) @db.VarChar(100)
+  vendorId         String   @db.VarChar(100)
+  companyId        String   @db.VarChar(100)
+  organizationId   String   @db.VarChar(100)
+  dataCenter       String   @db.VarChar(2)
+  environment      String   @db.VarChar(10)
+  initiatedById    String   @db.VarChar(100)
+  status           String   @default("QUEUED") @db.VarChar(16)
+  sourceHash       String   @db.Char(64)
+  snapshot         Json
+  externalVendorId String?  @db.VarChar(100)
+  attempts         Int      @default(0)
+  submittedAt      DateTime? @db.DateTime(3)
+  nextAttemptAt    DateTime @default(now()) @db.DateTime(3)
+  leaseToken       String?  @db.Char(64)
+  leaseUntil       DateTime? @db.DateTime(3)
+  errorCode        String?  @db.VarChar(80)
+  lastError        String?  @db.VarChar(500)
+  completedAt      DateTime? @db.DateTime(3)
+  createdAt        DateTime @default(now()) @db.DateTime(3)
+  updatedAt        DateTime @updatedAt @db.DateTime(3)
+  vendor           Vendor   @relation(fields: [vendorId, companyId], references: [id, companyId], onDelete: Restrict, onUpdate: Restrict)
+  initiatedBy      User     @relation("VendorSyncInitiator", fields: [initiatedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([vendorId, organizationId, dataCenter, environment], map: "VendorBooksSync_vendor_destination_key")
+  @@index([vendorId, companyId])
+  @@index([status, nextAttemptAt, leaseUntil])
+  @@index([companyId])
+  @@index([initiatedById])
 }
 
 model Job {

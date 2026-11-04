@@ -12,7 +12,8 @@ const vendorA: Vendor = { id: "autocomplete-vendor-a", companyId: companyA,
 const vendorB: Vendor = { id: "autocomplete-vendor-b", companyId: companyB,
   name: "Fictional Beta Supplier", currency: "AED", trn: "100000000000002", email: "beta@example.invalid" };
 type Suggestion = Omit<Vendor, "id"> & { id: string | null; externalVendorId?: string;
-  organizationId?: string; dataCenter?: string; environment?: "production" | "sandbox" };
+  organizationId?: string; dataCenter?: string; environment?: "production" | "sandbox";
+  booksMappingRequired?: boolean; selectable?: boolean; unavailableReason?: string };
 const remoteA: Suggestion = { ...vendorA, id: null, externalVendorId: "920000000001",
   organizationId: organizationA, dataCenter: "US", environment: "production" };
 const remoteB: Suggestion = { ...vendorB, id: null, externalVendorId: "920000000002",
@@ -307,6 +308,38 @@ test("empty search and failed search retry preserve other bill fields without mu
   expect(previousFailures).toBeGreaterThan(0);
   await expect(page.getByLabel("Bill#")).toHaveValue("PRESERVE-ON-RETRY");
   expect(mutations).toEqual([]);
+});
+
+test("loads later scoped vendor pages, deduplicates identities and never resolves unavailable options", async ({ page }) => {
+  const requests: number[] = []; let resolutions = 0;
+  await page.route("**/api/vendors/search?*", route => {
+    const params = new URL(route.request().url()).searchParams, pageNumber = Number(params.get("page") ?? 1);
+    requests.push(pageNumber);
+    return route.fulfill({ json: { ...envelope(companyA, pageNumber === 1 ? [remoteA] : [remoteA, { ...remoteA, externalVendorId: "920000000009", name: "Fictional Archived", selectable: false, unavailableReason: "Inactive in Zoho" }, { ...vendorA, name: "Fictional Pending", booksMappingRequired: true }]), page: pageNumber, perPage: 25, hasMore: pageNumber === 1 } });
+  });
+  await page.route("**/api/vendors/resolve", route => { resolutions++; return route.fulfill({ status: 409, json: { error: "No selection was authorized." } }); });
+  await openForm(page, companyA); await supplierInput(page).fill("Fictional");
+  await page.getByRole("button", { name: "Load more vendors", exact: true }).click();
+  await expect(page.getByRole("option", { name: /^Fictional Alpha Supplier/ })).toHaveCount(1);
+  const inactive = page.getByRole("option", { name: /^Fictional Archived/ });
+  await expect(inactive).toHaveAttribute("aria-disabled", "true"); await expect(inactive).toContainText("Inactive in Zoho");
+  await inactive.dispatchEvent("click"); expect(resolutions).toBe(0);
+  await page.getByRole("option", { name: /^Fictional Pending/ }).click();
+  await expect(supplierInput(page)).toHaveValue("Fictional Pending");
+  await expect(page.getByText("Local supplier selected. Save a draft; a verified Books mapping is required before sync.", { exact: true })).toBeVisible();
+  expect(requests).toContain(2); expect(resolutions).toBe(0);
+});
+
+test("rejects a next page from another destination without replacing current suggestions", async ({ page }) => {
+  await page.route("**/api/vendors/search?*", route => {
+    const pageNumber = Number(new URL(route.request().url()).searchParams.get("page") ?? 1);
+    return route.fulfill({ json: { ...envelope(pageNumber === 1 ? companyA : companyB, pageNumber === 1 ? [remoteA] : [remoteB]), page: pageNumber, perPage: 25, hasMore: pageNumber === 1 } });
+  });
+  await openForm(page, companyA); await supplierInput(page).fill("Fictional");
+  await page.getByRole("button", { name: "Load more vendors", exact: true }).click();
+  await expect(page.getByText("The next vendor page did not match this search. Retry loading vendors.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("option", { name: /^Fictional Alpha Supplier/ })).toBeVisible();
+  await expect(page.getByRole("option", { name: /^Fictional Beta Supplier/ })).toHaveCount(0);
 });
 
 test("HTTP 200 provider warning offers retry and shows no-match only after a clean empty result", async ({ page }) => {

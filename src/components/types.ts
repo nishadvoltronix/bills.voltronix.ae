@@ -42,6 +42,8 @@ export type Vendor = {
 export type VendorSuggestion = Omit<Vendor, "id"> & {
   id: string | null;
   booksMappingRequired?: boolean;
+  selectable?: boolean;
+  unavailableReason?: string;
   externalVendorId?: string;
   organizationId?: string;
   dataCenter?: string;
@@ -50,15 +52,21 @@ export type VendorSuggestion = Omit<Vendor, "id"> & {
 export type VendorSearchResult = {
   companyId: string;
   organizationId: string | null;
+  dataCenter?: string | null;
+  environment?: "production" | "sandbox" | null;
   vendors: VendorSuggestion[];
-  selectedVendor: Vendor | null;
+  selectedVendor: (Vendor & { booksMappingRequired?: boolean }) | null;
   warning: string | null;
   hasMore: boolean;
+  page?: number;
+  perPage?: 25;
 };
 export type VendorDirectoryEntry = Omit<Vendor, "id"> & {
   id: string | null;
   externalVendorId?: string;
   status: "active" | "inactive" | "local";
+  source?: "books" | "local";
+  booksMappingRequired?: boolean;
   organizationId?: string;
   dataCenter?: string;
   environment?: "production" | "sandbox";

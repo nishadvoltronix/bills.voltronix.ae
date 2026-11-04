@@ -8,6 +8,7 @@ import { db } from "@/lib/db";
 import { HttpError } from "@/lib/http";
 import { canViewBooksHistory } from "@/lib/permissions";
 import { crmJobSourceScope } from "@/lib/services/crm-job-access";
+import { assertBooksOwnerScopeCurrent, ownedBooksBillIds } from "./bill-ownership";
 
 const externalId = z.string().regex(/^\d{1,30}$/);
 const sourceSchema = z.object({
@@ -203,6 +204,8 @@ export async function loadBooksProjectHistory(actor: Actor, requestedCompanyId?:
   const context = await readContext(actor, requestedCompanyId);
   const result: BooksProjectHistory = { relations: [], warnings: [] };
   if (!canViewBooksHistory(actor) || !context.companyIds.length) return result;
+  const ownedIds = await ownedBooksBillIds(actor, requestedCompanyId);
+  if (ownedIds?.length === 0) return result;
   const now = new Date();
   const cached = await db.booksProjectAssociation.findMany({ where: { companyId: { in: context.companyIds } },
     orderBy: [{ companyId: "asc" }, { id: "asc" }] });
@@ -258,6 +261,7 @@ export async function loadBooksProjectHistory(actor: Actor, requestedCompanyId?:
         ON lineSource.projectId = a.booksProjectId
       WHERE a.id IN (${Prisma.join(ids)}) AND a.status = 'VERIFIED' AND a.validUntil > ${now}
         AND b.isStale = false AND b.sourceDetail IS NOT NULL AND b.detailImportRunId = b.lastImportRunId
+        ${ownedIds === null ? Prisma.empty : Prisma.sql`AND b.id IN (${Prisma.join(ownedIds)})`}
         AND JSON_TYPE(JSON_EXTRACT(b.sourceDetail, CONCAT('$.line_items[', lineSource.lineOrdinal - 1, '].project_id'))) = 'STRING'
       ORDER BY b.id, a.id`);
     for (const bill of bills) {
@@ -283,6 +287,7 @@ export async function loadBooksProjectHistory(actor: Actor, requestedCompanyId?:
   }
   if (canonicalJson(context) !== canonicalJson(await readContext(actor, requestedCompanyId)))
     throw new HttpError(403, "Source or company access changed. Reload the page.");
+  await assertBooksOwnerScopeCurrent(actor, ownedIds, requestedCompanyId);
   result.warnings = [...new Set(result.warnings)];
   return result;
 }

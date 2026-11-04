@@ -109,7 +109,7 @@ beforeAll(async () => {
     const vendor = await createVendor(administrator, { companyId: company.id, name: `Fictional HTTP supplier ${tag} ${index}`, currency: "AED" });
     const contract = `${912345 - index * 100000}.67`, amount = `${17 + index * 6}.00`;
     const job = await createJob(administrator, { companyId: company.id, jobNumber: `ROLE-${tag}-${index}`, name: "Fictional role work", customer: "Fictional role customer", contractValue: contract, currency: "AED" });
-    const bill = await createBill(administrator, { companyId: company.id, vendorId: vendor.id, jobId: job.id,
+    const bill = await createBill(index < 2 ? accountant : administrator, { companyId: company.id, vendorId: vendor.id, jobId: job.id,
       invoiceNumber: `ROLE-${tag}-${index}`, invoiceDate: "2026-11-02", category: "OTHER", currency: "AED",
       discount: "0", vatRate: "0", lines: [{ description: "Fictional role fixture", quantity: "1", unitPrice: amount }] });
     const document = await attachDocument(administrator, bill.id, new File([`%PDF-1.7\nFictional Accounts HTTP ${tag} ${index}\n%%EOF`], "fictional-role.pdf", { type: "application/pdf" }));

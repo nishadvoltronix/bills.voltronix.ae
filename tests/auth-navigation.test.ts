@@ -59,6 +59,12 @@ describe("post-login navigation", () => {
     }
   });
 
+  it.each(["ACCOUNTS", "DATA_ENTRY", "MANAGEMENT"])("never sends %s to Admin user management", role => {
+    expect(canAccessRolePath(role, "/account/users")).toBe(false);
+    expect(safeReturnPath("/account/users", role)).toBeNull();
+    expect(canAccessRolePath("ADMIN", "/account/users")).toBe(true);
+  });
+
   it.each([
     "https://attacker.invalid/",
     "//attacker.invalid/",

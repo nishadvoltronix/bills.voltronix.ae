@@ -11,6 +11,7 @@ import { IntegrationError } from "@/lib/integrations/config";
 import { assertBooksImportContext as importContext, assertBooksBillReader as assertReader } from "@/lib/services/books-import-access";
 import { describeBooksAttachments } from "@/lib/services/books-attachments";
 import { loadBooksEntryAuthors } from "@/lib/services/financial-ledger";
+import { assertBooksOwnerScopeCurrent, booksBillOwnerScope } from "./bill-ownership";
 
 const externalId = z.string().regex(/^\d{1,30}$/);
 const text = (limit: number) => z.string().max(limit);
@@ -228,21 +229,23 @@ export async function listBooksBills(actor: Actor, payload: unknown = {}) {
   await assertReader(actor);
   const input = listSchema.parse(payload);
   const scope = await companyFilter(actor, input.companyId);
-  const where: Prisma.BooksBillWhereInput = { ...scope, ...(input.status ? { status: input.status } : {}),
+  const ownedScope = await booksBillOwnerScope(actor, input.companyId);
+  const where: Prisma.BooksBillWhereInput = { ...scope, ...ownedScope, ...(input.status ? { status: input.status } : {}),
     ...(input.currencyCode ? { currencyCode: input.currencyCode } : {}), ...(input.q ? { OR: [
       { billNumber: { contains: input.q } }, { vendorName: { contains: input.q } }, { externalBillId: { contains: input.q } },
     ] } : {}) };
   const [bills, total, runs, statuses, currencies] = await Promise.all([
     db.booksBill.findMany({ where, orderBy: [{ billDate: "desc" }, { id: "desc" }], skip: (input.page - 1) * input.pageSize, take: input.pageSize }),
-    db.booksBill.count({ where }), db.booksImportRun.findMany({ where: scope, orderBy: { startedAt: "desc" }, take: 20 }),
-    db.booksBill.findMany({ where: scope, distinct: ["status"], select: { status: true }, orderBy: { status: "asc" } }),
-    db.booksBill.findMany({ where: scope, distinct: ["currencyCode"], select: { currencyCode: true }, orderBy: { currencyCode: "asc" } }),
+    db.booksBill.count({ where }), actor.role === "ADMIN" ? db.booksImportRun.findMany({ where: scope, orderBy: { startedAt: "desc" }, take: 20 }) : [],
+    db.booksBill.findMany({ where: { ...scope, ...ownedScope }, distinct: ["status"], select: { status: true }, orderBy: { status: "asc" } }),
+    db.booksBill.findMany({ where: { ...scope, ...ownedScope }, distinct: ["currencyCode"], select: { currencyCode: true }, orderBy: { currencyCode: "asc" } }),
   ]);
   // Membership revocation during a long query must not release the captured rows.
   const authors = await loadBooksEntryAuthors(actor, bills);
   await assertReader(actor);
   const currentScope = await companyFilter(actor, input.companyId);
   if (JSON.stringify(currentScope) !== JSON.stringify(scope)) throw new HttpError(403, "Company access changed. Reload the page.");
+  await assertBooksOwnerScopeCurrent(actor, ownedScope.id?.in ?? null, input.companyId);
   return { bills: bills.map((bill) => ({ ...serializeBill(bill), ...(actor.role === "ADMIN" ? { enteredBy: authors.get(bill.id) ?? null } : {}) })), total, page: input.page, pageSize: input.pageSize, runs: runs.map(serializeRun),
     filters: { statuses: statuses.map((row) => row.status), currencies: currencies.map((row) => row.currencyCode) } };
 }
@@ -264,7 +267,8 @@ function displayMoney(value: Prisma.JsonValue | undefined): string | null {
 export async function getBooksBill(actor: Actor, id: string) {
   await assertReader(actor);
   const scope = await companyFilter(actor);
-  const bill = await db.booksBill.findFirst({ where: { id, ...scope }, include: { attachments: true } });
+  const ownedScope = await booksBillOwnerScope(actor);
+  const bill = await db.booksBill.findFirst({ where: { AND: [scope, ownedScope, { id }] }, include: { attachments: true } });
   if (!bill) throw new HttpError(404, "Books bill not found.");
   const full = hasCurrentDetail(bill) ? record(bill.sourceDetail ?? undefined) : {};
   const summary = record(bill.sourceSummary);
@@ -272,6 +276,7 @@ export async function getBooksBill(actor: Actor, id: string) {
   const authors = await loadBooksEntryAuthors(actor, [bill]);
   await assertReader(actor);
   await requireCompanyAccess(actor, bill.companyId);
+  await assertBooksOwnerScopeCurrent(actor, ownedScope.id?.in ?? null);
   return { ...serializeBill(bill), sourceModifiedAt: bill.sourceModifiedAt,
     ...(actor.role === "ADMIN" ? { enteredBy: authors.get(bill.id) ?? null } : {}),
     referenceNumber: stringField(full.reference_number) ?? stringField(summary.reference_number),

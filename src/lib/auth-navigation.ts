@@ -10,6 +10,7 @@ export function roleHomePath(role: string): string {
 /** Page navigation policy only; services must independently authorize their data. */
 export function canAccessRolePath(role: string, path: string): boolean {
   if (!path || path.length > 512 || !appPagePath.test(path)) return false;
+  if (/^\/account\/users(?:\/|$)/.test(path)) return role === "ADMIN";
   if (role !== "ACCOUNTS") return true;
   return /^\/(?:account|vendors)\/?$/.test(path) ||
     /^\/bills(?:\/(?:books(?:\/[A-Za-z0-9_-]+)?|[A-Za-z0-9_-]+(?:\/(?:edit|payment))?))?\/?$/.test(path) ||

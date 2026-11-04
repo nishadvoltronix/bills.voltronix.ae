@@ -1,5 +1,5 @@
 import "server-only";
-import { Prisma } from "@prisma/client";
+import { Prisma, type Vendor } from "@prisma/client";
 import Decimal from "decimal.js";
 import type { Actor } from "@/lib/auth";
 import { db } from "@/lib/db";
@@ -12,6 +12,7 @@ import { isRecognizedBillStatus, summarizeJob } from "@/lib/finance";
 import { HttpError } from "@/lib/http";
 import {
   billScope,
+  canViewBill,
   canManageJobs,
   canManageVendors,
   canViewAuditLog,
@@ -23,6 +24,7 @@ import { billInclude, serializeBill } from "@/lib/services/bills";
 import { describeBooksAttachments } from "@/lib/services/books-attachments";
 import { loadBooksProjectHistory } from "./books-project-history";
 import { presentProjectHistory } from "./books-project-history-presentation";
+import { assertBooksOwnerScopeCurrent } from "./bill-ownership";
 import {
   aggregateAmounts,
   booksFinancialAmounts,
@@ -44,7 +46,7 @@ const Exact = Decimal.clone({ precision: 120 });
 
 export function serializeJob(actor: Actor, job: JobWithBills) {
   const visibleBills = job.bills.filter(
-    (bill) => actor.role !== "DATA_ENTRY" || bill.createdById === actor.id,
+    (bill) => canViewBill(actor, bill),
   );
   const summary = summarizeJob(
     {
@@ -80,7 +82,7 @@ export function serializeJob(actor: Actor, job: JobWithBills) {
     ...summary,
     ...(actor.role === "ACCOUNTS" ? { recognizedExpenses: null, paidExpenses: null, outstanding: null } : {}),
     billCount: visibleBills.length,
-    financialScope: actor.role === "DATA_ENTRY" ? "YOUR_BILLS" : "ORGANIZATION",
+    financialScope: actor.role === "ADMIN" ? "ORGANIZATION" : "YOUR_BILLS",
   };
 }
 
@@ -95,12 +97,14 @@ export async function listVendors(actor: Actor, q = "", companyId?: string) {
   });
 }
 
-export async function createVendor(actor: Actor, payload: unknown) {
+export async function createVendor(actor: Actor, payload: unknown, afterCreate?: (tx: Prisma.TransactionClient, vendor: Vendor) => Promise<void>) {
   if (!canManageVendors(actor))
     throw new HttpError(403, "Only Admin and Accounts may manage vendors.");
   const input = vendorSchema.parse(payload);
   return db.$transaction(
     async (tx) => {
+      if (!await tx.user.findFirst({ where: { id: actor.id, active: true, role: { in: ["ADMIN", "ACCOUNTS"] } }, select: { id: true } }))
+        throw new HttpError(403, "Current supplier-management access is required.");
       const companyId = await resolveCompanyForCreate(
         actor,
         input.companyId,
@@ -138,6 +142,7 @@ export async function createVendor(actor: Actor, payload: unknown) {
           details: { name: vendor.name, currency: vendor.currency },
         },
       });
+      await afterCreate?.(tx, vendor);
       return vendor;
     },
     { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
@@ -303,6 +308,7 @@ async function getJobSnapshot(actor: Actor, id: string, retry: boolean) {
   };
   await freshFinancialActor(actor);
   await requireCompanyAccess(actor, job.companyId);
+  if (actor.role !== "DATA_ENTRY") await assertBooksOwnerScopeCurrent(actor, ledger.ownedBooksIds, job.companyId);
   return {
     job: ledgerJobDto(ledger, current),
     bills: job.bills.map(serializeBill),
@@ -512,7 +518,7 @@ export async function dashboard(actor: Actor, params: URLSearchParams) {
     );
   return {
     currency,
-    scope: actor.role === "DATA_ENTRY" ? "YOUR_BILLS" : "ORGANIZATION",
+    scope: actor.role === "ADMIN" ? "ORGANIZATION" : "YOUR_BILLS",
     period: "LIFETIME",
     accountingBasis: "VAT_EXCLUSIVE",
     metrics: {

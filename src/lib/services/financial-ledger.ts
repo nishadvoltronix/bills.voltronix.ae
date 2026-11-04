@@ -15,6 +15,8 @@ import {
   type FinancialAmounts,
 } from "@/lib/books-financials";
 import { billInclude } from "./bills";
+import { nativeMirrorLinks, type MirrorIdentity } from "./bill-mirror-identity";
+import { assertBooksOwnerScopeCurrent, ownedBooksBillIds } from "./bill-ownership";
 
 const limit = 50_000;
 const mirrorFields = [
@@ -55,8 +57,9 @@ type LedgerMirror = Pick<BooksBill, (typeof mirrorFields)[number]> & {
 async function readMirrorProjection(
   tx: Prisma.TransactionClient,
   companyIds: string[],
+  ownedIds: string[] | null = null,
 ): Promise<LedgerMirror[]> {
-  if (!companyIds.length) return [];
+  if (!companyIds.length || ownedIds?.length === 0) return [];
   const values = Prisma.join(
     taxGuardKeys.flatMap((key) => [
       Prisma.sql`${key}`,
@@ -81,6 +84,7 @@ async function readMirrorProjection(
       CASE WHEN JSON_TYPE(b.sourceDetail) = 'OBJECT' THEN JSON_OBJECT('values', JSON_OBJECT(${values}), 'present', JSON_OBJECT(${present})) ELSE NULL END AS taxDetails
     FROM BooksBill b JOIN Company c ON c.id = b.companyId
     WHERE b.companyId IN (${Prisma.join(companyIds)})
+      ${ownedIds === null ? Prisma.empty : Prisma.sql`AND b.id IN (${Prisma.join(ownedIds)})`}
     ORDER BY b.billDate DESC, b.id ASC LIMIT ${limit + 1}`);
   return rows.map(({ companyName, taxDetails, ...row }) => {
     const packed =
@@ -127,116 +131,7 @@ export function nativeFinancialAmounts(bill: Native): FinancialAmounts {
     creditsApplied: "0.00",
   };
 }
-export type MirrorIdentity = {
-  id: string;
-  companyId: string;
-  organizationId: string;
-  externalBillId: string;
-  dataCenter: string;
-  environment: string;
-};
-type NativeIdentity = {
-  id: string;
-  companyId: string;
-  jobId: string;
-  syncRecords: {
-    target: string;
-    externalId: string | null;
-    organizationId: string | null;
-  }[];
-};
-type Destination = {
-  companyId: string;
-  organizationId: string;
-  dataCenter: string;
-  environment: string;
-};
-type History = {
-  billId: string;
-  organizationId: string | null;
-  snapshot: unknown;
-};
-/** Only confirmed provider identifiers can relate an imported bill to a job.
- * Project names, PO strings and free text are deliberately not matching keys. */
-export function nativeMirrorLinks(
-  natives: NativeIdentity[],
-  mirrors: MirrorIdentity[],
-  destinations: Destination[],
-  history: History[],
-) {
-  const duplicates = new Set<string>();
-  const linkedJobs = new Map<string, string>();
-  const nativeCandidates = new Map<string, Set<string>>();
-  const uncertainBills = new Set<string>();
-  const conflictingMirrors = new Set<string>();
-  let ambiguousCount = 0;
-  for (const native of natives) {
-    for (const sync of native.syncRecords.filter(
-      (record) =>
-        record.target === "ZOHO" && record.externalId && record.organizationId,
-    )) {
-      const candidates = mirrors.filter(
-        (mirror) =>
-          mirror.companyId === native.companyId &&
-          mirror.organizationId === sync.organizationId &&
-          mirror.externalBillId === sync.externalId,
-      );
-      if (!candidates.length) continue;
-      // A mirrored provider identity must not be counted a second time locally.
-      duplicates.add(native.id);
-      const recorded = history
-        .filter(
-          (item) =>
-            item.billId === native.id &&
-            item.organizationId === sync.organizationId,
-        )
-        .map((item) => jsonRecord(jsonRecord(item.snapshot).destination));
-      const contexts = recorded.length
-        ? recorded
-        : destinations.filter(
-            (item) =>
-              item.companyId === native.companyId &&
-              item.organizationId === sync.organizationId,
-          );
-      // Context ambiguity must not depend on which page of mirrors was loaded.
-      // SyncRecord alone does not record a data center or environment.
-      const authorContexts = new Set(contexts.map((context) =>
-        JSON.stringify([context.dataCenter, context.environment])));
-      const verified = candidates.filter((mirror) =>
-        contexts.some(
-          (context) =>
-            context.dataCenter === mirror.dataCenter &&
-            context.environment === mirror.environment,
-        ),
-      );
-      for (const mirror of verified) {
-        const ids = nativeCandidates.get(mirror.id) ?? new Set<string>();
-        ids.add(native.id);
-        nativeCandidates.set(mirror.id, ids);
-        if (authorContexts.size !== 1) uncertainBills.add(mirror.id);
-      }
-      if (
-        verified.length === 1 &&
-        !conflictingMirrors.has(verified[0].id) &&
-        (!linkedJobs.has(verified[0].id) ||
-          linkedJobs.get(verified[0].id) === native.jobId)
-      )
-        linkedJobs.set(verified[0].id, native.jobId);
-      else {
-        ambiguousCount++;
-        for (const mirror of verified) {
-          conflictingMirrors.add(mirror.id);
-          linkedJobs.delete(mirror.id);
-        }
-      }
-    }
-  }
-  // A shared job is not proof of who entered a particular bill. Authorship
-  // requires exactly one native bill, even when competing bills share a job.
-  const linkedBills = new Map([...nativeCandidates].flatMap(([id, natives]) =>
-    natives.size === 1 && !uncertainBills.has(id) ? [[id, [...natives][0]] as const] : []));
-  return { duplicates, linkedJobs, linkedBills, ambiguousCount };
-}
+export { nativeMirrorLinks, type MirrorIdentity } from "./bill-mirror-identity";
 
 export type BillEntryAuthor = { id: string; name: string };
 
@@ -282,6 +177,7 @@ export async function loadFinancialLedger(
   actor = await freshFinancialActor(actor);
   const scope = await companyFilter(actor, requestedCompanyId);
   const importedAllowed = actor.role !== "DATA_ENTRY";
+  const ownedIds = importedAllowed ? await ownedBooksBillIds(actor, requestedCompanyId) : [];
   const companyIds =
     typeof scope.companyId === "string"
       ? [scope.companyId]
@@ -330,7 +226,7 @@ export async function loadFinancialLedger(
           orderBy: { createdAt: "desc" },
           take: limit + 1,
         }),
-        importedAllowed ? readMirrorProjection(tx, companyIds) : [],
+        importedAllowed ? readMirrorProjection(tx, companyIds, ownedIds) : [],
         importedAllowed
           ? tx.companyIntegrationDestination.findMany({
               where: { ...scope, target: "ZOHO" },
@@ -345,7 +241,7 @@ export async function loadFinancialLedger(
         importedAllowed
           ? tx.integrationJob.findMany({
               where: {
-                bill: { ...scope, currency },
+                bill: { ...scope, ...billScope(actor), currency },
                 target: "ZOHO",
                 operation: "CREATE_BILL",
               },
@@ -371,7 +267,7 @@ export async function loadFinancialLedger(
           : [],
         importedAllowed
           ? tx.booksBill.findMany({
-              where: { ...scope, isStale: false },
+              where: { ...scope, ...(ownedIds === null ? {} : { id: { in: ownedIds } }), isStale: false },
               distinct: ["currencyCode"],
               select: { currencyCode: true },
             })
@@ -423,6 +319,7 @@ export async function loadFinancialLedger(
   const after = await companyFilter(actor, requestedCompanyId);
   if (JSON.stringify(scope) !== JSON.stringify(after))
     throw new HttpError(403, "Your company access changed. Reload this page.");
+  if (importedAllowed) await assertBooksOwnerScopeCurrent(actor, ownedIds, requestedCompanyId);
   const truncated = [data.jobs, data.nativeBills, data.mirrors].some(
     (rows) => rows.length > limit,
   );
@@ -481,6 +378,7 @@ export async function loadFinancialLedger(
     nativeBills,
     mirrors,
     links,
+    ownedBooksIds: ownedIds,
     truncated,
     booksListingComplete,
     staleBooksBillCount: data.mirrors.filter((bill) => bill.isStale).length,

@@ -19,7 +19,7 @@ import {
   templateMappingsSchema,
   type OcrEvidence,
 } from "@/lib/ocr-extraction";
-import { canCreateBill, canManageVendors } from "@/lib/permissions";
+import { billScope, canCreateBill, canManageVendors } from "@/lib/permissions";
 import {
   actOnBill,
   createBillInTransaction,
@@ -43,6 +43,7 @@ import {
   type DurableOcrProvider,
 } from "@/lib/services/ocr-provider";
 import { billInputSchema } from "@/lib/validation";
+import { assertCurrentBillReader } from "@/lib/services/bill-ownership";
 
 export const MAX_OCR_FILES = 10;
 const MAX_BATCH_BYTES = 40 * 1024 * 1024;
@@ -54,9 +55,10 @@ function assertAutomationAccess(actor: Actor) {
 }
 const scope = async (actor: Actor) => {
   assertAutomationAccess(actor);
+  await assertCurrentBillReader(actor);
   return {
     ...(await companyFilter(actor)),
-    ...(actor.role === "DATA_ENTRY" ? { createdById: actor.id } : {}),
+    ...billScope(actor),
   };
 };
 const writer = (actor: Actor) => {
@@ -69,7 +71,7 @@ const jsonValue = (value: unknown) =>
 
 async function accessibleDocument(actor: Actor, id: string) {
   const document = await db.ocrDocument.findFirst({
-    where: { id, batch: await scope(actor) },
+    where: { id, batch: await scope(actor), ...(actor.role === "ADMIN" ? {} : { OR: [{ billId: null }, { bill: billScope(actor) }] }) },
     include: { batch: true, scannerImports: scannerLabelInclude },
   });
   if (!document) throw new HttpError(404, "OCR document not found.");
@@ -168,6 +170,7 @@ export async function listOcrBatches(actor: Actor, cursor?: string) {
     ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
     include: {
       documents: {
+        where: actor.role === "ADMIN" ? {} : { OR: [{ billId: null }, { bill: billScope(actor) }] },
         orderBy: { createdAt: "asc" },
         include: {
           bill: { select: ocrBillSelect },
@@ -188,6 +191,7 @@ export async function getOcrBatch(actor: Actor, id: string) {
     where: { id, ...(await scope(actor)) },
     include: {
       documents: {
+        where: actor.role === "ADMIN" ? {} : { OR: [{ billId: null }, { bill: billScope(actor) }] },
         orderBy: { createdAt: "asc" },
         include: {
           bill: { select: ocrBillSelect },
@@ -396,7 +400,7 @@ export async function createOcrBatch(
   }
 }
 
-async function suggest(evidence: OcrEvidence, companyId: string) {
+async function suggest(evidence: OcrEvidence, companyId: string, actor: Pick<Actor, "id" | "role">) {
   const suggestedInput = { ...evidence.fields };
   const warnings = [...evidence.warnings];
   const vendors = await db.vendor.findMany({
@@ -425,14 +429,12 @@ async function suggest(evidence: OcrEvidence, companyId: string) {
       );
   }
   if (suggestedInput.vendorId && suggestedInput.invoiceNumber) {
-    const duplicate = await db.bill.findUnique({
+    const duplicate = await db.bill.findFirst({
       where: {
-        vendorId_normalizedInvoiceNumber: {
-          vendorId: suggestedInput.vendorId,
-          normalizedInvoiceNumber: normalizeInvoiceNumber(
-            suggestedInput.invoiceNumber,
-          ),
-        },
+        companyId,
+        ...billScope(actor),
+        vendorId: suggestedInput.vendorId,
+        normalizedInvoiceNumber: normalizeInvoiceNumber(suggestedInput.invoiceNumber),
       },
       select: { id: true },
     });
@@ -447,7 +449,7 @@ export async function getOcrDocument(actor: Actor, id: string) {
   const document = await accessibleDocument(actor, id);
   const evidence = document.extraction as unknown as OcrEvidence | null;
   const suggestions = evidence
-    ? await suggest(evidence, document.batch.companyId)
+    ? await suggest(evidence, document.batch.companyId, actor)
     : { suggestedInput: {}, warnings: [] };
   if (evidence) {
     const peers = await db.ocrDocument.findMany({
@@ -471,6 +473,7 @@ export async function getOcrDocument(actor: Actor, id: string) {
     suggestions.warnings = [...new Set(suggestions.warnings)];
   }
   // Batch owner is kept private; authorization already used it above.
+  await accessibleDocument(actor, id);
   return {
     ...publicDocument(document),
     ...suggestions,
@@ -480,10 +483,15 @@ export async function getOcrDocument(actor: Actor, id: string) {
 }
 export async function downloadOcrDocument(actor: Actor, id: string) {
   const document = await accessibleDocument(actor, id);
+  const bytes = await readPrivateDocument(document);
+  const latest = await accessibleDocument(actor, id);
+  const immutableFields = ["batchId", "billId", "storageKey", "sha256", "byteSize", "mimeType", "fileName"] as const;
+  if (immutableFields.some(field => latest[field] !== document[field]))
+    throw new HttpError(409, "The document changed during download. Reload the page.");
   return {
-    bytes: await readPrivateDocument(document),
-    fileName: document.fileName,
-    mimeType: document.mimeType,
+    bytes,
+    fileName: latest.fileName,
+    mimeType: latest.mimeType,
   };
 }
 export async function reviewOcrDocument(
@@ -874,7 +882,7 @@ export async function processOcrQueue(
         } else {
           let extraction = result.extraction;
           let templateId: string | null = null;
-          const suggested = await suggest(extraction, owner.companyId);
+          const suggested = await suggest(extraction, owner.companyId, owner.createdBy);
           if (suggested.suggestedInput.vendorId) {
             const template = await db.ocrTemplate.findFirst({
               where: {
@@ -1089,7 +1097,7 @@ export async function countOcrDuplicateWarnings(actor: Actor) {
   });
   const existing = keys.length
     ? await db.bill.findMany({
-        where: { OR: keys },
+        where: { OR: keys, ...billScope(actor) },
         select: { vendorId: true, normalizedInvoiceNumber: true },
       })
     : [];

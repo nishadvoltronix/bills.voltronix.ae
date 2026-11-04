@@ -14,7 +14,7 @@ import { ZohoTransport } from "@/lib/integrations/transport";
 
 const id = z.string().trim().min(1).max(100);
 const externalId = z.string().regex(/^\d{1,30}$/);
-const searchInput = z.object({ companyId: id, q: z.string().trim().max(100).default(""), vendorId: id.optional() }).strict();
+const searchInput = z.object({ companyId: id, q: z.string().trim().max(100).default(""), vendorId: id.optional(), page: z.number().int().min(1).max(10_000).default(1) }).strict();
 const directoryInput = z.object({ companyId: id, q: z.string().trim().max(100).default(""), page: z.number().int().min(1).max(10_000).default(1) }).strict();
 const destinationInput = z.object({ organizationId: externalId,
   dataCenter: z.enum(Object.keys(centers) as [DataCenter, ...DataCenter[]]), environment: z.enum(["production", "sandbox"]),
@@ -27,6 +27,8 @@ type Destination = { organizationId: string; dataCenter: string; environment: st
 export type VendorSuggestion = Omit<LocalVendor, "id"> & {
   id: string | null;
   booksMappingRequired?: boolean;
+  selectable?: boolean;
+  unavailableReason?: string;
   externalVendorId?: string;
   organizationId?: string;
   dataCenter?: string;
@@ -119,14 +121,22 @@ function parseContact(raw: unknown) {
   const parsed = contactIdentity.safeParse(raw);
   return parsed.success ? contactMetadata(parsed.data) : null;
 }
+function visibleContact(raw: unknown) {
+  const parsed = contactIdentity.extend({ status: z.enum(["active", "inactive"]), currency_code: z.string().regex(/^[A-Z]{3}$/) }).safeParse(raw);
+  if (!parsed.success) return null;
+  const supported = currencySchema.safeParse(parsed.data.currency_code).success;
+  return { ...contactMetadata(parsed.data), selectable: parsed.data.status === "active" && supported,
+    ...(parsed.data.status === "inactive" ? { unavailableReason: "Inactive in Zoho" } : !supported ? { unavailableReason: "Currency unavailable for bill entry" } : {}) };
+}
 const contactPage = z.object({ code: z.literal(0), contacts: z.array(z.unknown()).max(200),
-  page_context: z.object({ page: z.literal(1).optional(), per_page: z.number().int().min(1).max(200).optional(), has_more_page: z.boolean() }).optional(),
+  page_context: z.object({ page: z.number().int().min(1).max(10_000).optional(), per_page: z.number().int().min(1).max(200).optional(), has_more_page: z.boolean() }).optional(),
 });
 
-async function savedSuggestions(value: Context, q: string) {
+async function savedSuggestions(value: Context, q: string, page: number) {
+  const skip = (page - 1) * 25;
   const vendorFilter = { companyId: value.company.id, ...(q ? { name: { contains: literalContains(q) } } : {}) };
   if (!value.destinations.length || value.localDemoFallback) {
-    const rows = await db.vendor.findMany({ where: vendorFilter, select: localFields, orderBy: { name: "asc" }, take: 26 });
+    const rows = await db.vendor.findMany({ where: vendorFilter, select: localFields, orderBy: [{ name: "asc" }, { id: "asc" }], skip, take: 26 });
     return { vendors: rows.filter(row => matchesName(row.name, q)).slice(0, 25) as VendorSuggestion[], hasMore: rows.length > 25 };
   }
   if (!value.destination) return { vendors: [] as VendorSuggestion[], hasMore: false };
@@ -135,25 +145,35 @@ async function savedSuggestions(value: Context, q: string) {
   const rows = await db.vendorBooksMapping.findMany({
     where: { ...value.destination, vendor: vendorFilter },
     select: { externalVendorId: true, vendor: { select: localFields } },
-    orderBy: { vendor: { name: "asc" } }, take: 26,
+    orderBy: [{ vendor: { name: "asc" } }, { vendorId: "asc" }], skip, take: 26,
   });
   const destination = parsedDestination.data;
   return { vendors: rows.filter(row => matchesName(row.vendor.name, q)).slice(0, 25).map(row => ({ ...row.vendor, ...destination, externalVendorId: row.externalVendorId })), hasMore: rows.length > 25 };
 }
 
-async function unavailableSuggestions(value: Context, q: string, saved: { vendors: VendorSuggestion[]; hasMore: boolean }) {
+async function pendingSuggestions(value: Context, q: string, page: number) {
   // A local draft may use an unmapped supplier. Never turn a supplier belonging to
   // another Books destination, or a legacy external ID, into an unmapped selection.
-  if (!value.destination || !destinationInput.safeParse(value.destination).success) return saved;
+  if (value.localDemoFallback || !value.destination || !destinationInput.safeParse(value.destination).success) return { vendors: [] as VendorSuggestion[], hasMore: false };
   const rows = await db.vendor.findMany({
     where: { companyId: value.company.id, externalZohoId: null, booksMappings: { none: {} },
       ...(q ? { name: { contains: literalContains(q) } } : {}) },
-    select: localFields, orderBy: { name: "asc" }, take: 26,
+    select: localFields, orderBy: [{ name: "asc" }, { id: "asc" }], skip: (page - 1) * 25, take: 26,
   });
-  const local: VendorSuggestion[] = rows.filter(row => matchesName(row.name, q))
+  const local: VendorSuggestion[] = rows.filter(row => matchesName(row.name, q)).slice(0, 25)
     .map(row => ({ ...row, booksMappingRequired: true }));
-  const vendors = [...saved.vendors, ...local].sort((left, right) => left.name.localeCompare(right.name));
-  return { vendors: vendors.slice(0, 25), hasMore: saved.hasMore || rows.length > 25 || vendors.length > 25 };
+  return { vendors: local, hasMore: rows.length > 25 };
+}
+function mergeSuggestions(rows: VendorSuggestion[], q: string) {
+  const result: VendorSuggestion[] = [];
+  for (let row of rows) {
+    if (!currencySchema.safeParse(row.currency).success) row = { ...row, selectable: false, unavailableReason: row.unavailableReason || "Currency unavailable for bill entry" };
+    const duplicate = result.findIndex(other => row.externalVendorId
+      ? other.externalVendorId === row.externalVendorId && other.organizationId === row.organizationId && other.dataCenter === row.dataCenter && other.environment === row.environment
+      : !!row.id && other.id === row.id && other.companyId === row.companyId);
+    if (duplicate < 0 && !result.some(other => row.id && other.id === row.id && other.companyId === row.companyId)) result.push(row);
+  }
+  return result.sort((left, right) => Number(fold(right.name) === fold(q)) - Number(fold(left.name) === fold(q)) || left.name.localeCompare(right.name));
 }
 
 /** Company-scoped suggestions only. Neither local vendors nor provider contacts are written. */
@@ -161,15 +181,19 @@ export async function searchBillVendors(actor: Actor, payload: unknown, provided
   const input = searchInput.parse(payload);
   const before = await context(db, actor, input.companyId);
   const organizationId = before.localDemoFallback ? null : before.destination?.organizationId ?? null;
+  const source = before.destination && !before.localDemoFallback ? destinationInput.safeParse(before.destination) : null;
+  const scope = { dataCenter: source?.success ? source.data.dataCenter : null, environment: source?.success ? source.data.environment : null };
   if (input.vendorId) {
     const selectedVendor = await db.vendor.findFirst({ where: { id: input.vendorId, companyId: input.companyId }, select: localFields });
     if (!selectedVendor) throw new HttpError(404, "Vendor not found in the selected company.");
     await recheck(db, actor, before);
-    return { companyId: input.companyId, organizationId, vendors: [] as VendorSuggestion[], selectedVendor, warning: null, hasMore: false };
+    const mapped = before.destination && !before.localDemoFallback ? await db.vendorBooksMapping.findUnique({ where: { vendorId_organizationId_dataCenter_environment: { vendorId: selectedVendor.id, ...before.destination } } }) : null;
+    return { companyId: input.companyId, organizationId, ...scope, vendors: [] as VendorSuggestion[], selectedVendor: { ...selectedVendor, ...(before.destination && !before.localDemoFallback && !mapped ? { booksMappingRequired: true } : {}) }, warning: null, hasMore: false, page: input.page, perPage: 25 as const };
   }
-  const saved = await savedSuggestions(before, input.q);
-  let vendors: VendorSuggestion[] = saved.vendors;
-  let hasMore = saved.hasMore;
+  const saved = await savedSuggestions(before, input.q, input.page);
+  const pending = await pendingSuggestions(before, input.q, input.page);
+  let vendors: VendorSuggestion[] = mergeSuggestions([...saved.vendors, ...pending.vendors], input.q);
+  let hasMore = saved.hasMore || pending.hasMore;
   let warning: string | null = null;
   if (before.localDemoFallback) {
     warning = "Books is not configured for this demo company. Saved local vendors for this company are shown.";
@@ -177,19 +201,18 @@ export async function searchBillVendors(actor: Actor, payload: unknown, provided
     warning = "This company has multiple Books destinations. Ask an administrator to confirm its vendor connection.";
   } else if (before.destination) {
     if (!before.config?.networkEnabled) {
-      ({ vendors, hasMore } = await unavailableSuggestions(before, input.q, saved));
       warning = "Books vendor search is unavailable. Saved suppliers for this company are shown. Local suppliers need a Books mapping before sync.";
     } else {
       try {
         const response = contactPage.safeParse(await transportFor(before, provided).request("/books/v3/contacts", {
-          method: "GET", query: { contact_type: "vendor", ...(input.q ? { contact_name_contains: input.q } : {}), per_page: "25", page: "1" },
+          method: "GET", query: { contact_type: "vendor", filter_by: "Status.All", ...(input.q ? { contact_name_contains: input.q } : {}), per_page: "25", page: String(input.page) },
         }));
-        if (!response.success) throw blocked("BOOKS_VENDOR_RESPONSE_INVALID", "Books returned an invalid vendor search response.");
+        if (!response.success || (response.data.page_context?.page !== undefined && response.data.page_context.page !== input.page) || (input.page > 1 && response.data.page_context?.page !== input.page)) throw blocked("BOOKS_VENDOR_RESPONSE_INVALID", "Books returned an invalid vendor search response.");
         const seen = new Set<string>();
         const excluded = new Set<string>();
-        const remote: NonNullable<ReturnType<typeof parseContact>>[] = [];
+        const remote: NonNullable<ReturnType<typeof visibleContact>>[] = [];
         for (const row of response.data.contacts) {
-          const parsed = parseContact(row);
+          const parsed = visibleContact(row);
           const rowId = z.object({ contact_id: externalId }).safeParse(row);
           if (rowId.success && seen.has(rowId.data.contact_id)) throw blocked("BOOKS_VENDOR_RESPONSE_INVALID", "Books repeated a vendor in its search response.");
           if (rowId.success) seen.add(rowId.data.contact_id);
@@ -198,6 +221,24 @@ export async function searchBillVendors(actor: Actor, payload: unknown, provided
             continue;
           }
           remote.push(parsed);
+        }
+        remote.splice(25);
+        // Promote an exact name that lies beyond the first contains-result page.
+        // Both documented filters remain GET-only; the browser can still load all pages.
+        if (input.page === 1 && input.q && response.data.page_context?.has_more_page && !remote.some(row => fold(row.name) === fold(input.q))) {
+          try {
+            const exact = contactPage.safeParse(await transportFor(before, provided).request("/books/v3/contacts", { method: "GET", query: { contact_type: "vendor", filter_by: "Status.All", contact_name: input.q, per_page: "25", page: "1" } }));
+            if (!exact.success || (exact.data.page_context?.page !== undefined && exact.data.page_context.page !== 1)) throw blocked("BOOKS_VENDOR_RESPONSE_INVALID", "Books returned an invalid exact-name response.");
+            const exactIds = new Set<string>();
+            const exactRows: typeof remote = [];
+            for (const raw of exact.data.contacts.slice(0, 25)) {
+              const row = visibleContact(raw); if (!row || fold(row.name) !== fold(input.q)) continue;
+              if (exactIds.has(row.externalVendorId)) throw blocked("BOOKS_VENDOR_RESPONSE_INVALID", "Books repeated an exact-name identity.");
+              exactIds.add(row.externalVendorId);
+              if (!remote.some(other => other.externalVendorId === row.externalVendorId)) exactRows.push(row);
+            }
+            remote.unshift(...exactRows);
+          } catch { warning = "Exact-name matching could not be completed. Load more vendors or retry the search."; }
         }
         const mapped = remote.length ? await db.vendorBooksMapping.findMany({
           where: { ...before.destination, externalVendorId: { in: remote.map(row => row.externalVendorId) }, vendor: { companyId: input.companyId } },
@@ -211,16 +252,15 @@ export async function searchBillVendors(actor: Actor, payload: unknown, provided
         for (const row of saved.vendors) {
           if (!excluded.has(row.externalVendorId!) && !suggestions.some(item => item.externalVendorId === row.externalVendorId)) suggestions.push(row);
         }
-        hasMore = Boolean(response.data.page_context?.has_more_page ?? response.data.contacts.length >= 25) || suggestions.length > 25 || saved.hasMore;
-        vendors = suggestions.slice(0, 25);
+        hasMore = Boolean(response.data.page_context?.has_more_page ?? response.data.contacts.length >= 25) || response.data.contacts.length > 25 || saved.hasMore || pending.hasMore;
+        vendors = mergeSuggestions([...suggestions, ...pending.vendors], input.q);
       } catch {
-        ({ vendors, hasMore } = await unavailableSuggestions(before, input.q, saved));
         warning = "Books vendors could not be loaded. Saved suppliers for this company are shown. Local suppliers need a Books mapping before sync.";
       }
     }
   }
   await recheck(db, actor, before);
-  return { companyId: input.companyId, organizationId, vendors, selectedVendor: null, warning, hasMore };
+  return { companyId: input.companyId, organizationId, ...scope, vendors, selectedVendor: null, warning, hasMore, page: input.page, perPage: 25 as const };
 }
 
 /** Resolves a verified provider selection into the existing local vendor identity model. */
@@ -271,7 +311,7 @@ export async function resolveBillVendor(actor: Actor, payload: unknown, provided
   }
 }
 
-export type DirectoryVendor = VendorSuggestion & { status: "active" | "inactive" | "local" };
+export type DirectoryVendor = VendorSuggestion & { status: "active" | "inactive" | "local"; source: "books" | "local" };
 export type CompanyVendorDirectory = {
   companyId: string;
   organizationId: string | null;
@@ -319,19 +359,31 @@ export async function listCompanyVendorDirectory(actor: Actor, payload: unknown,
       where: { companyId: input.companyId, ...(input.q ? { name: { contains: literalContains(input.q) } } : {}) },
       select: localFields, orderBy: [{ name: "asc" }, { id: "asc" }], skip: (input.page - 1) * 100, take: 101,
     });
-    result.vendors = rows.slice(0, 100).filter(row => matchesName(row.name, input.q)).map(row => ({ ...row, status: "local" }));
+    result.vendors = rows.slice(0, 100).filter(row => matchesName(row.name, input.q)).map(row => ({ ...row, status: "local", source: "local" }));
     result.hasMore = rows.length > 100;
     if (before.localDemoFallback) result.warning = "Books is not configured for this demo company. Saved local suppliers for this company are shown.";
     await recheck(db, actor, before);
     return result;
   }
+  // Provider pages cannot contain a local supplier before its Books link is confirmed.
+  const pendingLocal = before.destination ? await db.vendor.findMany({
+    where: { companyId: input.companyId, booksMappings: { none: { ...before.destination } },
+      ...(input.q ? { name: { contains: literalContains(input.q) } } : {}) },
+    select: localFields, orderBy: [{ name: "asc" }, { id: "asc" }], skip: (input.page - 1) * 100, take: 101,
+  }) : [];
+  const addPending = () => {
+    const mappedIds = new Set(result.vendors.flatMap(vendor => vendor.id ? [vendor.id] : []));
+    result.vendors.push(...pendingLocal.slice(0, 100).filter(vendor => !mappedIds.has(vendor.id))
+      .map(vendor => ({ ...vendor, status: "local" as const, source: "local" as const, booksMappingRequired: true })));
+    result.hasMore ||= pendingLocal.length > 100;
+  };
   if (!before.destination) result.warning = "This company has multiple Books destinations. Ask an administrator to confirm its supplier directory connection.";
   else if (!before.config?.networkEnabled) result.warning = "This company's Books supplier directory is unavailable. Check its connection and retry.";
   else if (!await directoryAuthorized(before.config)) result.warning = "This company's Books authorization is unavailable. Ask an administrator to check the connection and retry.";
   else {
     try {
       const response = directoryPage.safeParse(await transportFor(before, provided).request("/books/v3/contacts", {
-        method: "GET", query: { contact_type: "vendor", ...(input.q ? { contact_name_contains: input.q } : {}),
+        method: "GET", query: { contact_type: "vendor", filter_by: "Status.All", ...(input.q ? { contact_name_contains: input.q } : {}),
           page: String(input.page), per_page: "100", sort_column: "contact_name", sort_order: "A" },
       }));
       if (!response.success || response.data.page_context.page !== input.page ||
@@ -355,7 +407,7 @@ export async function listCompanyVendorDirectory(actor: Actor, payload: unknown,
         where: { ...before.destination, externalVendorId: { in: contacts.map(row => row.contact.externalVendorId) }, vendor: { companyId: input.companyId } },
         select: { externalVendorId: true, vendor: { select: { id: true } } },
       }) : [];
-      result.vendors = contacts.map(({ contact, status }) => ({ ...contact, status, companyId: input.companyId,
+      result.vendors = contacts.map(({ contact, status }) => ({ ...contact, status, source: "books", companyId: input.companyId,
         id: mapped.find(row => row.externalVendorId === contact.externalVendorId)?.vendor.id ?? null,
         organizationId: before.config!.organizationId, dataCenter: before.config!.dataCenter, environment: before.config!.environment }));
       result.hasMore = response.data.page_context.has_more_page;
@@ -364,11 +416,13 @@ export async function listCompanyVendorDirectory(actor: Actor, payload: unknown,
       result.hasMore = false;
       result.warning = "Books suppliers could not be loaded for this page. Retry the request or check this company's connection.";
     }
+    addPending();
     const current = await recheck(db, actor, before);
     if (!current.config || !await directoryAuthorized(current.config))
       throw new HttpError(409, "This company's Books authorization changed. Reload the supplier directory.");
     return result;
   }
+  addPending();
   await recheck(db, actor, before);
   return result;
 }

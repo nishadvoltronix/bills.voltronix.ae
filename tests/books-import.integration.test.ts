@@ -67,12 +67,14 @@ describe("read-only Books copies on disposable MySQL", () => {
       .rejects.toMatchObject({ code: "BOOKS_IMPORT_DUPLICATE_BILL" });
     await importBooksBillSummaryPage(actor, runId, { page: 2, response: page(["1002"], 2) });
     expect(await finishBooksBillImport(actor, runId)).toMatchObject({ listedCount: 2, detailCount: 0, status: "PARTIAL", listingComplete: true });
-    const listed = await listBooksBills(reader, { companyId, currencyCode: "KWD", q: "Fictional" });
+    const listed = await listBooksBills(actor, { companyId, currencyCode: "KWD", q: "Fictional" });
     expect(listed.total).toBe(2);
     expect(listed.filters).toEqual({ statuses: ["partially_paid"], currencies: ["KWD"] });
     expect(listed.bills[0]).toMatchObject({ detailAvailable: false, subtotal: null, paymentMade: null, vendorCreditsApplied: null });
     billId = listed.bills.find((bill) => bill.externalBillId === "1001")!.id;
-    expect(await getBooksBill(reader, billId)).toMatchObject({ lines: [], payments: [], credits: [], hasAttachment: true, attachmentsDownloaded: false });
+    expect(await getBooksBill(actor, billId)).toMatchObject({ lines: [], payments: [], credits: [], hasAttachment: true, attachmentsDownloaded: false });
+    await expect(getBooksBill(reader, billId)).rejects.toMatchObject({ status: 404 });
+    expect((await listBooksBills(reader, { companyId })).total).toBe(0);
     expect(JSON.stringify(listed)).not.toContain("sourceSummary");
     expect(await canonicalCounts()).toEqual(counts);
   });
@@ -86,7 +88,7 @@ describe("read-only Books copies on disposable MySQL", () => {
     expect((await db.booksImportRun.findUniqueOrThrow({ where: { id: runId } })).detailCount).toBe(1);
     await importBooksBillDetail(actor, runId, { response: detail("1002"), externalBillId: "1002" });
     expect(await finishBooksBillImport(actor, runId)).toMatchObject({ status: "COMPLETE", listedCount: 2, detailCount: 2 });
-    const result = await getBooksBill(reader, billId);
+    const result = await getBooksBill(actor, billId);
     expect(result).toMatchObject({ total: "9007199254740993.001", balance: "9007199254740990.001",
       paymentMade: "2.000", vendorCreditsApplied: "1.000", detailAvailable: true,
       payments: [{ amount: "2.000" }], credits: [{ amount: "1.000" }], documents: [{ id: "6001", name: "Fictional bill.pdf" }] });
@@ -106,7 +108,7 @@ describe("read-only Books copies on disposable MySQL", () => {
     expect(otherBill.id).not.toBe(billId);
     await expect(getBooksBill(reader, otherBill.id)).rejects.toMatchObject({ status: 404 });
     await expect(listBooksBills(reader, { companyId: otherCompanyId })).rejects.toMatchObject({ status: 404 });
-    expect((await listBooksBills(reader)).total).toBe(2);
+    expect((await listBooksBills(reader)).total).toBe(0);
     await expect(listBooksBills({ ...reader, role: "DATA_ENTRY" })).rejects.toMatchObject({ status: 403 });
     await expect(beginBooksBillImport(reader, { companyId, organizationId, organizationName: "Fictional Company" })).rejects.toMatchObject({ status: 403 });
     await db.userCompanyMembership.update({ where: { userId_companyId: { userId: reader.id, companyId } }, data: { active: false } });
@@ -117,7 +119,7 @@ describe("read-only Books copies on disposable MySQL", () => {
   it("does not present older detail as current, and marks absent rows stale only after a complete listing", async () => {
     const refresh = await beginBooksBillImport(actor, { companyId, organizationId, organizationName: "Fictional Company" });
     await importBooksBillSummaryPage(actor, refresh.id, { page: 1, response: page(["1001"], 1, true) });
-    expect(await getBooksBill(reader, billId)).toMatchObject({ detailAvailable: false, subtotal: null, lines: [], payments: [] });
+    expect(await getBooksBill(actor, billId)).toMatchObject({ detailAvailable: false, subtotal: null, lines: [], payments: [] });
     await finishBooksBillImport(actor, refresh.id);
     expect(await db.booksBill.count({ where: { companyId, isStale: true } })).toBe(0);
     await importBooksBillSummaryPage(actor, refresh.id, { page: 2, response: page([], 2) });

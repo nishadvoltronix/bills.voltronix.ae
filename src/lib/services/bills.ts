@@ -23,6 +23,7 @@ import {
   normalizeInvoiceNumber,
 } from "@/lib/finance";
 import { HttpError } from "@/lib/http";
+import { assertCurrentBillReader } from "./bill-ownership";
 import {
   assertBillCancellationSyncSafe,
   enqueueApprovedBillTx,
@@ -107,6 +108,7 @@ export async function assertBillAccess(
   bill: { createdById: string; companyId: string },
   tx?: Prisma.TransactionClient,
 ): Promise<void> {
+  await assertCurrentBillReader(actor, tx ?? db);
   await requireCompanyAccess(actor, bill.companyId, tx);
   if (!canViewBill(actor, bill)) throw new HttpError(404, "Bill not found.");
 }
@@ -493,6 +495,7 @@ export async function getBill(actor: Actor, id: string) {
       lastError: true,
     },
   });
+  await assertBillAccess(actor, bill);
   return { ...serializeBill(bill), auditLogs, integrationJobs };
 }
 
@@ -791,13 +794,15 @@ const listSchema = z.object({
 });
 
 export async function listBills(actor: Actor, params: URLSearchParams) {
+  await assertCurrentBillReader(actor);
   const input = listSchema.parse(
     Object.fromEntries([...params].filter(([, value]) => value !== "")),
   );
   if (input.dateFrom && input.dateTo && input.dateFrom > input.dateTo)
     throw new HttpError(422, "The start date must precede the end date.");
+  const scope = await companyFilter(actor, input.companyId);
   const where: Prisma.BillWhereInput = {
-    ...(await companyFilter(actor, input.companyId)),
+    ...scope,
     ...billScope(actor),
     status: input.status,
     jobId: input.jobId,
@@ -843,6 +848,9 @@ export async function listBills(actor: Actor, params: URLSearchParams) {
     },
     { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
   );
+  await assertCurrentBillReader(actor);
+  if (JSON.stringify(scope) !== JSON.stringify(await companyFilter(actor, input.companyId)))
+    throw new HttpError(403, "Your company access changed. Reload this page.");
   return {
     bills: bills.map(serializeBill),
     total,

@@ -694,6 +694,8 @@ describe("scanner intake on real MySQL with no live provider calls", () => {
     expect(
       (await downloadOcrDocument(ocrAdmin, document.id)).bytes.equals(bytes),
     ).toBe(true);
+    // OCR upload provenance does not grant access to a bill entered by another actor.
+    await expect(downloadOcrDocument(owner, document.id)).rejects.toMatchObject({ status: 404 });
     vi.stubEnv("OCR_PROVIDER", "disabled");
   });
 

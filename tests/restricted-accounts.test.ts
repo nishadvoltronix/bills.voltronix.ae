@@ -45,10 +45,11 @@ describe("restricted Accounts access contract", () => {
     expect(canCreateBill(accounts)).toBe(true);
     expect(canManageVendors(accounts)).toBe(true);
     expect(canViewBooksHistory(accounts)).toBe(true);
-    expect(canViewBill(accounts, { createdById: "fictional-another-user" })).toBe(true);
-    expect(canEditBill(accounts, { createdById: "fictional-another-user", status: "DRAFT" })).toBe(true);
-    expect(canApproveBill(accounts, { createdById: "fictional-another-user", status: "PENDING_APPROVAL" })).toBe(true);
-    expect(billScope(accounts)).toEqual({});
+    expect(canViewBill(accounts, { createdById: "fictional-another-user" })).toBe(false);
+    expect(canViewBill(accounts, { createdById: accounts.id })).toBe(true);
+    expect(canEditBill(accounts, { createdById: "fictional-another-user", status: "DRAFT" })).toBe(false);
+    expect(canApproveBill(accounts, { createdById: "fictional-another-user", status: "PENDING_APPROVAL" })).toBe(false);
+    expect(billScope(accounts)).toEqual({ createdById: accounts.id });
     expect(canManageJobs(accounts)).toBe(false);
   });
 
@@ -86,13 +87,15 @@ describe("restricted Accounts access contract", () => {
   it("redacts every job-level financial figure while retaining bill-history identity", () => {
     const result = serializeJob(accounts, job);
     for (const field of privateJobFigures) expect(result[field], field).toBeNull();
-    expect(result).toMatchObject({ id: job.id, companyId: job.companyId, jobNumber: job.jobNumber, name: job.name, customer: job.customer, currency: "AED", budgetStatus: "VALUE_UNAVAILABLE", billCount: 2 });
+    expect(result).toMatchObject({ id: job.id, companyId: job.companyId, jobNumber: job.jobNumber, name: job.name, customer: job.customer, currency: "AED", budgetStatus: "VALUE_UNAVAILABLE", billCount: 0 });
     expect(job.contractValue?.toFixed(2)).toBe("1000.00");
     expect(job.approvedVariations.toFixed(2)).toBe("100.00");
   });
 
   it.each(["ADMIN", "MANAGEMENT"] as const)("preserves authorized %s summary figures", role => {
-    expect(serializeJob(actor(role), job)).toMatchObject({ contractValue: "1000.00", approvedVariations: "100.00", adjustedValue: "1100.00", recognizedExpenses: "300.00", paidExpenses: "50.00", outstanding: "250.00", estimatedProfit: "800.00", billCount: 2 });
+    expect(serializeJob(actor(role), job)).toMatchObject({ contractValue: "1000.00", approvedVariations: "100.00", adjustedValue: "1100.00",
+      ...(role === "ADMIN" ? { recognizedExpenses: "300.00", paidExpenses: "50.00", outstanding: "250.00", estimatedProfit: "800.00", billCount: 2 }
+        : { recognizedExpenses: "0.00", paidExpenses: "0.00", outstanding: "0.00", estimatedProfit: "1100.00", billCount: 0, financialScope: "YOUR_BILLS" }) });
     expect(canViewFinancialSummary(actor(role))).toBe(true);
   });
 

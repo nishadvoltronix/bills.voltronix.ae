@@ -12,6 +12,7 @@ import {
 } from "./financial-ledger";
 import { crmJobSnapshotFilter } from "./crm-job-import";
 import { loadBooksProjectHistory } from "./books-project-history";
+import { assertBooksOwnerScopeCurrent, ownedBooksBillIds } from "./bill-ownership";
 
 const maximum = 20;
 type RelatedJob = { id: string; canonicalJobId: string | null; href: string; jobNumber: string | null;
@@ -78,6 +79,7 @@ export async function searchDashboard(actor: Actor, params: URLSearchParams) {
   const requestedCompanyId = params.get("companyId") || undefined;
   const scope = await companyFilter(actor, requestedCompanyId);
   const importedAllowed = actor.role !== "DATA_ENTRY";
+  const ownedIds = importedAllowed ? await ownedBooksBillIds(actor, requestedCompanyId) : [];
   const companyIds =
     typeof scope.companyId === "string"
       ? [scope.companyId]
@@ -85,6 +87,8 @@ export async function searchDashboard(actor: Actor, params: URLSearchParams) {
   const sqlScope = companyIds.length
     ? Prisma.sql`companyId IN (${Prisma.join(companyIds)})`
     : Prisma.sql`1 = 0`;
+  const booksSqlScope = ownedIds === null ? sqlScope : ownedIds.length
+    ? Prisma.sql`(${sqlScope}) AND id IN (${Prisma.join(ownedIds)})` : Prisma.sql`1 = 0`;
   const snapshotScope = importedAllowed
     ? await crmJobSnapshotFilter(actor, requestedCompanyId)
     : null;
@@ -165,7 +169,7 @@ export async function searchDashboard(actor: Actor, params: URLSearchParams) {
             "Bill",
             ["invoiceNumber"],
             ["invoiceNumber"],
-            Prisma.sql`(${sqlScope}) ${actor.role === "DATA_ENTRY" ? Prisma.sql`AND createdById = ${actor.id}` : Prisma.empty}`,
+            Prisma.sql`(${sqlScope}) ${actor.role !== "ADMIN" ? Prisma.sql`AND createdById = ${actor.id}` : Prisma.empty}`,
             query,
             [query],
             exact,
@@ -191,7 +195,7 @@ export async function searchDashboard(actor: Actor, params: URLSearchParams) {
                 "BooksBill",
                 ["billNumber"],
                 ["billNumber"],
-                Prisma.sql`(${sqlScope}) AND isStale = 0`,
+                Prisma.sql`(${booksSqlScope}) AND isStale = 0`,
                 query,
                 [query],
                 exact,
@@ -459,6 +463,7 @@ export async function searchDashboard(actor: Actor, params: URLSearchParams) {
     throw new HttpError(403, "Your company access changed. Search again.");
   if (matchedRelations.length && JSON.stringify(projectHistory.relations) !== JSON.stringify((await loadBooksProjectHistory(actor, requestedCompanyId)).relations))
     throw new HttpError(409, "Project history changed during search. Search again.");
+  if (importedAllowed) await assertBooksOwnerScopeCurrent(actor, ownedIds, requestedCompanyId);
   return {
     query,
     jobs: jobs.slice(0, maximum).map((job) => {

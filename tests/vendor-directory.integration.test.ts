@@ -23,7 +23,7 @@ function transport(organizationId: string, name: string, onRead?: () => Promise<
     expect(parsed.pathname).toBe("/books/v3/contacts");
     expect(parsed.searchParams.get("organization_id")).toBe(organizationId);
     expect(parsed.searchParams.get("contact_type")).toBe("vendor");
-    expect(parsed.searchParams.has("filter_by")).toBe(false);
+    expect(parsed.searchParams.get("filter_by")).toBe("Status.All");
     await onRead?.();
     return new Response(JSON.stringify({ code: 0,
       contacts: [{ contact_id: "101", contact_name: name, contact_type: "vendor", status: "inactive", currency_code: "JPY" }],
@@ -92,8 +92,12 @@ describe("company vendor directory on disposable MySQL", () => {
     for (const [companyId, organizationId, name] of [[companyA, organizationA, "Fictional directory supplier A"], [companyB, organizationB, "Fictional directory supplier B"]]) {
       const result = await listCompanyVendorDirectory(actor, { companyId }, transport(organizationId, name));
       expect(result).toMatchObject({ source: "books", companyId, organizationId, hasMore: false, warning: null });
-      expect(result.vendors).toHaveLength(1);
-      expect(result.vendors[0]).toMatchObject({ companyId, organizationId, name, externalVendorId: "101", status: "inactive", currency: "JPY" });
+      const providerRows = result.vendors.filter(row => row.source === "books");
+      expect(providerRows).toHaveLength(1);
+      expect(providerRows[0]).toMatchObject({ companyId, organizationId, name, externalVendorId: "101", status: "inactive", currency: "JPY" });
+      const localRows = result.vendors.filter(row => row.source === "local");
+      expect(localRows).toHaveLength(companyId === companyB ? 1 : 0);
+      if (companyId === companyB) expect(localRows[0]).toMatchObject({ companyId, status: "local", booksMappingRequired: true });
     }
     expect(await Promise.all([db.vendor.count(), db.vendorBooksMapping.count(), db.bill.count()])).toEqual(before);
     expect(fetch).not.toHaveBeenCalled();

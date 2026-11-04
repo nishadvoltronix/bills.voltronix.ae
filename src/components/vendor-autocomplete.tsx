@@ -13,6 +13,16 @@ type Props = {
   onChange: (vendor: Vendor | null, source: "selection" | "hydration" | "clear") => void;
   onPendingChange: (pending: boolean) => void;
 };
+function mergePages(previous: VendorSuggestion[], next: VendorSuggestion[]) {
+  const rows = [...previous];
+  for (const row of next) {
+    const index = rows.findIndex(other => row.id && other.id === row.id && other.companyId === row.companyId ||
+      row.externalVendorId && row.externalVendorId === other.externalVendorId && row.organizationId === other.organizationId && row.dataCenter === other.dataCenter && row.environment === other.environment);
+    if (index < 0) rows.push(row);
+    else if (row.externalVendorId || !rows[index].externalVendorId) rows[index] = row;
+  }
+  return rows;
+}
 
 // The parent keys this field by company so changing company also discards its text,
 // results and requests, without resetting any other bill fields.
@@ -27,6 +37,8 @@ export function VendorAutocomplete({ id, companyId, value, disabled, onChange, o
   const [resolving, setResolving] = useState(false);
   const [resolutionError, setResolutionError] = useState<{ suggestion: VendorSuggestion; message: string } | null>(null);
   const [search, setSearch] = useState<{ key: string; data?: VendorSearchResult; error?: string } | null>(null);
+  const [more, setMore] = useState<{ key: string; busy: boolean; error?: string } | null>(null);
+  const moreRequest = useRef<AbortController | null>(null);
   const selectionRequest = useRef<AbortController | null>(null);
   const selectionVersion = useRef(0);
   const mounted = useRef(false);
@@ -56,6 +68,7 @@ export function VendorAutocomplete({ id, companyId, value, disabled, onChange, o
       mounted.current = false;
       selectionVersion.current += 1;
       selectionRequest.current?.abort();
+      moreRequest.current?.abort();
     };
   }, []);
 
@@ -97,6 +110,7 @@ export function VendorAutocomplete({ id, companyId, value, disabled, onChange, o
 
   useEffect(() => {
     if (!searchEnabled) return;
+    moreRequest.current?.abort();
     const controller = new AbortController();
     const timer = setTimeout(() => {
       const params = new URLSearchParams({ companyId, q: query });
@@ -105,6 +119,7 @@ export function VendorAutocomplete({ id, companyId, value, disabled, onChange, o
           if (controller.signal.aborted) return;
           if (data.companyId !== companyId) throw new Error("Vendor results did not match this company. Retry the search.");
           setSearch({ key: searchKey, data });
+          setMore(null);
         })
         .catch((error: unknown) => {
           if (!controller.signal.aborted) setSearch({ key: searchKey, error: errorMessage(error) });
@@ -115,6 +130,23 @@ export function VendorAutocomplete({ id, companyId, value, disabled, onChange, o
       controller.abort();
     };
   }, [companyId, query, searchKey, searchEnabled]);
+
+  async function loadMore() {
+    if (!result?.hasMore || more?.key === searchKey && more.busy) return;
+    const key = searchKey, previous = result, page = (result.page ?? 1) + 1;
+    const controller = new AbortController(); moreRequest.current?.abort(); moreRequest.current = controller;
+    setMore({ key, busy: true });
+    try {
+      const data = await api<VendorSearchResult>(`/api/vendors/search?${new URLSearchParams({ companyId, q: query, page: String(page) })}`, { signal: controller.signal });
+      if (controller.signal.aborted || !mounted.current) return;
+      if (data.companyId !== companyId || data.organizationId !== previous.organizationId || data.dataCenter !== previous.dataCenter || data.environment !== previous.environment || data.page !== page || data.perPage !== 25)
+        throw new Error("The next vendor page did not match this search. Retry loading vendors.");
+      setSearch(current => current?.key === key ? { key, data: { ...data, vendors: mergePages(current.data?.vendors ?? [], data.vendors) } } : current);
+      setMore({ key, busy: false });
+    } catch (error) {
+      if (!controller.signal.aborted && mounted.current) setMore({ key, busy: false, error: errorMessage(error) });
+    }
+  }
 
   function cancelSelection() {
     selectionVersion.current += 1;
@@ -128,7 +160,7 @@ export function VendorAutocomplete({ id, companyId, value, disabled, onChange, o
   }
 
   async function choose(suggestion: VendorSuggestion) {
-    if (disabled || suggestion.companyId !== companyId) return;
+    if (disabled || suggestion.selectable === false || suggestion.companyId !== companyId) return;
     cancelSelection();
     setText(suggestion.name);
     setOpen(false);
@@ -249,6 +281,7 @@ export function VendorAutocomplete({ id, companyId, value, disabled, onChange, o
                 key={vendor.externalVendorId ? `${vendor.dataCenter}:${vendor.environment}:${vendor.organizationId}:${vendor.externalVendorId}` : vendor.id}
                 role="option"
                 aria-selected={index === activeIndex}
+                aria-disabled={vendor.selectable === false}
                 className="vendor-suggestion"
                 onMouseDown={(event) => event.preventDefault()}
                 onMouseMove={() => setActiveIndex(index)}
@@ -256,10 +289,17 @@ export function VendorAutocomplete({ id, companyId, value, disabled, onChange, o
               >
                 <span className="vendor-suggestion-name">{vendor.name}</span>
                 <span className="vendor-suggestion-meta">{vendor.currency}{vendor.externalVendorId ? " · Zoho Books" : vendor.booksMappingRequired ? " · Local · Books mapping required" : " · Local"}</span>
+                {vendor.unavailableReason && <span className="vendor-suggestion-meta">{vendor.unavailableReason} · Cannot select for a bill</span>}
               </li>
             ))}
           </ul>
-          {result?.hasMore && <p className="vendor-search-message">Type more of the name to narrow the results.</p>}
+          {more?.key === searchKey && more.error && <p className="vendor-search-message" role="alert">{more.error}</p>}
+          {result?.hasMore && <div className="vendor-search-message">
+            <Button type="button" variant="secondary" size="sm" disabled={more?.key === searchKey && more.busy}
+              onMouseDown={event => event.preventDefault()} onClick={() => void loadMore()}>
+              {more?.key === searchKey && more.busy ? "Loading vendors…" : "Load more vendors"}
+            </Button><p>Search by name or load more matching vendors.</p>
+          </div>}
         </div>
       )}
       <div id={statusId} className="vendor-selection-status" aria-live="polite">
