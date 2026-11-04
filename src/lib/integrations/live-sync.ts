@@ -12,6 +12,7 @@ import { assertNetwork, assertWrite, booksConfigurationHash, getBooksOrganizatio
 import type { ProductionWriteRequest } from "./transport";
 import { requireDestinationForCompany } from "./company-destination";
 import { assertLocalLiveTestJobPermission, isLocalLiveTestSnapshot } from "./local-live-test";
+import { isSupersededIntegrationJob } from "./source-supersession";
 
 type Store = Prisma.TransactionClient;
 export type LiveSyncConfirmation = { challengeId: string; challengeToken: string };
@@ -107,6 +108,7 @@ async function assertAutonomousJobPermission(job: IntegrationJob, config: ZohoCo
 
 /** Read-only outcome recovery cannot authorize a POST or adopt a new destination. */
 export async function assertJobReconciliationAccess(job: IntegrationJob, config: ZohoConfig) {
+  if (isSupersededIntegrationJob(job)) throw blocked("This historical operation was superseded by a corrected source and cannot be reconciled or replayed.");
   if (!job.needsReconciliation) throw blocked("This operation is not scheduled for read-only reconciliation.");
   if (isLocalLiveTestSnapshot(snapshotSchema.parse(job.snapshot)))
     return assertLocalLiveTestJobPermission(job, config, { verifyFiles: false, reconcileOnly: true });
@@ -214,6 +216,7 @@ export async function recordLiveConfirmation(store: Store, authorizationId: stri
 }
 
 export async function assertLiveJobPermission(job: IntegrationJob, config: ZohoConfig, verifyFiles = true) {
+  if (isSupersededIntegrationJob(job)) throw blocked("This historical operation was superseded by a corrected source and cannot authorize another write.");
   if (job.target !== "ZOHO") throw blocked("Live permission is limited to its Books operation.");
   if (isLocalLiveTestSnapshot(snapshotSchema.parse(job.snapshot)))
     return assertLocalLiveTestJobPermission(job, config, { verifyFiles });

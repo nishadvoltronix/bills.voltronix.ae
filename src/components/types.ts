@@ -199,6 +199,7 @@ export type Bill = {
     operation: "CREATE_BILL" | "ATTACH_DOCUMENT";
     status: string;
     needsReconciliation: boolean;
+    isSuperseded?: boolean;
     attempts: number;
     nextAttemptAt: string;
     externalId: string | null;

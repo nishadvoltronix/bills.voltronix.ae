@@ -41,6 +41,8 @@ export { previewLiveBillSync } from "./live-sync";
 import { confirmLiveSnapshot, recordLiveConfirmation, assertLiveJobPermission, assertLiveJobWrite, assertJobReconciliationAccess, assertSynchronizationActor, savedSourceSnapshot, type LiveSyncConfirmation } from "./live-sync";
 import { createLocalLiveTestWriteCapability, isLocalLiveTestSnapshot, prepareLocalLiveTestSnapshot,
   recordLocalLiveTestConfirmation } from "./local-live-test";
+import { assertSourceSupersessionQueueProof, consumeSourceSupersessionQueueProof, isSupersededIntegrationJob,
+  SOURCE_SUPERSEDED, type SourceSupersessionQueueProof } from "./source-supersession";
 
 function financeRole(actor: Actor) {
   if (!["ADMIN", "ACCOUNTS", "DATA_ENTRY"].includes(actor.role))
@@ -69,6 +71,7 @@ async function enqueueTx(
   actorId?: string,
   organizationId?: string,
   confirmation?: LiveSyncConfirmation,
+  supersession?: SourceSupersessionQueueProof,
 ) {
   if (target === "CRM")
     throw new IntegrationError(
@@ -116,6 +119,7 @@ async function enqueueTx(
   const live = !localTest && config.environment === "production" && confirmation
     ? await confirmLiveSnapshot(tx, bill, config, actorId ?? "", confirmation) : undefined;
   if (existing) {
+    if (supersession) throw new HttpError(409, "A canonical operation already exists for the corrected source.");
     if (existing.organizationId !== config.organizationId)
       throw new HttpError(
         409,
@@ -153,10 +157,14 @@ async function enqueueTx(
       409,
       "An external bill ID already exists. Reconcile the existing record rather than creating again.",
     );
+  if (supersession) await assertSourceSupersessionQueueProof(tx, supersession, {
+    actorId: actorId ?? "", companyId: bill.companyId, billId: bill.id, sourceVersion: bill.version,
+    organizationId: config.organizationId, syncRecord: record,
+  });
   if (
     record &&
     (["PENDING", "UNKNOWN", "SYNCED"].includes(record.status) ||
-      record.attempts > 0)
+      (record.attempts > 0 && !supersession))
   )
     throw new HttpError(
       409,
@@ -180,6 +188,7 @@ async function enqueueTx(
     );
   const snapshot = localTest?.snapshot ?? live?.snapshot ?? await savedSourceSnapshot(tx, bill, config, actorId!);
   buildBooksPayload(snapshot, config);
+  if (supersession) consumeSourceSupersessionQueueProof(supersession, snapshotHash(snapshot));
   const job = await tx.integrationJob.create({
     data: {
       billId,
@@ -292,14 +301,15 @@ export async function enqueueApprovedBillTx(
   }
 }
 /** Final-save scheduling is best-effort setup work, never an approval step. */
-export async function enqueueReadyBillTx(tx: Prisma.TransactionClient, billId: string, actorId: string, organizationId?: string) {
+export async function enqueueReadyBillTx(tx: Prisma.TransactionClient, billId: string, actorId: string, organizationId?: string,
+  supersession?: SourceSupersessionQueueProof) {
   const bill = await tx.bill.findUnique({ where: { id: billId }, include: sourceInclude });
   if (!bill) throw new HttpError(404, "Bill not found.");
   await assertSynchronizationActor(tx, bill, actorId);
   if (!["READY", "APPROVED"].includes(bill.status)) throw new HttpError(409, "Finalize the bill before synchronization.");
   if (isManualEntryOnly()) return null;
   try {
-    return await enqueueTx(tx, billId, "ZOHO", actorId, organizationId);
+    return await enqueueTx(tx, billId, "ZOHO", actorId, organizationId, undefined, supersession);
   } catch (error) {
     if (!(error instanceof IntegrationError) && !(error instanceof HttpError)) throw error;
     const record = await tx.syncRecord.findUnique({ where: { billId_target: { billId, target: "ZOHO" } } });
@@ -362,6 +372,7 @@ export async function listIntegrationJobs(
       organizationId: job.organizationId,
       target: job.target,
       operation: job.operation,
+      isSuperseded: isSupersededIntegrationJob(job),
       status: job.status,
       attempts: job.attempts,
       reconciliationAttempts: job.reconciliationAttempts,
@@ -395,10 +406,14 @@ export async function scheduleIntegrationJob(
     .parse(payload);
   return db.$transaction(
     async (tx) => {
+      await tx.$queryRaw(Prisma.sql`SELECT \`id\` FROM \`IntegrationJob\` WHERE \`id\`=${id} FOR UPDATE`);
       const job = await tx.integrationJob.findFirst({ where: { id, bill: { ...billScope(actor), company: { active: true, memberships: { some: { userId: actor.id, active: true, user: { active: true } } } } } } });
       if (!job) throw new HttpError(404, "Synchronization job not found.");
+      await tx.$queryRaw(Prisma.sql`SELECT \`id\` FROM \`Bill\` WHERE \`id\`=${job.billId} FOR UPDATE`);
       const source = await tx.bill.findUniqueOrThrow({ where: { id: job.billId }, include: sourceInclude });
       await assertSynchronizationActor(tx, source, actor.id);
+      if (isSupersededIntegrationJob(job) || !await isCurrentOperation(tx, job))
+        throw new HttpError(409, "This operation was superseded by a corrected bill source. Use the current synchronization operation.");
       if (input.organizationId && input.organizationId !== job.organizationId)
         throw new HttpError(
           409,
@@ -529,9 +544,27 @@ function productionAdapter(target: Target, organizationId: string, job: Integrat
     config.environment === "production" || job.initiatedById ? request => assertLiveJobWrite(job.id, job.leaseToken ?? "", request) : undefined,
     localTestCapability));
 }
+async function isCurrentOperation(tx: Prisma.TransactionClient, job: IntegrationJob) {
+  if (isSupersededIntegrationJob(job)) return false;
+  // Match claim/amendment lock order. Canonical routing cannot change while a
+  // finalizer or lease recovery is deciding whether it may update shared state.
+  await tx.$queryRaw(Prisma.sql`SELECT \`id\` FROM \`IntegrationJob\` WHERE \`id\`=${job.id} FOR UPDATE`);
+  await tx.$queryRaw(Prisma.sql`SELECT \`id\` FROM \`Bill\` WHERE \`id\`=${job.billId} FOR UPDATE`);
+  const persisted = await tx.integrationJob.findUnique({ where: { id: job.id } });
+  if (!persisted || isSupersededIntegrationJob(persisted)) return false;
+  const current = await tx.integrationJob.findUnique({ where: { idempotencyKey: `${job.target}:${job.billId}:CREATE_BILL` } });
+  // Preserve established destination-free legacy operations. A canonical row,
+  // once present, is the only authority for its own source and attachment jobs.
+  if (!current) return true;
+  return job.operation === "CREATE_BILL" ? current.id === job.id :
+    current.status === "SUCCEEDED" && current.externalId === job.externalId && current.payloadHash === job.payloadHash &&
+      current.sourceVersion === job.sourceVersion && current.organizationId === job.organizationId;
+}
 async function recoverExpiredLeases(jobId?: string) {
   const ids = await db.$queryRaw<{ id: string }[]>(Prisma.sql`SELECT \`id\` FROM \`IntegrationJob\`
     WHERE \`status\`='PROCESSING' AND \`leaseUntil\` < ${new Date()}
+    AND (\`errorCode\` IS NULL OR \`errorCode\` <> ${SOURCE_SUPERSEDED})
+    AND \`idempotencyKey\` <> CONCAT(\`target\`,':',\`billId\`,':CREATE_BILL:SUPERSEDED:',\`id\`)
     ${jobId ? Prisma.sql`AND \`id\`=${jobId}` : Prisma.sql`AND (\`initiatedById\` IS NOT NULL OR COALESCE(JSON_UNQUOTE(JSON_EXTRACT(\`snapshot\`, '$.destination.environment')), '') <> 'production')`}
     ORDER BY \`leaseUntil\`, \`id\` LIMIT 25`);
   if (!ids.length) return;
@@ -541,6 +574,7 @@ async function recoverExpiredLeases(jobId?: string) {
   });
   for (const job of expired)
     await db.$transaction(async (tx) => {
+      if (!await isCurrentOperation(tx, job)) return;
       const changed = await tx.integrationJob.updateMany({
         where: {
           id: job.id,
@@ -607,7 +641,7 @@ async function claimJob(jobId?: string) {
         needsReconciliation: boolean;
       }[]
     >(
-      Prisma.sql`SELECT j.\`id\`,j.\`billId\`,j.\`target\`,j.\`needsReconciliation\` FROM \`IntegrationJob\` j WHERE j.\`status\` IN ('QUEUED','RETRY') AND j.\`nextAttemptAt\` <= ${now} ${jobId ? Prisma.sql`AND j.\`id\`=${jobId}` : Prisma.sql`AND (j.\`initiatedById\` IS NOT NULL OR COALESCE(JSON_UNQUOTE(JSON_EXTRACT(j.\`snapshot\`, '$.destination.environment')), '') <> 'production')`} AND NOT EXISTS (SELECT 1 FROM \`IntegrationJob\` sibling WHERE sibling.\`billId\`=j.\`billId\` AND sibling.\`target\`=j.\`target\` AND (sibling.\`status\`='PROCESSING' OR ((sibling.\`status\`='UNKNOWN' OR (sibling.\`needsReconciliation\` AND sibling.\`status\`<>'SUCCEEDED')) AND NOT j.\`needsReconciliation\`))) ORDER BY j.\`nextAttemptAt\`, j.\`createdAt\`,j.\`id\` LIMIT 1 FOR UPDATE OF j SKIP LOCKED`,
+      Prisma.sql`SELECT j.\`id\`,j.\`billId\`,j.\`target\`,j.\`needsReconciliation\` FROM \`IntegrationJob\` j WHERE j.\`status\` IN ('QUEUED','RETRY') AND j.\`nextAttemptAt\` <= ${now} AND (j.\`errorCode\` IS NULL OR j.\`errorCode\` <> ${SOURCE_SUPERSEDED}) AND j.\`idempotencyKey\` <> CONCAT(j.\`target\`,':',j.\`billId\`,':CREATE_BILL:SUPERSEDED:',j.\`id\`) ${jobId ? Prisma.sql`AND j.\`id\`=${jobId}` : Prisma.sql`AND (j.\`initiatedById\` IS NOT NULL OR COALESCE(JSON_UNQUOTE(JSON_EXTRACT(j.\`snapshot\`, '$.destination.environment')), '') <> 'production')`} AND NOT EXISTS (SELECT 1 FROM \`IntegrationJob\` sibling WHERE sibling.\`billId\`=j.\`billId\` AND sibling.\`target\`=j.\`target\` AND (sibling.\`status\`='PROCESSING' OR ((sibling.\`status\`='UNKNOWN' OR (sibling.\`needsReconciliation\` AND sibling.\`status\`<>'SUCCEEDED')) AND NOT j.\`needsReconciliation\`))) ORDER BY j.\`nextAttemptAt\`, j.\`createdAt\`,j.\`id\` LIMIT 1 FOR UPDATE OF j SKIP LOCKED`,
     );
     if (!selected.length) return null;
     const candidate = selected[0];
@@ -666,6 +700,7 @@ async function finalizeFailure(job: IntegrationJob, error: unknown) {
   const failure = safeFailure(error);
   const decision = failureState(failure, job.attempts, job.needsReconciliation);
   await db.$transaction(async (tx) => {
+    if (!await isCurrentOperation(tx, job)) return;
     const changed = await tx.integrationJob.updateMany({
       where: { id: job.id, status: "PROCESSING", leaseToken: job.leaseToken },
       data: {
@@ -729,6 +764,7 @@ async function finalizeSuccess(
   snapshot: BillSnapshot,
 ) {
   await db.$transaction(async (tx) => {
+    if (!await isCurrentOperation(tx, job)) return;
     const destination = await tx.syncRecord.findUnique({
       where: { billId_target: { billId: job.billId, target: job.target } },
     });
@@ -791,14 +827,16 @@ async function finalizeSuccess(
           update: {},
         });
     }
-    const siblings = await tx.integrationJob.findMany({
+    const siblingRows = await tx.integrationJob.findMany({
       where: {
         billId: job.billId,
         target: job.target,
         status: { not: "SUCCEEDED" },
       },
-      select: { status: true, lastError: true, needsReconciliation: true },
+      select: { id: true, billId: true, target: true, operation: true, idempotencyKey: true, errorCode: true,
+        status: true, lastError: true, needsReconciliation: true },
     });
+    const siblings = siblingRows.filter(sibling => !isSupersededIntegrationJob(sibling));
     const pending = siblings.length;
     const syncStatus = siblings.some(
       (j) => j.status === "UNKNOWN" || j.needsReconciliation,

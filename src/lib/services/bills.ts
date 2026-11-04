@@ -10,6 +10,7 @@ import { booksConfigurationHash, booksLineSelectionRequired, getConfig } from "@
 import { assertBooksLineSelections } from "@/lib/integrations/books";
 import { connectionFingerprint } from "@/lib/integrations/connection-fingerprint";
 import { LEGACY_UNSCOPED_ORGANIZATION } from "@/lib/integrations/oauth";
+import { isSupersededIntegrationJob } from "@/lib/integrations/source-supersession";
 import { verifyBillBooksSelections } from "@/lib/services/bill-books-options";
 import {
   companyFilter,
@@ -485,6 +486,10 @@ export async function getBill(actor: Actor, id: string) {
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     select: {
       id: true,
+      billId: true,
+      target: true,
+      idempotencyKey: true,
+      errorCode: true,
       organizationId: true,
       operation: true,
       status: true,
@@ -496,7 +501,24 @@ export async function getBill(actor: Actor, id: string) {
     },
   });
   await assertBillAccess(actor, bill);
-  return { ...serializeBill(bill), auditLogs, integrationJobs };
+  return {
+    ...serializeBill(bill),
+    auditLogs,
+    integrationJobs: integrationJobs.map((job) => {
+      const { billId, target, idempotencyKey, errorCode, ...recovery } = job;
+      return {
+        ...recovery,
+        isSuperseded: isSupersededIntegrationJob({
+          id: job.id,
+          billId,
+          target,
+          operation: job.operation,
+          idempotencyKey,
+          errorCode,
+        }),
+      };
+    }),
+  };
 }
 
 export async function updateBill(actor: Actor, id: string, payload: unknown) {

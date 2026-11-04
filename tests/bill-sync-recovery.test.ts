@@ -17,6 +17,7 @@ const amount = (value: string) => new Prisma.Decimal(value);
 const operation = {
   id: "fictional-operation", billId: "fictional-bill", target: "ZOHO", organizationId: "1001",
   operation: "CREATE_BILL", status: "UNKNOWN", needsReconciliation: true, attempts: 1,
+  idempotencyKey: "ZOHO:fictional-bill:CREATE_BILL", errorCode: null,
   nextAttemptAt: new Date("2026-10-30T06:00:00Z"), externalId: null, lastError: "The remote outcome is uncertain.",
   snapshot: { privateFinancialPayload: true }, leaseToken: "PRIVATE-WORKER-LEASE", payloadHash: "PRIVATE-PAYLOAD-HASH",
 };
@@ -44,12 +45,35 @@ describe("bill synchronization recovery visibility", () => {
     expect(result.integrationJobs).toEqual([{
       id: "fictional-operation", organizationId: "1001", operation: "CREATE_BILL", status: "UNKNOWN",
       needsReconciliation: true, attempts: 1, nextAttemptAt: operation.nextAttemptAt, externalId: null,
-      lastError: "The remote outcome is uncertain.",
+      lastError: "The remote outcome is uncertain.", isSuperseded: false,
     }]);
     expect(JSON.stringify(result)).not.toMatch(/privateFinancialPayload|PRIVATE-WORKER-LEASE|PRIVATE-PAYLOAD-HASH/);
     expect(store.integrationJob.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: { billId: "fictional-bill", target: "ZOHO" },
     }));
+  });
+
+  it.each(["key", "marker"] as const)("exposes a safe superseded flag from the internal %s without routing metadata", async (source) => {
+    const historical = {
+      ...operation,
+      status: "CANCELLED",
+      needsReconciliation: false,
+      idempotencyKey: source === "key"
+        ? "ZOHO:fictional-bill:CREATE_BILL:SUPERSEDED:fictional-operation"
+        : operation.idempotencyKey,
+      errorCode: source === "marker" ? "SOURCE_SUPERSEDED" : null,
+    };
+    store.integrationJob.findMany.mockImplementationOnce(async ({ select }) => [
+      Object.fromEntries(Object.keys(select).filter((key) => select[key]).map((key) => [key, historical[key as keyof typeof historical]])),
+    ]);
+    const result = await getBill(actor, "fictional-bill");
+    expect(result.integrationJobs).toEqual([{
+      id: "fictional-operation", organizationId: "1001", operation: "CREATE_BILL", status: "CANCELLED",
+      needsReconciliation: false, attempts: 1, nextAttemptAt: operation.nextAttemptAt, externalId: null,
+      lastError: operation.lastError, isSuperseded: true,
+    }]);
+    for (const field of ["billId", "target", "idempotencyKey", "errorCode", "snapshot", "leaseToken", "payloadHash"])
+      expect(result.integrationJobs[0]).not.toHaveProperty(field);
   });
 
   it("checks current company membership before reading operation metadata", async () => {

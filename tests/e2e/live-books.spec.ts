@@ -331,3 +331,50 @@ test("unknown posting permits reconciliation only and polls its read result", as
   expect(writes).toEqual(["/api/integrations/jobs/mock-uncertain-operation"]);
   expect(bill.payments).toEqual([]);
 });
+
+for (const currentStatus of ["FAILED", "UNKNOWN"] as const) {
+  test(`superseded posting is history while current ${currentStatus} recovery stays available`, async ({ page }) => {
+    const bill = await setup(page);
+    bill.syncRecords[0].status = currentStatus;
+    bill.syncRecords[0].organizationId = firstOrganization;
+    const shared = {
+      organizationId: firstOrganization, operation: "CREATE_BILL" as const,
+      attempts: 1, nextAttemptAt: "2026-11-04T08:00:00Z", externalId: null,
+    };
+    bill.integrationJobs = [
+      { ...shared, id: "mock-before-correction", status: "CANCELLED", needsReconciliation: false,
+        isSuperseded: true, lastError: "Obsolete before-correction rejection." },
+      { ...shared, id: "mock-current-correction", status: currentStatus, needsReconciliation: currentStatus === "UNKNOWN",
+        isSuperseded: false, lastError: "The current operation needs attention." },
+    ];
+    const writes: string[] = [];
+    await page.route("**/api/integrations/jobs/**", async (route) => {
+      writes.push(new URL(route.request().url()).pathname);
+      await route.abort();
+    });
+    await page.goto(`/bills/${billId}?saved=1`);
+    const historical = page.getByRole("group", { name: "Synchronization before correction", exact: true });
+    await expect(historical.getByText("Superseded", { exact: true })).toBeVisible();
+    await expect(historical.getByText("This operation used the bill before correction.", { exact: false })).toBeVisible();
+    await expect(historical.getByRole("button")).toHaveCount(0);
+    await expect(page.getByText("Obsolete before-correction rejection.", { exact: true })).toHaveCount(0);
+    const current = page.getByRole("group", { name: "Bill synchronization recovery", exact: true });
+    await expect(current).toHaveCount(1);
+    await expect(current.getByRole("button", {
+      name: currentStatus === "UNKNOWN" ? "Reconcile Zoho Books outcome" : "Retry Zoho Books sync", exact: true,
+    })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "Queue Zoho Books sync", exact: true })).toHaveCount(0);
+    bill.integrationJobs[1].status = "SUCCEEDED";
+    bill.integrationJobs[1].needsReconciliation = false;
+    bill.syncRecords[0].status = "SYNCED";
+    bill.syncRecords[0].externalId = "mock-corrected-books-bill";
+    await page.getByRole("button", { name: "Refresh sync status", exact: true }).click();
+    await expect(page.getByText("Bill saved and synchronized with Zoho Books.", { exact: true })).toBeVisible();
+    await expect(current).toHaveCount(0);
+    await expect(historical.getByText("Superseded", { exact: true })).toBeVisible();
+    await expect(historical.getByRole("button")).toHaveCount(0);
+    expect(writes).toEqual([]);
+    expect(bill.payments).toEqual([]);
+    expect(bill.paidAmount).toBe("0.00");
+  });
+}

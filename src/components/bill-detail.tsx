@@ -118,7 +118,7 @@ export function BillDetail({
   const booksJobs = bill?.integrationJobs ?? [];
   const hasBooksOperation = booksJobs.length > 0;
   const syncPending = !manualEntryOnly && (booksRecord?.status === "PENDING" ||
-    booksJobs.some((job) => ["QUEUED", "RETRY", "PROCESSING"].includes(job.status)));
+    booksJobs.some((job) => !job.isSuperseded && ["QUEUED", "RETRY", "PROCESSING"].includes(job.status)));
   const reloadBill = state.reload;
   const refreshInFlight = useRef(false);
   useEffect(() => {
@@ -165,7 +165,7 @@ export function BillDetail({
     }
   }
   async function recoverSync(job: NonNullable<Bill["integrationJobs"]>[number], action: "retry" | "reconcile") {
-    if (!canWrite || !["ADMIN", "ACCOUNTS"].includes(user.role)) return;
+    if (job.isSuperseded || !canWrite || !["ADMIN", "ACCOUNTS"].includes(user.role)) return;
     setBusy(true);
     setError("");
     setSuccess("");
@@ -645,6 +645,15 @@ export function BillDetail({
               <p>Books bill ID: <strong>{booksRecord.externalId}</strong></p>
             )}
             {booksJobs.filter((job) => job.status !== "SUCCEEDED").map((job) => {
+              if (job.isSuperseded) {
+                return (
+                  <div key={job.id} role="group" aria-label="Synchronization before correction">
+                    <strong>{job.operation === "CREATE_BILL" ? "Bill posting" : "Original attachment"}</strong>{" "}
+                    <Badge>Superseded</Badge>
+                    <p>This operation used the bill before correction. It is retained as history and cannot be retried.</p>
+                  </div>
+                );
+              }
               const uncertain = job.needsReconciliation || job.status === "UNKNOWN";
               const waiting = ["QUEUED", "RETRY", "PROCESSING"].includes(job.status);
               return (
