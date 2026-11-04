@@ -227,6 +227,7 @@ describe("protected endpoint authentication", () => {
       expect(response.headers.get("cache-control")).toBe("private, no-store");
       expect(await response.json()).toEqual({
         error: "Please sign in to continue.",
+        code: "AUTH_SESSION_REQUIRED",
       });
       expect(state.sessionRead).not.toHaveBeenCalled();
       expect(state.documentRead).not.toHaveBeenCalled();

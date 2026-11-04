@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import Image from "next/image";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { createContext, useContext, useEffect, useId, useRef, useState } from "react";
 import {
   LayoutDashboard,
@@ -21,15 +21,23 @@ import {
   LockKeyhole,
 } from "lucide-react";
 import type { User, Role } from "./types";
-import { api, errorMessage } from "./api";
+import { ApiError, api, errorMessage } from "./api";
 import { Notice } from "./ui";
 import { ManualEntryContext, OcrWorkspaceContext } from "./application-mode";
 import { accountDisplayName } from "./account-display-name";
 import { canAccessRolePath, roleHomePath } from "@/lib/auth-navigation";
+import { clearSessionRecovery, SESSION_REQUIRED_CODE } from "@/lib/session-recovery";
+import { SessionRecovery } from "./session-recovery";
 import voltronixLogo from "@/assets/voltronix-logo.png";
 export { useManualEntryOnly, useOcrWorkspaceEnabled } from "./application-mode";
 
 const UserContext = createContext<User | null>(null);
+function finishLogout() {
+  clearSessionRecovery();
+  // A full navigation deliberately discards cached identity and unsaved state.
+  // eslint-disable-next-line @next/next/no-location-assign-relative-destination
+  window.location.assign("/login");
+}
 export function useUser() {
   const user = useContext(UserContext);
   if (!user) throw new Error("Authentication required");
@@ -134,7 +142,6 @@ export function AppShell({
   ocrWorkspaceEnabled?: boolean;
 }) {
   const path = usePathname();
-  const router = useRouter();
   const displayName = accountDisplayName(user.name) || user.email;
   const home = roleHomePath(user.role);
   const [open, setOpen] = useState(false);
@@ -192,9 +199,11 @@ export function AppShell({
     setBusy(true);
     try {
       await api("/api/auth/logout", { method: "POST" });
-      router.push("/login");
-      router.refresh();
+      finishLogout();
     } catch (e) {
+      if (e instanceof ApiError && e.code === SESSION_REQUIRED_CODE) {
+        finishLogout(); return;
+      }
       setError(errorMessage(e));
       setBusy(false);
     }
@@ -314,6 +323,7 @@ export function AppShell({
           </footer>
         </div>
       </div>
+      <SessionRecovery user={user} />
       </OcrWorkspaceContext.Provider>
       </ManualEntryContext.Provider>
     </UserContext.Provider>

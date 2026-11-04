@@ -5,6 +5,7 @@ import { redirect } from "next/navigation";
 import { Prisma, type Role } from "@prisma/client";
 import { db } from "@/lib/db";
 import { HttpError } from "@/lib/http";
+import { SESSION_REQUIRED_CODE } from "@/lib/session-recovery";
 import { hashPassword, verifyPassword } from "@/lib/password";
 import { reserveAuthenticationAttempt } from "@/lib/security/authentication-attempts";
 import { AUTH_RETURN_PATH_HEADER, canAccessRolePath, loginUrl, roleHomePath } from "@/lib/auth-navigation";
@@ -57,7 +58,7 @@ export async function getCurrentUser(): Promise<Actor | null> {
 
 export async function requireUser(roles?: readonly Role[]): Promise<Actor> {
   const actor = await getCurrentUser();
-  if (!actor) throw new HttpError(401, "Please sign in to continue.");
+  if (!actor) throw new HttpError(401, "Please sign in to continue.", SESSION_REQUIRED_CODE);
   if (roles && !roles.includes(actor.role))
     throw new HttpError(
       403,

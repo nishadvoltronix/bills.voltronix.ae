@@ -1,0 +1,10 @@
+.dialog { width: min(430px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); box-sizing: border-box; padding: 28px; border: 0; border-radius: 12px; background: #fff; color: #18283f; box-shadow: 0 24px 80px #0005; }
+.dialog::backdrop { background: #111b2cc4; backdrop-filter: blur(3px); }
+.heading { display: flex; align-items: center; gap: 10px; }
+.heading h2 { margin: 0; font-size: 21px; }
+.dialog p { margin: 14px 0; font-size: 13px; line-height: 1.65; }
+.form { display: grid; gap: 16px; margin-top: 20px; }
+.form > button { width: 100%; }
+.leave { margin-top: 20px; padding-top: 14px; border-top: 1px solid #e2e8f0; }
+.leave p { margin: 0 0 6px; color: #64748b; font-size: 12px; }
+@media (max-width: 420px) { .dialog { padding: 22px; } .heading h2 { font-size: 19px; } }

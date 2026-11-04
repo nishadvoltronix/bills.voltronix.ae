@@ -102,6 +102,40 @@ async function chooseLine(page: Page, line: number, kind: "account" | "tax", nam
   await page.getByRole("combobox", { name: `Line ${line} ${kind}`, exact: true }).fill(name);
   await page.getByRole("option", { name: new RegExp(`^${name}`) }).click();
 }
+
+test("session recovery preserves typed bill details and all original files without replaying save", async ({ page }) => {
+  const state = await fixture(page); await open(page);
+  await files(page).setInputFiles([original("FICTIONAL-recovery-front.pdf"), original("FICTIONAL-recovery-back.pdf")]);
+  await ready(page);
+  await manualFiles(page).setInputFiles(original("FICTIONAL-recovery-support.pdf"));
+  await page.locator("#invoice-number").fill("KEEP-AFTER-SIGN-IN");
+  for (const line of [1, 2]) {
+    await chooseLine(page, line, "account", options.accounts[0].name);
+    await chooseLine(page, line, "tax", options.taxes[0].name);
+  }
+  let attempts = 0;
+  await page.route(/\/api\/bills$/, route => {
+    if (route.request().method() === "POST" && ++attempts === 1)
+      return route.fulfill({ status: 401, json: { error: "Please sign in to continue.", code: "AUTH_SESSION_REQUIRED" } });
+    return route.fallback();
+  });
+  await page.getByRole("button", { name: "Save and sync", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Sign in to continue", exact: true });
+  await expect(dialog).toBeVisible();
+  await expect(page.locator("#invoice-number")).toHaveValue("KEEP-AFTER-SIGN-IN");
+  await expect(manualList(page)).toContainText("FICTIONAL-recovery-support.pdf");
+  await dialog.getByLabel("Password", { exact: true }).fill(process.env.SEED_ADMIN_PASSWORD!);
+  await dialog.getByRole("button", { name: "Sign in again", exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(page.locator("#invoice-number")).toHaveValue("KEEP-AFTER-SIGN-IN");
+  await expect(page.getByLabel("Line 2 unit price", { exact: true })).toHaveValue("20.00");
+  expect(attempts).toBe(1); expect(state.creates).toEqual([]); expect(state.uploads).toEqual([]);
+  await page.getByRole("button", { name: "Save and sync", exact: true }).click();
+  await expect(page).toHaveURL(/\/bills\/autofill-saved\/payment\?entry=1&saved=1$/);
+  expect(attempts).toBe(2); expect(state.creates).toHaveLength(1); expect(state.reads).toHaveLength(1);
+  expect(state.uploadedNames).toEqual(["FICTIONAL-recovery-front.pdf", "FICTIONAL-recovery-back.pdf", "FICTIONAL-recovery-support.pdf"]);
+  expect(state.unexpected).toEqual([]);
+});
 test.beforeEach(async ({ page, baseURL }) => {
   const email = process.env.SEED_ADMIN_EMAIL, password = process.env.SEED_ADMIN_PASSWORD;
   if (!email || !password || !baseURL) throw new Error("Existing local seed authentication is required.");

@@ -5,6 +5,7 @@ export class HttpError extends Error {
   constructor(
     public status: number,
     message: string,
+    public readonly code?: string,
   ) {
     super(message);
   }
@@ -79,7 +80,7 @@ export async function handle(
     return await action();
   } catch (error) {
     if (error instanceof HttpError)
-      return json({ error: error.message }, error.status);
+      return json({ error: error.message, ...(error.code ? { code: error.code } : {}) }, error.status);
     if (error instanceof ZodError)
       return json(
         {
