@@ -39,7 +39,7 @@ describe("conservative invoice evidence", () => {
     expect(result.fields.lines).toEqual([{ description: "Fictional front materials", quantity: "2", unitPrice: "100" }]);
     expect(result.fields.vatRate).toBeUndefined();
     expect(result.evidence).toMatchObject({ subtotal: null, vatAmount: null, total: null });
-    expect(result.requiresHumanReview).toBe(true);
+    expect(result.requiresHumanReview).toBe(false);
   });
   it("preserves every front/back item under the one shared invoice identity and final page totals", () => {
     const result = normalizeInvoiceEvidence(frontBackFixture(true));
@@ -48,13 +48,14 @@ describe("conservative invoice evidence", () => {
     expect(result.evidence).toMatchObject({ subtotal: "250.00", vatAmount: "12.50", total: "262.50" });
     expect(result.warnings.join(" ")).not.toMatch(/items do not match|need checking/);
   });
-  it("withholds incomplete or duplicated page rows when they contradict the final invoice totals", () => {
+  it("keeps readable page rows and warns when missing, duplicated or carried rows contradict final totals", () => {
     const incomplete = frontBackFixture(true); incomplete.lines.pop();
-    expect(normalizeInvoiceEvidence(incomplete).fields.lines).toBeUndefined();
+    expect(normalizeInvoiceEvidence(incomplete).fields.lines).toHaveLength(1);
+    expect(normalizeInvoiceEvidence(incomplete).warnings.join(" ")).toContain("do not match");
     const duplicate = frontBackFixture(true); duplicate.lines.unshift({ ...duplicate.lines[0] });
-    expect(normalizeInvoiceEvidence(duplicate).fields.lines).toBeUndefined();
+    expect(normalizeInvoiceEvidence(duplicate).fields.lines).toHaveLength(3);
     const carried = frontBackFixture(true); carried.lines.push({ ...carried.lines[0], description: "Carried forward", quantity: "1", unitPrice: "200" });
-    expect(normalizeInvoiceEvidence(carried).fields.lines).toBeUndefined();
+    expect(normalizeInvoiceEvidence(carried).fields.lines).toHaveLength(3);
   });
   it("keeps legitimate identical printed rows when the invoice totals include both", () => {
     const raw = fixture({ subtotal: "400", vatAmount: "20", total: "420" }); raw.lines.push({ ...raw.lines[0] });
@@ -64,11 +65,12 @@ describe("conservative invoice evidence", () => {
   it("fills printed values and preserves leading zeros, without inventing discounts or IDs", () => {
     const result = normalizeInvoiceEvidence(fixture());
     expect(result.fields).toEqual({ invoiceNumber: "00061", invoiceDate: "2026-11-04", vatRate: "5", lines: [{ description: "Material", quantity: "2", unitPrice: "100" }] });
-    expect(result.requiresHumanReview).toBe(true);
+    expect(result.requiresHumanReview).toBe(false);
     expect(result.evidence.total).toBe("210.00");
   });
   it("does not infer zero or five percent VAT from totals", () => {
-    const result = normalizeInvoiceEvidence(fixture({ vatRate: null }));
+    const raw = fixture({ vatRate: null }); raw.lines[0].taxRate = null;
+    const result = normalizeInvoiceEvidence(raw);
     expect(result.fields.vatRate).toBeUndefined();
     expect(result.warnings.join(" ")).toContain("not been inferred");
   });
@@ -76,30 +78,159 @@ describe("conservative invoice evidence", () => {
     const raw = fixture({ vatRate: "5%" }); raw.lines[0].taxRate = "5 %";
     expect(normalizeInvoiceEvidence(raw).fields.vatRate).toBe("5");
   });
-  it.each(["quantity", "unitPrice"] as const)("does not invent missing %s", missing => {
+  it.each(["quantity", "unitPrice"] as const)("recovers missing %s from exact printed net line math", missing => {
     const raw = fixture(); raw.lines[0][missing] = null;
-    expect(normalizeInvoiceEvidence(raw).fields.lines).toBeUndefined();
+    expect(normalizeInvoiceEvidence(raw).fields.lines).toEqual([{ description: "Material", quantity: "2", unitPrice: "100" }]);
   });
   it.each([
     { subtotal: "180" }, { total: "220" }, { vatAmount: "20" }, { discount: "900" }, { taxInclusive: true },
-  ])("withholds lines when financial evidence conflicts: %o", change => {
-    expect(normalizeInvoiceEvidence(fixture(change)).fields.lines).toBeUndefined();
+  ])("preserves readable cells when financial evidence conflicts: %o", change => {
+    expect(normalizeInvoiceEvidence(fixture(change)).fields.lines).toHaveLength(1);
+    expect(normalizeInvoiceEvidence(fixture(change)).warnings.length).toBeGreaterThan(0);
   });
-  it("withholds lines with incompatible printed amounts or mixed rates", () => {
+  it("warns about incompatible amounts and leaves mixed tax selection blank without deleting items", () => {
     const raw = fixture(); raw.lines[0].amount = "250";
-    expect(normalizeInvoiceEvidence(raw).fields.lines).toBeUndefined();
+    expect(normalizeInvoiceEvidence(raw).fields.lines).toEqual([{ description: "Material", quantity: "2", unitPrice: "100" }]);
     raw.lines[0].amount = "200"; raw.lines.push({ ...raw.lines[0], taxRate: "0" });
     expect(normalizeInvoiceEvidence(raw).fields.vatRate).toBeUndefined();
+    expect(normalizeInvoiceEvidence(raw).fields.lines).toHaveLength(2);
   });
   it("checks printed totals even when the printed subtotal is absent", () => {
-    expect(normalizeInvoiceEvidence(fixture({ subtotal: null, total: "190" })).fields.lines).toBeUndefined();
+    expect(normalizeInvoiceEvidence(fixture({ subtotal: null, total: "190" })).fields.lines).toHaveLength(1);
+    expect(normalizeInvoiceEvidence(fixture({ subtotal: null, total: "190" })).warnings.join(" ")).toContain("do not match");
     const raw = fixture(); raw.lines[0].taxAmount = "25";
-    expect(normalizeInvoiceEvidence(raw).fields.lines).toBeUndefined();
+    expect(normalizeInvoiceEvidence(raw).fields.lines).toHaveLength(1);
+    expect(normalizeInvoiceEvidence(raw).warnings.join(" ")).toContain("does not match");
   });
   it("rejects invalid dates and unsupported precisions", () => {
     const raw = fixture({ invoiceDate: "2026-02-30", dueDate: "04/11/2026" }); raw.lines[0].unitPrice = "1.1234";
     const result = normalizeInvoiceEvidence(raw);
-    expect(result.fields.invoiceDate).toBeUndefined(); expect(result.fields.dueDate).toBeUndefined(); expect(result.fields.lines).toBeUndefined();
+    expect(result.fields.invoiceDate).toBeUndefined(); expect(result.fields.dueDate).toBeUndefined();
+    expect(result.fields.lines).toEqual([{ description: "Material", quantity: "2", unitPrice: "" }]);
+  });
+  it("fills readable siblings and partial rows independently instead of rejecting the whole invoice", () => {
+    const raw = fixture();
+    raw.lines.push({ description: "Second readable item", quantity: null, unitPrice: "25", amount: null, taxAmount: null, taxRate: null },
+      { description: null, quantity: "3", unitPrice: null, amount: null, taxAmount: null, taxRate: null },
+      { description: "Description only", quantity: null, unitPrice: null, amount: null, taxAmount: null, taxRate: null });
+    expect(normalizeInvoiceEvidence(raw).fields.lines).toEqual([
+      { description: "Material", quantity: "2", unitPrice: "100" }, { description: "Second readable item", quantity: "", unitPrice: "25" },
+      { description: "", quantity: "3", unitPrice: "" }, { description: "Description only", quantity: "", unitPrice: "" },
+    ]);
+  });
+  it("does not invent quantity one or a unit price when only the printed amount is available", () => {
+    const raw = fixture(); raw.lines[0] = { description: "Lump sum", quantity: null, unitPrice: null, amount: "200", taxAmount: null, taxRate: null };
+    const result = normalizeInvoiceEvidence(raw);
+    expect(result.fields.lines).toEqual([{ description: "Lump sum", quantity: "", unitPrice: "" }]);
+    expect(result.warnings.join(" ")).toContain("printed line amount 200");
+  });
+  it("retains amount-only rows as blank editable cells with their printed amount in the notes", () => {
+    const raw = fixture(); raw.lines[0] = { description: null, quantity: null, unitPrice: null, amount: "200", taxAmount: null, taxRate: null };
+    expect(normalizeInvoiceEvidence(raw).fields.lines).toEqual([{ description: "", quantity: "", unitPrice: "" }]);
+  });
+  it("does not divide by zero or replace a clearly printed unsupported quantity", () => {
+    const raw = fixture(); raw.lines[0].quantity = null; raw.lines[0].unitPrice = "0"; raw.lines[0].amount = "0";
+    expect(normalizeInvoiceEvidence(raw).fields.lines![0]).toMatchObject({ quantity: "", unitPrice: "0" });
+    raw.lines[0].quantity = "0"; raw.lines[0].unitPrice = "100"; raw.lines[0].amount = "200";
+    expect(normalizeInvoiceEvidence(raw).fields.lines![0].quantity).toBe("");
+  });
+  it.each([
+    { quantity: "3", unitPrice: null, amount: "100" },
+    { quantity: null, unitPrice: "3", amount: "100" },
+  ])("leaves missing factors blank when exact supported precision is impossible: %o", change => {
+    const raw = fixture(); Object.assign(raw.lines[0], change);
+    const result = normalizeInvoiceEvidence(raw).fields.lines![0];
+    expect(result.quantity === "" || result.unitPrice === "").toBe(true);
+  });
+  it("does not derive a net amount from an unclear tax basis", () => {
+    const raw = fixture({ taxInclusive: null, vatRate: null }); Object.assign(raw.lines[0], { unitPrice: null, taxAmount: null, taxRate: null });
+    expect(normalizeInvoiceEvidence(raw).fields.lines![0]).toEqual({ description: "Material", quantity: "2", unitPrice: "" });
+  });
+  it("does not apply a positive header discount twice when a partial row amount already includes it", () => {
+    const raw = fixture({ discount: "10", subtotal: "200", vatAmount: "9.50", total: "199.50" });
+    Object.assign(raw.lines[0], { unitPrice: null, amount: "190", taxAmount: "9.50" });
+    const result = normalizeInvoiceEvidence(raw);
+    expect(result.fields.lines![0]).toEqual({ description: "Material", quantity: "2", unitPrice: "" });
+    expect(result.fields.discount).toBe("10"); expect(result.warnings.join(" ")).toContain("discount basis is unclear");
+    raw.lines[0].unitPrice = "100";
+    expect(normalizeInvoiceEvidence(raw).fields.lines![0]).toEqual({ description: "Material", quantity: "2", unitPrice: "100" });
+  });
+  it("can derive a missing factor when all printed rows prove the net pre-discount subtotal and final totals", () => {
+    const raw = fixture({ discount: "10", subtotal: "200", vatAmount: "9.50", total: "199.50" });
+    Object.assign(raw.lines[0], { unitPrice: null, amount: "200", taxAmount: "10" });
+    expect(normalizeInvoiceEvidence(raw).fields.lines![0]).toEqual({ description: "Material", quantity: "2", unitPrice: "100" });
+    raw.subtotal = null;
+    expect(normalizeInvoiceEvidence(raw).fields.lines![0].unitPrice).toBe("");
+  });
+  it("compares inclusive gross row amounts as net values before proving a positive discount basis", () => {
+    const raw = fixture({ taxInclusive: true, discount: "10", subtotal: "200", vatAmount: "9.50", total: "199.50" });
+    Object.assign(raw.lines[0], { unitPrice: "105", amount: "210", taxAmount: "10" });
+    expect(normalizeInvoiceEvidence(raw).fields.lines![0]).toEqual({ description: "Material", quantity: "2", unitPrice: "100" });
+    raw.subtotal = "210";
+    expect(normalizeInvoiceEvidence(raw).fields.lines![0]).toEqual({ description: "Material", quantity: "2", unitPrice: "" });
+  });
+  it("holds an inclusive derived price when row tax and amount reflect an already applied header discount", () => {
+    const raw = fixture({ taxInclusive: true, discount: "10", subtotal: "200", vatAmount: "9.50", total: "199.50" });
+    Object.assign(raw.lines[0], { unitPrice: null, amount: "199.50", taxAmount: "9.50" });
+    expect(normalizeInvoiceEvidence(raw).fields.lines![0]).toEqual({ description: "Material", quantity: "2", unitPrice: "" });
+  });
+  it("normalizes unambiguous thousands grouping and harmless trailing zero precision", () => {
+    const raw = fixture(); Object.assign(raw.lines[0], { quantity: "2.0000", unitPrice: "1,000.0000", amount: "2,000.00", taxAmount: "100.00" });
+    const result = normalizeInvoiceEvidence(raw);
+    expect(result.fields.lines![0]).toEqual({ description: "Material", quantity: "2.000", unitPrice: "1000.00" });
+    raw.lines[0].unitPrice = "1,00.00";
+    expect(normalizeInvoiceEvidence(raw).fields.lines![0].unitPrice).toBe("");
+  });
+  it.each(["DHS", "dh", "Dhs.", "Dirham", "DIRHAMS", "AED", "UAE Dirham"])("recognizes printed UAE currency alias %s without changing monetary facts", alias => {
+    expect(normalizeInvoiceEvidence(fixture({ currency: alias })).evidence.currency).toBe("AED");
+  });
+  it.each(["USD", "EUR", "DOLLAR", "UNKNOWN"])("does not guess a different currency from %s", value => {
+    expect(normalizeInvoiceEvidence(fixture({ currency: value })).evidence.currency).toBe(value);
+  });
+  it("can copy a common rate actually printed on every item without deriving one from totals", () => {
+    const result = normalizeInvoiceEvidence(fixture({ vatRate: null }));
+    expect(result.fields.vatRate).toBe("5"); expect(result.evidence.vatRate).toBeNull();
+    const raw = fixture({ vatRate: null }); raw.lines.push({ ...raw.lines[0], taxRate: null });
+    expect(normalizeInvoiceEvidence(raw).fields.vatRate).toBeUndefined();
+  });
+  it("converts explicit inclusive front/back unit prices to exact net values", () => {
+    const raw = fixture({ taxInclusive: true, subtotal: "70.00", vatAmount: "3.50", total: "73.50" });
+    raw.lines = [{ description: "Front item", quantity: "2", unitPrice: "31.50", amount: "63.00", taxAmount: "3.00", taxRate: "5" },
+      { description: "Back item", quantity: "1", unitPrice: "10.50", amount: "10.50", taxAmount: "0.50", taxRate: "5" }];
+    const result = normalizeInvoiceEvidence(raw);
+    expect(result.fields.lines).toEqual([{ description: "Front item", quantity: "2", unitPrice: "30" }, { description: "Back item", quantity: "1", unitPrice: "10" }]);
+    expect(result.fields.vatRate).toBe("5"); expect(result.evidence.total).toBe("73.50"); expect(result.requiresHumanReview).toBe(false);
+  });
+  it.each(["quantity", "unitPrice"] as const)("recovers missing inclusive %s only through exact printed gross and tax math", missing => {
+    const raw = fixture({ taxInclusive: true }); Object.assign(raw.lines[0], { unitPrice: "105", amount: "210", [missing]: null });
+    expect(normalizeInvoiceEvidence(raw).fields.lines![0]).toEqual({ description: "Material", quantity: "2", unitPrice: "100" });
+  });
+  it("does not convert a known-quantity inclusive price when printed VAT conflicts", () => {
+    const raw = fixture({ taxInclusive: true }); Object.assign(raw.lines[0], { unitPrice: "105", amount: "210", taxAmount: "9" });
+    expect(normalizeInvoiceEvidence(raw).fields.lines![0]).toEqual({ description: "Material", quantity: "2", unitPrice: "" });
+  });
+  it("warns about a conflicting gross line amount without changing independent printed quantity and price", () => {
+    const raw = fixture({ taxInclusive: true }); Object.assign(raw.lines[0], { unitPrice: "105", amount: "220", taxAmount: "10" });
+    const result = normalizeInvoiceEvidence(raw);
+    expect(result.fields.lines![0]).toEqual({ description: "Material", quantity: "2", unitPrice: "100" });
+    expect(result.warnings.join(" ")).toContain("gross unit price do not match");
+  });
+  it.each([{ taxAmount: "-5" }, { taxRate: "150%" }])("does not ignore unsupported printed tax while deriving a net price: %o", change => {
+    const raw = fixture({ taxInclusive: true }); Object.assign(raw.lines[0], { unitPrice: "105", amount: "210", ...change });
+    expect(normalizeInvoiceEvidence(raw).fields.lines![0]).toEqual({ description: "Material", quantity: "2", unitPrice: "" });
+  });
+  it("does not fall back to a rounded per-unit conversion when the verified net line cannot divide exactly", () => {
+    const raw = fixture({ taxInclusive: true, subtotal: "28.60", vatAmount: "1.43", total: "30.03" });
+    Object.assign(raw.lines[0], { quantity: "3", unitPrice: "10.01", amount: "30.03", taxAmount: "1.43" });
+    expect(normalizeInvoiceEvidence(raw).fields.lines![0]).toEqual({ description: "Material", quantity: "3", unitPrice: "" });
+  });
+  it("keeps a readable inclusive description and quantity when tax evidence is missing", () => {
+    const raw = fixture({ taxInclusive: true, vatRate: null }); Object.assign(raw.lines[0], { unitPrice: "105", amount: "210", taxAmount: null, taxRate: null });
+    expect(normalizeInvoiceEvidence(raw).fields.lines![0]).toEqual({ description: "Material", quantity: "2", unitPrice: "" });
+  });
+  it("can convert printed inclusive unit prices without inventing an unreadable quantity", () => {
+    const raw = fixture({ taxInclusive: true }); Object.assign(raw.lines[0], { quantity: null, unitPrice: "105", amount: null, taxAmount: null });
+    expect(normalizeInvoiceEvidence(raw).fields.lines![0]).toEqual({ description: "Material", quantity: "", unitPrice: "100.00" });
   });
   it.each([{ invoiceCount: 2 }, { documentType: "credit_note" as const }])("refuses multiple invoices and credit notes", change => {
     expect(() => normalizeInvoiceEvidence(fixture(change))).toThrow();
@@ -123,6 +254,8 @@ describe("server-only bounded OpenAI extraction", () => {
     expect(body.instructions).toContain("carried forward or brought forward amounts");
     expect(body.instructions).toContain("Do not collapse distinct printed rows");
     expect(body.instructions).toContain("genuinely different invoice numbers");
+    expect(body.instructions).toContain("Copy the unit price AS PRINTED");
+    expect(body.instructions).toContain("use null only for its unreadable cells");
     expect(result.fields.lines).toHaveLength(2); expect(result.evidence.total).toBe("262.50");
   });
   it("does not contact a provider when disabled or misconfigured", async () => {

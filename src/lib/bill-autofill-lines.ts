@@ -4,7 +4,7 @@ export type AutofillLineOrigin = { key: number; fields: AutofillLineFields };
 type Line = AutofillLineFields & { key: number; booksDraft?: unknown; booksSelection?: unknown };
 
 const description = (line: AutofillLineFields) => line.description.trim().replace(/\s+/g, " ").toLocaleLowerCase();
-const number = (value: string) => Number.isFinite(Number(value)) ? String(Number(value)) : value.trim();
+const number = (value: string) => value.trim() && Number.isFinite(Number(value)) ? String(Number(value)) : value.trim();
 const identity = (line: AutofillLineFields) => JSON.stringify([description(line), number(line.quantity), number(line.unitPrice)]);
 const fields = (line: AutofillLineFields): AutofillLineFields => ({ description: line.description, quantity: line.quantity, unitPrice: line.unitPrice });
 function groups<T>(rows: T[], key: (row: T) => string) {
@@ -17,12 +17,35 @@ function groups<T>(rows: T[], key: (row: T) => string) {
 export function mergeAutofillLines<T extends Line>(current: T[], origins: AutofillLineOrigin[], incoming: AutofillLineFields[] | undefined,
   edits: ReadonlyMap<number, ReadonlySet<AutofillLineEdit>>, create: (value: AutofillLineFields, key: number) => T) {
   const unchanged = (review = false) => ({ lines: current, origins, kept: review, review });
-  if (!incoming?.length || incoming.length > 100 || incoming.some(line => !line || !description(line) ||
-    !Number.isFinite(Number(line.quantity)) || Number(line.quantity) <= 0 || !line.unitPrice.trim() ||
-    !Number.isFinite(Number(line.unitPrice)) || Number(line.unitPrice) < 0)) return unchanged(origins.length > 0 || edits.size > 0);
+  if (!incoming?.length || incoming.length > 100 || incoming.some(line => !line ||
+    typeof line.description !== "string" || typeof line.quantity !== "string" || typeof line.unitPrice !== "string")) return unchanged(origins.length > 0 || edits.size > 0);
+  // A readable description/amount must not disappear because another cell is
+  // unknown. Empty cells stay empty until the user supplies valid bill values.
+  incoming = incoming.map(line => ({ description: line.description,
+    quantity: line.quantity.trim() && Number.isFinite(Number(line.quantity)) && Number(line.quantity) > 0 ? line.quantity : "",
+    unitPrice: line.unitPrice.trim() && Number.isFinite(Number(line.unitPrice)) && Number(line.unitPrice) >= 0 ? line.unitPrice : "" }));
   const hasHumanLine = current.some(line => edits.has(line.key) || line.booksDraft || line.booksSelection || line.description.trim() || line.unitPrice.trim());
   if (!origins.length) {
-    if (hasHumanLine) return unchanged(true);
+    if (hasHumanLine) {
+      const byDescription = groups(incoming.map((line, index) => ({ line, index })), value => description(value.line));
+      const currentDescriptions = groups(current, description), matches = new Map<number, T>(), used = new Set<number>();
+      for (const existing of current) {
+        const candidates = byDescription.get(description(existing)) ?? [];
+        const index = current.length === 1 && !description(existing) ? 0
+          : description(existing) && candidates.length === 1 && currentDescriptions.get(description(existing))?.length === 1 ? candidates[0].index : -1;
+        if (index < 0 || used.has(index)) return unchanged(true);
+        matches.set(index, existing); used.add(index);
+      }
+      let nextKey = Math.max(-1, ...current.map(line => line.key)) + 1;
+      const next = incoming.map((line, index) => {
+        const existing = matches.get(index);
+        if (!existing) return create(fields(line), nextKey++);
+        const value = { ...existing };
+        for (const field of ["description", "quantity", "unitPrice"] as const) if (!edits.get(existing.key)?.has(field)) value[field] = line[field];
+        return value;
+      });
+      return { lines: next, origins: incoming.map((line, index) => ({ key: next[index].key, fields: fields(line) })), kept: true, review: false };
+    }
     const next = incoming.map((line, key) => create(fields(line), key));
     return { lines: next, origins: next.map(line => ({ key: line.key, fields: fields(line) })), kept: false, review: false };
   }

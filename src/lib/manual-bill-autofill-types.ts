@@ -22,7 +22,7 @@ export type InvoiceAutofillResponse = {
     vendorCandidates: InvoiceAutofillVendor[];
     evidence: InvoiceAutofillExtraction["evidence"];
     warnings: string[];
-    requiresHumanReview: true;
+    requiresHumanReview: false;
   };
 };
 export type InvoiceAutofillCapability = { enabled: boolean; configured: boolean; message: string };

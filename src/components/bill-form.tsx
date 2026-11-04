@@ -163,6 +163,7 @@ function BillForm({
   const [confirmed, setConfirmed] = useState(false);
   const [vendorId, setVendorId] = useState(initial?.vendorId ?? "");
   const [chosenVendor, setChosenVendor] = useState<Vendor | null>(null);
+  const [vendorQuerySeed, setVendorQuerySeed] = useState<{ companyId: string; value: string } | null>(null);
   const [vendorLookupRevision, setVendorLookupRevision] = useState(0);
   const [vendorPending, setVendorPending] = useState<{ companyId: string; pending: boolean } | null>(null);
   const [jobId, setJobId] = useState(initial?.jobId ?? initialJob?.id ?? "");
@@ -213,10 +214,8 @@ function BillForm({
   const [savedForSync, setSavedForSync] = useState(false);
   const existingDocuments = bill?.documents ?? bill?.attachments ?? [];
   const uncertainUpload = files.some(file => file.status === "uncertain");
-  const [autofillReviewRequired, setAutofillReviewRequired] = useState(false);
-  const [autofillReviewed, setAutofillReviewed] = useState(false);
   const humanEdited = useRef(new Set<string>()), autoOwned = useRef(new Set<string>());
-  const markEdited = useCallback((field: string) => { humanEdited.current.add(field); setAutofillReviewed(false); }, []);
+  const markEdited = useCallback((field: string) => { humanEdited.current.add(field); }, []);
   const lineOrigins = useRef<AutofillLineOrigin[]>([]);
   const lineEdits = useRef(new Map<number, Set<AutofillLineEdit>>());
   const [lineReadingReview, setLineReadingReview] = useState(false);
@@ -244,7 +243,7 @@ function BillForm({
       : [{ tax_id: Number(vatRate) > 0 ? "configured-vat" : null }]);
   const handleVendorChange = useCallback((vendor: Vendor | null, source: "selection" | "hydration" | "clear") => {
     if (vendor && vendor.companyId !== companyId) return;
-    if (source !== "hydration") markEdited("vendor");
+    if (source !== "hydration") { markEdited("vendor"); setVendorQuerySeed(null); }
     setVendorId(vendor?.id ?? "");
     setChosenVendor(vendor);
     if (source === "selection" && vendor && !jobId) setCurrency(vendor.currency);
@@ -291,20 +290,22 @@ function BillForm({
     setLineReadingReview(merged.review); kept ||= merged.kept;
     if (!humanEdited.current.has("vendor")) {
       const nextVendor = result.preview.vendor?.id === fields.vendorId ? fields.vendorId : undefined;
-      if (nextVendor || autoOwned.current.has("vendor")) {
+      const query = nextVendor ? "" : result.preview.evidence.vendorName?.trim().slice(0, 100) ?? "";
+      const previousQuery = vendorQuerySeed?.companyId === companyId ? vendorQuerySeed.value : "";
+      if (nextVendor || query || autoOwned.current.has("vendor")) {
         setVendorId(nextVendor ?? "");
-        if (nextVendor !== vendorId) { setChosenVendor(null); setVendorLookupRevision(value => value + 1); }
+        setVendorQuerySeed(query ? { companyId, value: query } : null);
+        if (nextVendor !== vendorId || query !== previousQuery) { setChosenVendor(null); setVendorLookupRevision(value => value + 1); }
         autoOwned.current.add("vendor");
       }
     } else kept = true;
-    setAutofillReviewRequired(true); setAutofillReviewed(false);
     return { kept };
   }
   const autofill = useManualBillAutofill({ eligible: attachmentFirst && !savedId && !busy && user.role !== "MANAGEMENT",
     companyId, jobId: selectedJob?.id ?? "", currency: selectedJob?.currency ?? currency,
     // Only validated AI originals are committed to this subset. Hashing a manual
     // file or duplicate must not cancel, invalidate or restart an active read.
-    files: aiFiles, checking: false, apply: applyAutofill, invalidate: () => setAutofillReviewed(false) });
+    files: aiFiles, checking: false, apply: applyAutofill });
   const printedJob = autofill.preview?.evidence.jobNumber;
   const printedJobMismatch = printedJob && selectedJob && printedJob.toUpperCase().replace(/^JOB[- ]?/, "") !== selectedJob.jobNumber.toUpperCase().replace(/^JOB[- ]?/, "");
   function captureHumanEdit(event: React.FormEvent<HTMLFormElement>) {
@@ -467,9 +468,6 @@ function BillForm({
     setError("");
     if (submit && autofill.waiting) {
       setError("Wait for invoice reading to finish before saving."); return;
-    }
-    if (submit && autofillReviewRequired && !autofillReviewed) {
-      setError("Compare the current originals with all bill values, then confirm your review before final save."); return;
     }
     if (submit && vendorTaxConflict) {
       setError(BOOKS_VENDOR_VAT_REVIEW_MESSAGE);
@@ -731,6 +729,7 @@ function BillForm({
                   setCompanyId(value);
                   setVendorId("");
                   setChosenVendor(null);
+                  setVendorQuerySeed(null);
                   setVendorPending(null);
                   setJobId("");
                   clearBooksLines(false);
@@ -761,6 +760,7 @@ function BillForm({
                         id="bill-vendor"
                         companyId={companyId}
                         value={vendorId}
+                        initialQuery={vendorQuerySeed?.companyId === companyId ? vendorQuerySeed.value : ""}
                         onChange={handleVendorChange}
                         onPendingChange={handleVendorPending}
                         disabled={busy}
@@ -1016,7 +1016,7 @@ function BillForm({
               </div>}
               {lineReadingReview && <p role="status" aria-label="Invoice line review">Some lines could not be matched safely. Your entries were kept; compare all invoice pages.</p>}
               {!!autofill.preview?.warnings.length && <details aria-label="Invoice reading notes">
-                <summary>Invoice notes to review</summary>
+                <summary>Invoice notes</summary>
                 <ul>{autofill.preview.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>
               </details>}
               <Table>
@@ -1334,10 +1334,6 @@ function BillForm({
                 and totals. These values are verified.
               </label>
             )}
-            {attachmentFirst && autofillReviewRequired && <label className="ocr-confirmation">
-              <input id="autofill-reviewed" type="checkbox" checked={autofillReviewed} onChange={event => setAutofillReviewed(event.target.checked)} />
-              I compared the current original files with the supplier, dates, line items, VAT and totals. The bill is ready for final save.
-            </label>}
           </fieldset>
           <footer className="books-form-footer">
             <div className="books-footer-actions">

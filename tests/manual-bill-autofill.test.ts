@@ -25,7 +25,7 @@ function extraction(): InvoiceAutofillExtraction {
   return { fields: { invoiceNumber: "DEMO-001", invoiceDate: "2026-11-04", dueDate: "2026-12-04", discount: "0.00", vatRate: "5.00",
     lines: [{ description: "Fictional invoice item", quantity: "2", unitPrice: "10.00" }] },
   evidence: { vendorName: vendor.name, vendorTrn: vendor.trn, currency: "AED", jobNumber: "5383", subtotal: "20.00", discount: "0.00", vatAmount: "1.00", vatRate: "5.00", total: "21.00" },
-  warnings: [], requiresHumanReview: true };
+  warnings: [], requiresHumanReview: false };
 }
 async function pdf(pages = 1, name = "fictional.pdf") {
   const document = await PDFDocument.create();
@@ -57,7 +57,7 @@ describe("transient manual invoice preview", () => {
     const selected = { ...actor, role }, request = await input();
     const result = await previewManualBillAutofill(selected, request);
     expect(result).toMatchObject({ requestId: request.requestId, source: { companyId: job.companyId, jobId: job.id, currency: "AED" },
-      preview: { fields: { invoiceNumber: "DEMO-001", vendorId: vendor.id, currency: "AED" }, vendor: { id: vendor.id, match: "TRN" }, requiresHumanReview: true } });
+      preview: { fields: { invoiceNumber: "DEMO-001", vendorId: vendor.id, currency: "AED" }, vendor: { id: vendor.id, match: "TRN" }, requiresHumanReview: false } });
     expect(result.source.files).toEqual([{ index: 0, sha256: createHash("sha256").update(Buffer.from(await request.files[0].arrayBuffer())).digest("hex"),
       byteSize: request.files[0].size, mimeType: "application/pdf" }]);
     expect(result.source.fingerprint).toMatch(/^[a-f0-9]{64}$/);
@@ -71,6 +71,22 @@ describe("transient manual invoice preview", () => {
     expect(await manualBillAutofillCapability(actor, { companyId: job.companyId, jobId: job.id })).toEqual(available);
     expect(model.extractInvoice).not.toHaveBeenCalled(); expect(reserve).not.toHaveBeenCalled();
     expect(store.user.findFirst).toHaveBeenCalledTimes(2);
+  });
+  it("returns readable and incomplete item cells together without a mandatory review step", async () => {
+    const evidence = extraction();
+    evidence.fields.lines = [
+      { description: "Clear first item", quantity: "2", unitPrice: "10.00" },
+      { description: "Readable second item", quantity: "", unitPrice: "" },
+      { description: "", quantity: "3", unitPrice: "4.00" },
+    ];
+    evidence.warnings = ["The printed total differs from the item total."];
+    model.extractInvoice.mockResolvedValue(evidence);
+    const result = await previewManualBillAutofill(actor, await input());
+    expect(result.preview.fields.lines).toEqual(evidence.fields.lines);
+    expect(result.preview.requiresHumanReview).toBe(false);
+    expect(result.preview.warnings).toContain(evidence.warnings[0]);
+    expect(store.document.create).not.toHaveBeenCalled();
+    expect(store.$transaction).not.toHaveBeenCalled();
   });
   it.each(["MANAGEMENT", "USER"])("refuses a non-entry role %s before provider/counter use", async role => {
     await expect(previewManualBillAutofill({ ...actor, role } as Actor, await input())).rejects.toMatchObject({ status: 403 });
@@ -225,6 +241,6 @@ describe("manual autofill HTTP boundary", () => {
   it("returns the reviewed transient envelope to a permitted same-origin request", async () => {
     const response = await POST(multipart([await pdf()]));
     expect(response.status).toBe(200); expect(requireUser).toHaveBeenCalledWith(["ADMIN", "ACCOUNTS", "DATA_ENTRY"]);
-    expect(await response.json()).toMatchObject({ requestId: "fixture-request", source: { companyId: job.companyId, jobId: job.id }, preview: { requiresHumanReview: true } });
+    expect(await response.json()).toMatchObject({ requestId: "fixture-request", source: { companyId: job.companyId, jobId: job.id }, preview: { requiresHumanReview: false } });
   });
 });

@@ -9,6 +9,7 @@ type Props = {
   id: string;
   companyId: string;
   value: string;
+  initialQuery?: string;
   disabled?: boolean;
   onChange: (vendor: Vendor | null, source: "selection" | "hydration" | "clear") => void;
   onPendingChange: (pending: boolean) => void;
@@ -26,8 +27,8 @@ function mergePages(previous: VendorSuggestion[], next: VendorSuggestion[]) {
 
 // The parent keys this field by company so changing company also discards its text,
 // results and requests, without resetting any other bill fields.
-export function VendorAutocomplete({ id, companyId, value, disabled, onChange, onPendingChange }: Props) {
-  const [text, setText] = useState("");
+export function VendorAutocomplete({ id, companyId, value, initialQuery = "", disabled, onChange, onPendingChange }: Props) {
+  const [text, setText] = useState(initialQuery.slice(0, 100));
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
   const [selected, setSelected] = useState<(Vendor & { booksMappingRequired?: boolean }) | null>(null);

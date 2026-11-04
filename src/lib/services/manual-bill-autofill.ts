@@ -188,6 +188,6 @@ export async function previewManualBillAutofill(actor: Actor, input: Input): Pro
     const publicFiles = files.map(({ index, sha256, byteSize, mimeType }) => ({ index, sha256, byteSize, mimeType }));
     return { requestId: scope.requestId, source: { companyId: scope.companyId, jobId: scope.jobId, currency: job.currency,
       fingerprint: sha(JSON.stringify({ companyId: scope.companyId, jobId: scope.jobId, currency: job.currency, files: publicFiles })), files: publicFiles },
-      preview: { fields, vendor, vendorCandidates, evidence: extraction.evidence, warnings: [...new Set(warnings)], requiresHumanReview: true } };
+      preview: { fields, vendor, vendorCandidates, evidence: extraction.evidence, warnings: [...new Set(warnings)], requiresHumanReview: false } };
   } finally { inflightActors.delete(actor.id); inflight--; }
 }

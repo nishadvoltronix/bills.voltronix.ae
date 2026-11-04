@@ -15,7 +15,7 @@ function matchesSource(value: InvoiceAutofillResponse, requestId: string, compan
   if (value?.requestId !== requestId || source?.companyId !== companyId || source.jobId !== jobId || source.currency !== currency ||
     !/^[a-f0-9]{64}$/.test(source.fingerprint ?? "") || !Array.isArray(source.files) || source.files.length !== files.length ||
     !source.files.every((file, index) => file.index === index && file.sha256 === files[index].id && file.byteSize === files[index].file.size && file.mimeType === files[index].file.type) ||
-    preview?.requiresHumanReview !== true || !preview.fields || typeof preview.fields !== "object" ||
+    preview?.requiresHumanReview !== false || !preview.fields || typeof preview.fields !== "object" ||
     !preview.evidence || !Array.isArray(preview.warnings) || !preview.warnings.every(warning => typeof warning === "string")) return false;
   const fields = preview.fields;
   if (Object.keys(fields).some(key => !["invoiceNumber", "invoiceDate", "dueDate", "orderNumber", "description", "discount", "vatRate", "lines", "vendorId", "currency"].includes(key)) ||
@@ -26,14 +26,14 @@ function matchesSource(value: InvoiceAutofillResponse, requestId: string, compan
   return true;
 }
 
-export function useManualBillAutofill({ eligible, companyId, jobId, currency, files, checking, apply, invalidate }: {
+export function useManualBillAutofill({ eligible, companyId, jobId, currency, files, checking, apply }: {
   eligible: boolean; companyId: string; jobId: string; currency: string; files: InvoiceFileSelection[]; checking: boolean;
-  apply: (result: InvoiceAutofillResponse) => Applied; invalidate: () => void;
+  apply: (result: InvoiceAutofillResponse) => Applied;
 }) {
   const scoped = !!companyId && !!jobId;
   const capability = useApi<InvoiceAutofillCapability>(eligible && scoped ? `/api/bills/autofill?${new URLSearchParams({ companyId, jobId })}` : null);
-  const callbacks = useRef({ apply, invalidate });
-  useLayoutEffect(() => { callbacks.current = { apply, invalidate }; }, [apply, invalidate]);
+  const callbacks = useRef({ apply });
+  useLayoutEffect(() => { callbacks.current = { apply }; }, [apply]);
   const [revision, setRevision] = useState(0), [pausedKey, setPausedKey] = useState<string | null>(null);
   const paused = useRef<string | null>(null), active = useRef(false), mounted = useRef(true);
   const [settled, setSettled] = useState(0);
@@ -46,7 +46,6 @@ export function useManualBillAutofill({ eligible, companyId, jobId, currency, fi
   useLayoutEffect(() => { latest.current = { key, revision, canRead }; }, [key, revision, canRead]);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
-    callbacks.current.invalidate();
     // A cancelled browser fetch does not release the server's provider lock.
     // Let the active read settle, then read only the newest complete file batch.
     if (!canRead || active.current || current && current.revision === revision && current.status !== "reading") return;
@@ -94,7 +93,7 @@ export function ManualBillAutofill({ reading, jobNumber }: { reading: ReturnType
   const jobMismatch = preview?.evidence.jobNumber && jobNumber && preview.evidence.jobNumber.toUpperCase().replace(/^JOB[- ]?/, "") !== jobNumber.toUpperCase().replace(/^JOB[- ]?/, "");
   const failed = reading.current?.status === "failed";
   const status = reading.queued ? "Waiting to read all selected pages…" : reading.waiting ? "Reading invoice…" : failed
-    ? reading.current?.message : preview ? `Details filled. Review before saving.${reading.current?.kept ? " Your edits were kept." : ""}${preview.warnings.length || jobMismatch ? " Some details need checking." : ""}`
+    ? reading.current?.message : preview ? `Details filled. You can edit them below.${reading.current?.kept ? " Your edits were kept." : ""}${preview.warnings.length || jobMismatch ? " Invoice notes are available below." : ""}`
     : !reading.scoped ? "Select a company and job to begin." : !reading.available && !reading.capability.loading
       ? "Unavailable. Enter the invoice details below." : "Add the invoice files to begin.";
   return <div className={styles.panel} aria-label="Invoice automatic reading">

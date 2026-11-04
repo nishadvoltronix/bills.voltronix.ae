@@ -103,10 +103,51 @@ describe("invoice reading row provenance", () => {
     expect(result.lines).toEqual(current); expect(result.review).toBe(true);
   });
 
-  it.each([undefined, [], [item("Invalid", "1", "")], [item("Invalid", "0", "10")], [item("Invalid", "NaN", "10")]])(
-    "does not clear human rows when financial lines are missing or invalid: %j", incoming => {
+  it.each([undefined, []])(
+    "does not clear human rows when financial lines are missing: %j", incoming => {
       const current = [row(item("Human", "2", "7"), 0)];
       const result = mergeAutofillLines(current, origins(current), incoming, noEdits, row);
       expect(result.lines).toEqual(current); expect(result.origins).toEqual(origins(current));
     });
+
+  it("fills independent complete and partial rows without inventing unreadable cells", () => {
+    const incoming = [item("Complete", "2", "10"), item("Description only", "", ""), item("Missing rate", "3", ""), item("", "4", "5")];
+    const result = mergeAutofillLines(blank, [], incoming, noEdits, row);
+    expect(result.lines.map(line => ({ description: line.description, quantity: line.quantity, unitPrice: line.unitPrice }))).toEqual(incoming);
+    expect(result.lines[1].quantity).toBe("");
+    expect(result.lines).toHaveLength(4);
+  });
+
+  it("keeps readable cells beside an invalid number rather than dropping its siblings", () => {
+    const result = mergeAutofillLines(blank, [], [item("Unreadable quantity", "NaN", "10"), item("Unreadable price", "2", "NaN"), item("Complete", "1", "5")], noEdits, row);
+    expect(result.lines).toEqual([row(item("Unreadable quantity", "", "10"), 0), row(item("Unreadable price", "2", ""), 1), row(item("Complete", "1", "5"), 2)]);
+  });
+
+  it("retains an empty item placeholder when its printed amount is available only in the invoice notes", () => {
+    const result = mergeAutofillLines(blank, [], [item("", "", ""), item("Readable next item", "1", "5")], noEdits, row);
+    expect(result.lines).toEqual([row(item("", "", ""), 0), row(item("Readable next item", "1", "5"), 1)]);
+  });
+
+  it("fills untouched cells of the initial row while preserving a typed amount and Books choice", () => {
+    const current = [{ ...blank[0], unitPrice: "7.50", booksSelection: { accountId: "human-account" } }];
+    const result = mergeAutofillLines(current, [], [item("Printed first", "2", "10"), item("Printed second", "", "20")],
+      new Map([[0, new Set<AutofillLineEdit>(["unitPrice", "books"])] ]), row);
+    expect(result.lines).toEqual([{ ...row(item("Printed first", "2", "7.50"), 0), booksSelection: { accountId: "human-account" } }, row(item("Printed second", "", "20"), 1)]);
+    expect(result.kept).toBe(true); expect(result.review).toBe(false);
+  });
+
+  it("uses a unique human description match to fill untouched cells and append remaining items", () => {
+    const current = [row(item("Printed first", "3", ""), 0)];
+    const result = mergeAutofillLines(current, [], [item("Printed first", "2", "10"), item("Printed second", "1", "20")],
+      new Map([[0, new Set<AutofillLineEdit>(["description", "quantity"])] ]), row);
+    expect(result.lines).toEqual([row(item("Printed first", "3", "10"), 0), row(item("Printed second", "1", "20"), 1)]);
+  });
+
+  it("completes an unreadable cell on a later reading without overwriting the human correction", () => {
+    const first = mergeAutofillLines(blank, [], [item("Partial", "", "10")], noEdits, row);
+    const current = [{ ...first.lines[0], unitPrice: "11" }];
+    const result = mergeAutofillLines(current, first.origins, [item("Partial", "2", "10"), item("Back", "1", "5")],
+      new Map([[0, new Set<AutofillLineEdit>(["unitPrice"])] ]), row);
+    expect(result.lines).toEqual([row(item("Partial", "2", "11"), 0), row(item("Back", "1", "5"), 1)]);
+  });
 });
