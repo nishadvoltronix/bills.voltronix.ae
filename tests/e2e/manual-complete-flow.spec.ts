@@ -207,6 +207,12 @@ for (const company of companies) {
       expect(submits).toBe(0);
       expect(bill).toMatchObject({ status: "DRAFT", version: 1, paidAmount: "0.00", documents: [], payments: [] });
       releaseAttachment();
+      await expect(page.getByRole("heading", { name: "New Bill", exact: true })).toBeVisible();
+      await expect(page.getByLabel("Bill#")).toHaveValue("");
+      await expect(page.getByRole("combobox", { name: "Company", exact: true })).toHaveValue(company.id);
+      await expect(page.getByLabel(/^Job \/ project/)).toHaveValue(job.id);
+      await expect(page.getByRole("link", { name: "View saved bill", exact: true })).toHaveAttribute("href", `/bills/${bill.id}?saved=1`);
+      await page.getByRole("link", { name: "View saved bill", exact: true }).click();
       await expect(page).toHaveURL(new RegExp(`/bills/${bill.id}\\?saved=1$`));
       await expect(page.getByRole("heading", { name: invoiceNumber, exact: true })).toBeVisible();
       await expect(page.getByText("Ready to sync", { exact: true })).toBeVisible();

@@ -1,9 +1,10 @@
 "use client";
 import Link from "next/link";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   CheckCircle2,
+  ArrowLeft,
   Paperclip,
   LoaderCircle,
   Plus,
@@ -61,6 +62,7 @@ type OcrReviewContext = {
     currency?: string;
   };
 };
+type SavedJobBill = { id: string; invoiceNumber: string; isDraft: boolean };
 function booksSetupSteps(
   connection: NonNullable<BooksConnection["organizations"]>[number],
 ) {
@@ -101,6 +103,9 @@ export function BillEditor({
   draft?: Partial<Bill>;
   review?: OcrReviewContext;
 }) {
+  const [continuation, setContinuation] = useState<{
+    context: string; revision: number; receipt: SavedJobBill; today: string;
+  } | null>(null);
   const state = useApi<{ bill: Bill }>(id ? `/api/bills/${id}` : null);
   const requestedJobId = !id && !review && !draft ? initialJobId : undefined;
   const jobState = useApi<{ job: Job }>(requestedJobId
@@ -110,15 +115,26 @@ export function BillEditor({
     return <ErrorState message={state.error} retry={state.reload} />;
   if (requestedJobId && jobState.loading) return <LoadingPanel />;
   if (requestedJobId && (jobState.error || jobState.data?.job?.id !== requestedJobId || !jobState.data?.job?.companyId))
-    return <ErrorState message={jobState.error ?? "The selected job could not be verified. Search for the job again."} retry={jobState.reload} />;
+    return <>
+      <ErrorState message={jobState.error ?? "The selected job could not be verified. Search for the job again."} retry={jobState.reload} />
+      <Button asChild variant="secondary"><Link href="/bills/manual">Back to job search</Link></Button>
+    </>;
+  const context = requestedJobId && jobState.data?.job
+    ? `${requestedJobId}:${jobState.data.job.companyId}` : null;
+  const completed = continuation?.context === context ? continuation : null;
   return (
     <BillForm
-      key={id ?? review?.documentId ?? requestedJobId ?? "new"}
+      key={`${id ?? review?.documentId ?? requestedJobId ?? "new"}:${completed?.revision ?? 0}`}
       bill={state.data?.bill}
       draft={draft}
       review={review}
-      today={today}
+      today={completed?.today ?? today}
       initialJob={requestedJobId ? jobState.data?.job : undefined}
+      previousSave={completed?.receipt}
+      onSaved={context ? receipt => setContinuation(current => ({
+        context, receipt, revision: current?.context === context ? current.revision + 1 : 1,
+        today: new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Dubai", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()),
+      })) : undefined}
     />
   );
 }
@@ -128,17 +144,29 @@ function BillForm({
   review,
   today,
   initialJob,
+  previousSave,
+  onSaved,
 }: {
   bill?: Bill;
   draft?: Partial<Bill>;
   review?: OcrReviewContext;
   today?: string;
   initialJob?: Job;
+  previousSave?: SavedJobBill;
+  onSaved?: (receipt: SavedJobBill) => void;
 }) {
   const router = useRouter();
   const user = useUser();
   const manualEntryOnly = useManualEntryOnly();
   const saveLabel = manualEntryOnly ? "Save bill" : "Save and sync";
+  const repeatJobEntry = !!initialJob && !!onSaved;
+  const saveInFlight = useRef(false);
+  const receiptNotice = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!previousSave) return;
+    receiptNotice.current?.focus({ preventScroll: true });
+    window.scrollTo({ top: 0, behavior: "auto" });
+  }, [previousSave]);
   const jobs = useApi<{ jobs: Job[] }>("/api/jobs");
   const integrations = useApi<{ zoho: BooksConnection }>(manualEntryOnly ? null : "/api/integrations");
   const initial = bill ?? draft;
@@ -308,12 +336,17 @@ function BillForm({
       body: JSON.stringify({ action: "submit", version: expectedVersion }),
     });
   }
-  function openSavedBill(id: string) {
+  function openSavedBill(id: string, isDraft: boolean) {
+    if (repeatJobEntry && onSaved) {
+      onSaved({ id, invoiceNumber, isDraft });
+      return;
+    }
     router.push(`/bills/${id}?saved=1`);
     router.refresh();
   }
   async function save(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (busy || saveInFlight.current || savedId) return;
     const submitter = (event.nativeEvent as SubmitEvent)
       .submitter as HTMLButtonElement | null;
     const submit = submitter?.value !== "draft";
@@ -324,6 +357,10 @@ function BillForm({
     }
     if (!companyId) {
       setError("Select a company before saving.");
+      return;
+    }
+    if (repeatJobEntry && (companyId !== initialJob?.companyId || jobId !== initialJob.id)) {
+      setError("The selected job changed. Return to job search before adding a bill.");
       return;
     }
     if (vendorResolving) {
@@ -362,6 +399,7 @@ function BillForm({
       setError("Bill, vendor and job currencies must match. Currency conversion is not configured.");
       return;
     }
+    saveInFlight.current = true;
     setBusy(true);
     try {
       const payload = {
@@ -437,14 +475,17 @@ function BillForm({
           return;
         }
       }
-      openSavedBill(result.bill.id);
+      openSavedBill(result.bill.id, !submit);
     } catch (e) {
       setError(errorMessage(e));
       setBusy(false);
+    } finally {
+      saveInFlight.current = false;
     }
   }
   async function resumeSavedBill() {
-    if (!savedId || savedVersion === null) return;
+    if (!savedId || savedVersion === null || busy || saveInFlight.current) return;
+    saveInFlight.current = true;
     setBusy(true);
     setError("");
     let nextStep = recovery;
@@ -460,11 +501,13 @@ function BillForm({
         setRecovery(nextStep);
       }
       if (savedForSync) await finalize(savedId, expectedVersion);
-      openSavedBill(savedId);
+      openSavedBill(savedId, !savedForSync);
     } catch (e) {
       setRecovery(nextStep ?? "finalize");
       setError(`Your bill remains saved. ${errorMessage(e)}`);
       setBusy(false);
+    } finally {
+      saveInFlight.current = false;
     }
   }
   if (user.role === "MANAGEMENT")
@@ -483,7 +526,7 @@ function BillForm({
       </Notice>
     );
   return (
-    <section className="books-bill-page">
+    <section className={`books-bill-page${repeatJobEntry ? " books-job-entry" : ""}`}>
       <header className="books-bill-header">
         <div>
           <ReceiptText size={25} strokeWidth={1.6} />
@@ -497,14 +540,28 @@ function BillForm({
                   : "New Bill"}
           </h1>
         </div>
-        <Link
+        {repeatJobEntry ? <Button type="button" variant="secondary" size="sm" disabled={busy}
+          onClick={() => router.push("/bills/manual")}>
+          <ArrowLeft size={15} />Back to job search
+        </Button> : <Link
           href={bill ? `/bills/${bill.id}` : "/bills"}
           className="icon-button"
           aria-label="Close bill form"
         >
           <X size={21} />
-        </Link>
+        </Link>}
       </header>
+      {previousSave && initialJob && <div className="books-form-notice" ref={receiptNotice}
+        tabIndex={-1} role="group" aria-label="Saved bill confirmation">
+        <Notice tone="success">
+          <strong>{previousSave.isDraft ? "Draft" : "Bill"} {previousSave.invoiceNumber} saved.</strong>
+          <p>Enter another bill for {initialJob.jobNumber}. The form is ready for a new invoice.</p>
+          <div className="button-row">
+            <Link className="text-link" href={`/bills/${encodeURIComponent(previousSave.id)}?saved=1`}>View saved bill</Link>
+            <Link className="text-link" href={`/jobs/${encodeURIComponent(initialJob.id)}`}>View job history</Link>
+          </div>
+        </Notice>
+      </div>}
       {error && (
         <div className="books-form-notice">
           <Notice tone="error">{error}</Notice>
@@ -545,7 +602,7 @@ function BillForm({
               <CompanySelect
                 id="bill-company"
                 value={companyId}
-                disabled={!!bill || !!review}
+                disabled={!!bill || !!review || repeatJobEntry}
                 onChange={(value) => {
                   setCompanyId(value);
                   setVendorId("");
@@ -740,13 +797,13 @@ function BillForm({
               <div className="books-form-row">
                 <Field label="Job / project" htmlFor="bill-job" required>
                   <div className="books-job-control">
-                    <Input
+                    {!repeatJobEntry && <Input
                       id="job-search"
                       aria-label="Search job ID or name"
                       value={jobQuery}
                       onChange={(e) => setJobQuery(e.target.value)}
                       placeholder="Full job ID or part of its name"
-                    />
+                    />}
                     <Select
                       id="bill-job"
                       required
@@ -758,7 +815,7 @@ function BillForm({
                         );
                         if (selected) setCurrency(selected.currency);
                       }}
-                      disabled={jobs.loading}
+                      disabled={jobs.loading || repeatJobEntry}
                     >
                       <option value="">
                         {jobs.loading ? "Loading jobs…" : "Select a job"}
@@ -1188,10 +1245,10 @@ function BillForm({
                 variant="ghost"
                 disabled={busy}
                 onClick={() =>
-                  router.push(bill ? `/bills/${bill.id}` : "/bills")
+                  router.push(repeatJobEntry ? "/bills/manual" : bill ? `/bills/${bill.id}` : "/bills")
                 }
               >
-                Cancel
+                {repeatJobEntry ? "Back to job search" : "Cancel"}
               </Button>
             </div>
             <span className="books-entered-by">

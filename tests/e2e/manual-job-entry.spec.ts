@@ -620,8 +620,10 @@ test("job selector shows only the exact Job ID without silently replacing its ex
   const elsewhere = { ...jobB, jobNumber: "JOB-5383" };
   await page.route(/\/api\/jobs(?:\?.*)?$/, route => route.fulfill({ json: { jobs: [exact, selected, nameOnly, elsewhere] } }));
   await page.route(`**/api/jobs/${selected.id}`, route => route.fulfill({ json: detail(selected) }));
-  await page.goto(`/bills/new?jobId=${selected.id}`);
+  await page.goto("/bills/new");
+  await page.getByRole("combobox", { name: "Company", exact: true }).selectOption(companyA);
   const allocation = page.getByLabel(/^Job \/ project/);
+  await allocation.selectOption(selected.id);
   await expect(allocation).toHaveValue(selected.id);
   await page.getByRole("textbox", { name: "Search job ID or name", exact: true }).fill("5383");
   await expect(allocation.locator("option:not([hidden])")).toHaveCount(2);
