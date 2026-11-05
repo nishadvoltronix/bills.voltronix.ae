@@ -62,6 +62,7 @@ export function useApi<T>(
     url: string;
     data: T | null;
     error: string | null;
+    errorStatus?: number | null;
     sessionExpired?: boolean;
   } | null>(null);
   const needsSessionRetry = useRef(false);
@@ -85,7 +86,7 @@ export function useApi<T>(
     api<T>(url, { signal: controller.signal })
       .then((data) => {
         if (!controller.signal.aborted)
-          setResult({ key: requestKey, url, data, error: null });
+          setResult({ key: requestKey, url, data, error: null, errorStatus: null });
       })
       .catch((err: unknown) => {
         if (!controller.signal.aborted) {
@@ -97,6 +98,7 @@ export function useApi<T>(
             data: previous?.url === url && (sessionExpired || (keepPreviousData &&
               (!(err instanceof ApiError) || err.status >= 500))) ? previous.data : null,
             error: err instanceof Error ? err.message : "Unexpected error",
+            errorStatus: err instanceof ApiError ? err.status : null,
             sessionExpired,
           }));
           // A response from the old session can arrive just after reauthentication.
@@ -112,6 +114,7 @@ export function useApi<T>(
     data: current?.data ?? null,
     error: current?.data ? null : current?.error ?? null,
     refreshError: current?.data ? current.error : null,
+    errorStatus: current?.errorStatus ?? null,
     refreshing: Boolean(url && current && result?.key !== requestKey),
     loading: Boolean(url && !current),
     reload,

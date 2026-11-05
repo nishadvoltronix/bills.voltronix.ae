@@ -42,6 +42,7 @@ import { DashboardSearch } from "./dashboard-search";
 import { ImportedBillsTable } from "./imported-bills-table";
 import { accountDisplayName } from "./account-display-name";
 import { IncomingSyncRefresh } from "./incoming-sync-status";
+import { canViewFinancialSummary } from "@/lib/permissions";
 import styles from "./dashboard-overview.module.css";
 
 export function DashboardPage({
@@ -157,7 +158,7 @@ export function DashboardPage({
           </p>
         </Card>
       )}
-      {!ownScope && !manualEntryOnly && <IncomingSyncRefresh companyId={companyId} onUpdated={state.reload} />}
+      {canViewFinancialSummary(user) && !manualEntryOnly && <IncomingSyncRefresh companyId={companyId} onUpdated={state.reload} />}
       {state.error ? (
         <ErrorState message={state.error} retry={state.reload} />
       ) : (

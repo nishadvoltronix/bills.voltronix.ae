@@ -130,6 +130,52 @@ test("silent incoming refresh polls every five seconds while visible and recover
   await expect(page.getByLabel("Incoming Zoho updates", { exact: true })).toHaveCount(0);
 });
 
+for (const deniedStatus of [403, 404]) {
+  test(`background incoming refresh pauses on ${deniedStatus} until explicit retry or company change`, async ({ page }) => {
+    await page.clock.install();
+    let reads = 0, denied = false;
+    const scopes: string[] = [];
+    await page.route("**/api/integrations/incoming-status*", route => {
+      reads++; scopes.push(new URL(route.request().url()).searchParams.get("companyId") ?? "");
+      return denied
+        ? route.fulfill({ status: deniedStatus, json: { error: "Current account or company access denied." } })
+        : route.fulfill({ json: incoming });
+    });
+    await page.goto("/dashboard");
+    await expect.poll(() => reads).toBeGreaterThan(0);
+    await page.waitForLoadState("networkidle");
+    const initial = reads;
+    // Models an Admin-looking mounted tab after its cookie/account scope changes.
+    denied = true;
+    await page.clock.fastForward(5_000);
+    const paused = page.getByText(/^Automatic refresh paused\./);
+    await expect(paused).toBeVisible();
+    await expect.poll(() => reads).toBe(initial + 1);
+    const stopped = reads;
+    await page.clock.fastForward(15_000);
+    await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    expect(reads).toBe(stopped);
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+
+    const retried = page.waitForResponse(response => new URL(response.url()).pathname === "/api/integrations/incoming-status" && response.status() === deniedStatus);
+    await page.getByRole("button", { name: "Retry status check", exact: true }).click();
+    await retried;
+    await expect.poll(() => reads).toBe(stopped + 1);
+    await page.clock.fastForward(10_000);
+    expect(reads).toBe(stopped + 1);
+
+    denied = false;
+    await page.getByRole("button", { name: "Filters", exact: true }).click();
+    await page.getByRole("combobox", { name: "Company", exact: true }).selectOption(companies[0].id);
+    await expect.poll(() => reads).toBe(stopped + 2);
+    await expect(paused).toHaveCount(0);
+    expect(scopes.at(-1)).toBe(companies[0].id);
+    await page.clock.fastForward(5_000);
+    await expect.poll(() => reads).toBe(stopped + 3);
+    await expect(metric(page, "Recorded invoice total")).toHaveText("AED 1,200.80");
+  });
+}
+
 test("dashboard displays imported totals while withholding incomplete profit", async ({ page }) => {
   await page.goto("/dashboard");
   await expect(metric(page, "Recorded contract value")).toHaveText("AED 10,000.00");

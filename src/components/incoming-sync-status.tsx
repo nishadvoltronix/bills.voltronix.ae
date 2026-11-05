@@ -3,7 +3,9 @@
 import { useEffect, useRef } from "react";
 import { RefreshCw } from "lucide-react";
 import type { IncomingSyncSourceStatus, IncomingSyncStatus } from "@/lib/incoming-sync-types";
+import { canViewFinancialSummary } from "@/lib/permissions";
 import { useApi } from "./api";
+import { useUser } from "./app-shell";
 import { Badge, Button, Card, Notice } from "./ui";
 import styles from "./incoming-sync-status.module.css";
 
@@ -42,8 +44,10 @@ type IncomingSyncProps = {
 };
 
 function useIncomingSync({ companyId = "", onUpdated }: IncomingSyncProps) {
+  const allowed = canViewFinancialSummary(useUser());
   const query = companyId ? `?${new URLSearchParams({ companyId })}` : "";
-  const state = useApi<IncomingSyncStatus>(`/api/integrations/incoming-status${query}`, { keepPreviousData: true });
+  const state = useApi<IncomingSyncStatus>(allowed ? `/api/integrations/incoming-status${query}` : null, { keepPreviousData: true });
+  const accessPaused = state.errorStatus === 403 || state.errorStatus === 404;
   const { reload } = state;
   const previousSuccess = useRef<{ companyId: string; fingerprint: string } | null>(null);
   const fingerprint = state.data ? JSON.stringify(state.data.sources
@@ -51,6 +55,7 @@ function useIncomingSync({ companyId = "", onUpdated }: IncomingSyncProps) {
     .map(source => [source.id, source.lastSuccessAt]).sort((a, b) => a[0]!.localeCompare(b[0]!))) : null;
 
   useEffect(() => {
+    if (!allowed || accessPaused) return;
     const refreshVisible = () => { if (document.visibilityState === "visible") reload(); };
     const timer = window.setInterval(refreshVisible, 5_000);
     document.addEventListener("visibilitychange", refreshVisible);
@@ -58,28 +63,38 @@ function useIncomingSync({ companyId = "", onUpdated }: IncomingSyncProps) {
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", refreshVisible);
     };
-  }, [reload]);
+  }, [allowed, accessPaused, reload]);
 
   useEffect(() => {
-    if (fingerprint === null) {
+    if (!allowed || accessPaused || fingerprint === null) {
       previousSuccess.current = null;
       return;
     }
     const previous = previousSuccess.current;
     previousSuccess.current = { companyId, fingerprint };
     if (previous?.companyId === companyId && previous.fingerprint !== fingerprint) onUpdated?.();
-  }, [companyId, fingerprint, onUpdated]);
+  }, [allowed, accessPaused, companyId, fingerprint, onUpdated]);
 
-  return state;
+  return { ...state, allowed, accessPaused };
+}
+
+function IncomingAccessPaused({ retry, pending }: { retry: () => void; pending: boolean }) {
+  return <Notice tone="error">
+    <p>Automatic refresh paused. Reload the workspace to check your current access.</p>
+    <Button type="button" variant="secondary" size="sm" onClick={retry} disabled={pending}>Retry status check</Button>
+  </Notice>;
 }
 
 export function IncomingSyncRefresh(props: IncomingSyncProps) {
-  useIncomingSync(props);
-  return null;
+  const state = useIncomingSync(props);
+  return state.allowed && state.accessPaused
+    ? <IncomingAccessPaused retry={state.reload} pending={state.loading || state.refreshing} /> : null;
 }
 
 export function IncomingSyncStatusPanel(props: IncomingSyncProps) {
   const state = useIncomingSync(props);
+  if (!state.allowed) return null;
+  if (state.accessPaused) return <IncomingAccessPaused retry={state.reload} pending={state.loading || state.refreshing} />;
   const { reload } = state;
   const data = state.data;
   const delayed = data?.sources.filter(source => ["RETRY", "WAITING_QUOTA", "BLOCKED"].includes(source.status)).length;
