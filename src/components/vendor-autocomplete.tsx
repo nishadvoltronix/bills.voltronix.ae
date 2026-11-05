@@ -49,7 +49,7 @@ export function VendorAutocomplete({ id, companyId, value, initialQuery = "", di
   const hydrating = !!companyId && !!value && !selectedMatches && !currentHydrationError;
   const query = text.trim().slice(0, 100);
   const searchKey = JSON.stringify([companyId, query, revision]);
-  const searchEnabled = !!companyId && open && !hydrating && !resolving;
+  const searchEnabled = !!companyId && open && !disabled && !hydrating && !resolving;
   const currentSearch = search?.key === searchKey ? search : null;
   const result = currentSearch?.data?.companyId === companyId ? currentSearch.data : null;
   const suggestions = (result?.vendors ?? []).filter((vendor) =>
@@ -111,9 +111,27 @@ export function VendorAutocomplete({ id, companyId, value, initialQuery = "", di
 
   useEffect(() => {
     if (!searchEnabled) return;
+    function refreshOnReturn() {
+      if (document.visibilityState !== "visible") return;
+      // The existing search debounce coalesces paired visibility/focus events.
+      moreRequest.current?.abort();
+      setActiveIndex(-1);
+      setRevision(current => current + 1);
+    }
+    window.addEventListener("focus", refreshOnReturn);
+    document.addEventListener("visibilitychange", refreshOnReturn);
+    return () => {
+      window.removeEventListener("focus", refreshOnReturn);
+      document.removeEventListener("visibilitychange", refreshOnReturn);
+    };
+  }, [searchEnabled]);
+
+  useEffect(() => {
+    if (!searchEnabled) return;
     moreRequest.current?.abort();
     const controller = new AbortController();
     const timer = setTimeout(() => {
+      if (document.visibilityState !== "visible") return;
       const params = new URLSearchParams({ companyId, q: query });
       api<VendorSearchResult>(`/api/vendors/search?${params}`, { signal: controller.signal })
         .then((data) => {
@@ -133,7 +151,7 @@ export function VendorAutocomplete({ id, companyId, value, initialQuery = "", di
   }, [companyId, query, searchKey, searchEnabled]);
 
   async function loadMore() {
-    if (!result?.hasMore || more?.key === searchKey && more.busy) return;
+    if (!searchEnabled || document.visibilityState !== "visible" || !result?.hasMore || more?.key === searchKey && more.busy) return;
     const key = searchKey, previous = result, page = (result.page ?? 1) + 1;
     const controller = new AbortController(); moreRequest.current?.abort(); moreRequest.current = controller;
     setMore({ key, busy: true });
@@ -300,6 +318,15 @@ export function VendorAutocomplete({ id, companyId, value, initialQuery = "", di
               onMouseDown={event => event.preventDefault()} onClick={() => void loadMore()}>
               {more?.key === searchKey && more.busy ? "Loading vendors…" : "Load more vendors"}
             </Button><p>Search by name or load more matching vendors.</p>
+          </div>}
+          {result && !result.warning && <div className="vendor-search-message">
+            <Button type="button" variant="secondary" size="sm"
+              onMouseDown={event => event.preventDefault()} onClick={() => {
+                if (!searchEnabled || document.visibilityState !== "visible") return;
+                moreRequest.current?.abort();
+                setActiveIndex(-1);
+                setRevision(current => current + 1);
+              }}>Refresh vendors</Button>
           </div>}
         </div>
       )}

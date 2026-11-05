@@ -367,6 +367,210 @@ test("HTTP 200 provider warning offers retry and shows no-match only after a cle
   await expect(page.getByText("No matching vendors. Try another name.", { exact: true })).toHaveCount(0);
 });
 
+test("returning to a visible tab refreshes an open empty vendor search once and preserves bill input", async ({ page }) => {
+  const incoming = { ...remoteA, name: "Fictional New Supplier" };
+  let available = false;
+  let searches = 0;
+  const mutations: string[] = [];
+  page.on("request", request => {
+    if (["POST", "PATCH", "PUT", "DELETE"].includes(request.method())) mutations.push(new URL(request.url()).pathname);
+  });
+  await page.route("**/api/vendors/search?*", route => {
+    searches++;
+    return route.fulfill({ json: envelope(companyA, available ? [incoming] : []) });
+  });
+  await openForm(page, companyA);
+  await fillBill(page, companyA);
+  await page.getByLabel("Line 1 quantity").fill("3");
+  await page.getByLabel("Notes", { exact: true }).fill("Keep this invoice while the supplier is created elsewhere.");
+  await supplierInput(page).fill("Fictional New");
+  await expect(page.getByText("No matching vendors. Try another name.", { exact: true })).toBeVisible();
+  expect(searches).toBe(1);
+  available = true;
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event("focus"));
+  });
+  await page.waitForTimeout(650);
+  expect(searches).toBe(1);
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event("focus"));
+  });
+  await expect(page.getByRole("option", { name: /^Fictional New Supplier/ })).toBeVisible();
+  await page.waitForTimeout(650);
+  expect(searches).toBe(2);
+  // A quick second hide/show must not strand the refreshed search after its
+  // pending 300 ms request was skipped while hidden.
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await page.waitForTimeout(100);
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.waitForTimeout(250);
+  expect(searches).toBe(2);
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event("focus"));
+  });
+  await expect.poll(() => searches).toBe(3);
+  await expect(page.getByRole("option", { name: /^Fictional New Supplier/ })).toBeVisible();
+  await page.waitForTimeout(650);
+  expect(searches).toBe(3);
+  available = false;
+  await page.getByRole("button", { name: "Refresh vendors", exact: true }).click();
+  await expect(page.getByText("No matching vendors. Try another name.", { exact: true })).toBeVisible();
+  available = true;
+  await page.getByRole("button", { name: "Refresh vendors", exact: true }).click();
+  await expect(page.getByRole("option", { name: /^Fictional New Supplier/ })).toBeVisible();
+  expect(searches).toBe(5);
+  await expect(page.getByRole("button", { name: "Retry vendor search", exact: true })).toHaveCount(0);
+  await expect(supplierInput(page)).toHaveValue("Fictional New");
+  await expect(companyInput(page)).toHaveValue(companyA);
+  await expect(page.getByLabel(/^Job \/ project/)).toHaveValue(jobs[0].id);
+  await expect(page.getByLabel("Currency", { exact: true })).toHaveValue("USD");
+  await expect(page.getByLabel("Bill#")).toHaveValue("FICTIONAL-AUTOCOMPLETE-1");
+  await expect(page.getByLabel("Bill Date")).toHaveValue("2026-10-29");
+  await expect(page.getByLabel("Line 1 description")).toHaveValue("Fictional supplier browser test");
+  await expect(page.getByLabel("Line 1 quantity")).toHaveValue("3");
+  await expect(page.getByLabel("Line 1 unit price")).toHaveValue("10.00");
+  await expect(page.getByLabel("Notes", { exact: true })).toHaveValue("Keep this invoice while the supplier is created elsewhere.");
+  expect(mutations).toEqual([]);
+});
+
+test("Refresh vendors restarts at page one and retains the selected supplier and invoice", async ({ page }) => {
+  const later = { ...remoteA, externalVendorId: "920000000003", name: vendorA.name + " Older branch" };
+  const fresh = { ...remoteA, externalVendorId: "920000000004", name: vendorA.name + " New branch" };
+  let refreshed = false;
+  const pageTwoStarted = deferred(), pageTwoReply = deferred();
+  const pages: number[] = [];
+  const saves: Record<string, unknown>[] = [];
+  await page.route("**/api/vendors/search?*", async route => {
+    const number = Number(new URL(route.request().url()).searchParams.get("page") ?? 1);
+    pages.push(number);
+    if (number === 2) {
+      pageTwoStarted.release();
+      await pageTwoReply.promise;
+    }
+    return route.fulfill({ json: { ...envelope(companyA, number === 2 ? [later] : refreshed ? [remoteA, fresh] : [remoteA]),
+      page: number, perPage: 25, hasMore: !refreshed && number === 1 } }).catch(() => {});
+  });
+  await page.route("**/api/bills", route => {
+    saves.push(route.request().postDataJSON());
+    return route.fulfill({ status: 422, json: { error: "Fictional refreshed supplier selection inspected." } });
+  });
+  await openForm(page, companyA);
+  await fillBill(page, companyA);
+  await page.getByLabel("Notes", { exact: true }).fill("Retain the chosen supplier identity.");
+  await selectSupplier(page, vendorA);
+  pages.length = 0;
+  await supplierInput(page).press("ArrowDown");
+  await page.getByRole("button", { name: "Load more vendors", exact: true }).click();
+  await pageTwoStarted.promise;
+  refreshed = true;
+  await page.getByRole("button", { name: "Refresh vendors", exact: true }).click();
+  await expect(page.getByRole("option", { name: /^Fictional Alpha Supplier New branch/ })).toBeVisible();
+  pageTwoReply.release();
+  await page.waitForTimeout(650);
+  await expect(page.getByRole("option", { name: /^Fictional Alpha Supplier Older branch/ })).toHaveCount(0);
+  // The selected supplier's cached first page can be reused while reopening.
+  // The outstanding old page two must be followed by a fresh page-one read.
+  expect(pages.slice(-2)).toEqual([2, 1]);
+  await expect(supplierInput(page)).toHaveValue(vendorA.name);
+  await expect(vendorDetails(page)).toContainText(vendorA.trn!);
+  await expect(page.getByLabel("Notes", { exact: true })).toHaveValue("Retain the chosen supplier identity.");
+  await page.getByRole("button", { name: "Save as draft", exact: true }).click();
+  await expect(page.getByText("Fictional refreshed supplier selection inspected.", { exact: true })).toBeVisible();
+  expect(saves).toHaveLength(1);
+  expect(saves[0]).toMatchObject({ companyId: companyA, vendorId: vendorA.id, jobId: jobs[0].id,
+    invoiceNumber: "FICTIONAL-AUTOCOMPLETE-1", notes: "Retain the chosen supplier identity.", submit: false });
+});
+
+test("closed vendor searches ignore tab returns and a late refreshed company cannot replace the current company", async ({ page }) => {
+  const started = deferred(), pending = deferred();
+  let holdRefresh = false;
+  let searches = 0;
+  await page.route("**/api/vendors/search?*", async route => {
+    searches++;
+    const currentCompany = new URL(route.request().url()).searchParams.get("companyId")!;
+    if (currentCompany === companyA && holdRefresh) {
+      started.release();
+      await pending.promise;
+    }
+    await route.fulfill({ json: envelope(currentCompany, [currentCompany === companyA ? remoteA : remoteB]) }).catch(() => {});
+  });
+  await openForm(page, companyA);
+  await page.evaluate(() => { document.dispatchEvent(new Event("visibilitychange")); window.dispatchEvent(new Event("focus")); });
+  await page.waitForTimeout(650);
+  expect(searches).toBe(0);
+  await supplierInput(page).fill("Fictional");
+  await expect(page.getByRole("option", { name: /^Fictional Alpha Supplier/ })).toBeVisible();
+  holdRefresh = true;
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await started.promise;
+  await companyInput(page).selectOption(companyB);
+  await supplierInput(page).fill("Fictional");
+  await expect(page.getByRole("option", { name: /^Fictional Beta Supplier/ })).toBeVisible();
+  pending.release();
+  await page.waitForTimeout(650);
+  await expect(companyInput(page)).toHaveValue(companyB);
+  await expect(page.getByRole("option", { name: /^Fictional Alpha Supplier/ })).toHaveCount(0);
+  await expect(page.getByRole("option", { name: /^Fictional Beta Supplier/ })).toHaveCount(1);
+  await page.getByLabel("Bill#").fill("Close the vendor popup");
+  const closedCount = searches;
+  await page.evaluate(() => { document.dispatchEvent(new Event("visibilitychange")); window.dispatchEvent(new Event("focus")); });
+  await page.waitForTimeout(650);
+  expect(searches).toBe(closedCount);
+});
+
+test("supplier hydration and exact selection do not start background searches on tab return", async ({ page }) => {
+  const resolution = deferred(), resolving = deferred(), hydration = deferred(), hydrating = deferred();
+  let searches = 0, hydrations = 0;
+  await page.route("**/api/vendors/search?*", async route => {
+    const params = new URL(route.request().url()).searchParams;
+    if (params.has("vendorId")) {
+      hydrations++;
+      hydrating.release();
+      await hydration.promise;
+      return route.fulfill({ json: envelope(companyA, [], vendorA) });
+    }
+    searches++;
+    return route.fulfill({ json: envelope(companyA, [remoteA]) });
+  });
+  await page.route("**/api/vendors/resolve", async route => {
+    resolving.release();
+    await resolution.promise;
+    await route.fulfill({ json: { vendor: vendorA } });
+  });
+  await openForm(page, companyA);
+  await supplierInput(page).fill("Fictional Alpha");
+  await page.getByRole("option", { name: /^Fictional Alpha Supplier/ }).click();
+  await resolving.promise;
+  await supplierInput(page).focus();
+  await page.evaluate(() => { document.dispatchEvent(new Event("visibilitychange")); window.dispatchEvent(new Event("focus")); });
+  await page.waitForTimeout(650);
+  expect(searches).toBe(1);
+  resolution.release();
+  await expect(vendorDetails(page)).toContainText(vendorA.email!);
+  const bill = fixtureBill();
+  await page.route(`**/api/bills/${bill.id}`, route => route.fulfill({ json: { bill } }));
+  await page.goto(`/bills/${bill.id}/edit`);
+  await hydrating.promise;
+  const beforeHydrated = searches;
+  await supplierInput(page).focus();
+  await page.evaluate(() => { document.dispatchEvent(new Event("visibilitychange")); window.dispatchEvent(new Event("focus")); });
+  await page.waitForTimeout(650);
+  expect(searches).toBe(beforeHydrated);
+  expect(hydrations).toBe(1);
+  hydration.release();
+  await expect(supplierInput(page)).toHaveValue(vendorA.name);
+  await expect(vendorDetails(page)).toContainText(vendorA.trn!);
+});
+
 test("failed Books selection can retry the same exact destination without submitting a bill", async ({ page }) => {
   const attempts: unknown[] = [];
   let saves = 0;
@@ -417,7 +621,7 @@ test("editing hydrates its exact saved supplier outside search results and prese
   await expect.poll(() => hydrated).toContain(vendorA.id);
   await expect(companyInput(page)).toBeDisabled();
   await page.getByLabel("Notes", { exact: true }).fill("Preserve my reviewed changes");
-  await page.getByLabel("Invoice attachment").setInputFiles({ name: "FICTIONAL-additional.pdf", mimeType: "application/pdf",
+  await page.getByLabel("Invoice attachment", { exact: true }).setInputFiles({ name: "FICTIONAL-additional.pdf", mimeType: "application/pdf",
     buffer: Buffer.from("%PDF-1.4\n% Fictional autocomplete attachment\n%%EOF") });
   await page.getByRole("button", { name: "Save changes", exact: true }).click();
   await expect(page.getByText("Fictional duplicate invoice number.", { exact: true })).toBeVisible();
@@ -425,8 +629,8 @@ test("editing hydrates its exact saved supplier outside search results and prese
   expect(patches[0]).toMatchObject({ companyId: companyA, vendorId: vendorA.id, version: 7, submit: false });
   await expect(supplierInput(page)).toHaveValue(vendorA.name);
   await expect(page.getByLabel("Notes", { exact: true })).toHaveValue("Preserve my reviewed changes");
-  expect(await page.getByLabel("Invoice attachment").evaluate((element: HTMLInputElement) => element.files?.[0]?.name))
-    .toBe("FICTIONAL-additional.pdf");
+  await expect(page.getByRole("group", { name: "Attachment FICTIONAL-additional.pdf", exact: true })).toContainText("Ready to upload");
+  await expect(page.getByRole("link", { name: "FICTIONAL-original.pdf", exact: true })).toBeVisible();
   expect(unexpectedChanges).toEqual([]);
 });
 
