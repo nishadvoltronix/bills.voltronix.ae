@@ -26,8 +26,9 @@ const env: NodeJS.ProcessEnv = {
 };
 type Vendor = { id: string; companyId: string; name: string; currency: string; email: string | null; trn: string | null; isDemo: boolean; externalZohoId: string | null };
 type Mapping = { id: string; vendorId: string; organizationId: string; dataCenter: string; environment: string; externalVendorId: string };
+type VendorSync = Omit<Mapping, "id"> & { id: string; companyId: string; status: string; leaseToken: string | null; leaseUntil: Date | null; completedAt: Date | null };
 type Filter = { companyId?: string; id?: string; name?: string | { contains: string }; externalZohoId?: string | null; booksMappings?: { none: Record<string, never> }; trn?: string; OR?: Filter[] };
-let vendors: Vendor[], mappings: Mapping[], audit: unknown[];
+let vendors: Vendor[], mappings: Mapping[], syncs: VendorSync[], audit: unknown[];
 let authorized: boolean;
 let companies: { id: string; active: boolean; isDemo: boolean }[];
 let destinations: (Omit<typeof destination, "environment"> & { companyId: string; environment: "production" | "sandbox" })[];
@@ -50,6 +51,11 @@ function mapped(vendor = local(), overrides: Partial<Mapping> = {}) {
   const mapping = { id: `mapping-${mappings.length + 1}`, vendorId: vendor.id, ...destination, externalVendorId: "2001", ...overrides };
   mappings.push(mapping); return mapping;
 }
+function completedSync(vendor: Vendor, externalVendorId: string, overrides: Partial<VendorSync> = {}) {
+  const row = { id: `sync-${syncs.length + 1}`, vendorId: vendor.id, companyId: vendor.companyId, ...destination,
+    externalVendorId, status: "SYNCED", leaseToken: null, leaseUntil: null, completedAt: new Date(Date.now() - 1000), ...overrides };
+  syncs.push(row); return row;
+}
 function contact(overrides: Record<string, unknown> = {}) {
   return { contact_id: "2001", contact_name: "Books supplier", contact_type: "vendor", status: "active", currency_code: "AED",
     email: "supplier@example.invalid", tax_reg_no: "100000000000001", billing_address: { street: "PRIVATE ADDRESS" }, ...overrides };
@@ -68,14 +74,19 @@ const page = (contacts: unknown[], hasMore = false) => ({ code: 0, contacts, pag
 beforeEach(() => {
   vi.resetAllMocks();
   for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
-  vendors = []; mappings = []; audit = []; authorized = true;
+  vendors = []; mappings = []; syncs = []; audit = []; authorized = true;
   companies = [{ id: "company-a", active: true, isDemo: true }, { id: "company-b", active: true, isDemo: true }];
   destinations = [{ companyId: "company-a", ...destination }, { companyId: "company-b", ...destination, organizationId: "1002" }];
   store.user.findFirst.mockImplementation(async () => authorized ? { id: actor.id } : null);
   store.company.findUnique.mockImplementation(async ({ where }: { where: { id: string } }) => companies.find(company => company.id === where.id) ?? null);
   store.companyIntegrationDestination.findMany.mockImplementation(async ({ where }: { where: { companyId: string } }) =>
     destinations.filter(item => item.companyId === where.companyId).map(({ organizationId, dataCenter, environment }) => ({ organizationId, dataCenter, environment })));
-  store.vendor.findMany.mockImplementation(async ({ where, skip = 0, take }: { where: Filter; skip?: number; take: number }) => vendors.filter(v => match(v, where)).slice(skip, skip + take).map(localView));
+  store.vendor.findMany.mockImplementation(async ({ where, skip = 0, take, select }: { where: Filter; skip?: number; take: number; select?: { booksMappings?: unknown } }) =>
+    vendors.filter(v => match(v, where)).slice(skip, skip + take).map(vendor => select?.booksMappings ? {
+      id: vendor.id, trn: vendor.trn, currency: vendor.currency, externalZohoId: vendor.externalZohoId,
+      booksMappings: mappings.filter(mapping => mapping.vendorId === vendor.id).slice(0, 2),
+      booksSyncs: syncs.filter(sync => sync.vendorId === vendor.id).slice(0, 2),
+    } : localView(vendor)));
   store.vendor.findFirst.mockImplementation(async ({ where }: { where: Filter }) => { const vendor = vendors.find(v => match(v, where)); return vendor ? localView(vendor) : null; });
   store.vendorBooksMapping.findMany.mockImplementation(async ({ where, skip = 0, take }: { where: Omit<Partial<Mapping>, "externalVendorId"> & { externalVendorId?: string | { in: string[] }; vendor: Filter }; skip?: number; take?: number }) => {
     return mappings.filter(mapping => {
@@ -96,8 +107,8 @@ beforeEach(() => {
   store.auditLog.create.mockImplementation(async ({ data }: { data: unknown }) => { audit.push(data); return {}; });
   store.$transaction.mockImplementation(async (action: (tx: typeof store) => Promise<unknown>, options: unknown) => {
     expect(options).toEqual({ isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 20_000 });
-    const before = structuredClone({ vendors, mappings, audit });
-    try { return await action(store); } catch (error) { ({ vendors, mappings, audit } = before); throw error; }
+    const before = structuredClone({ vendors, mappings, syncs, audit });
+    try { return await action(store); } catch (error) { ({ vendors, mappings, syncs, audit } = before); throw error; }
   });
 });
 afterEach(() => vi.unstubAllEnvs());
@@ -479,6 +490,107 @@ describe("resolving an existing Books supplier for bill entry", () => {
     const before = structuredClone({ vendors, mappings });
     await expect(resolveBillVendor(actor, selection, connection({ code: 0, contact: contact() }).transport)).rejects.toMatchObject({ status: 409 });
     expect({ vendors, mappings }).toEqual(before); expect(audit).toHaveLength(0);
+  });
+
+  it("creates a separate selected Books handle when a shared TRN belongs to a different mapped contact", async () => {
+    const saved = local({ name: "Different mapped supplier", trn: "100000000000001", email: "preserved@example.invalid" });
+    const originalMapping = mapped(saved, { externalVendorId: "2999" });
+    const before = structuredClone({ saved, originalMapping });
+    const { transport, fetcher } = connection({ code: 0, contact: contact() });
+    const result = await resolveBillVendor(actor, selection, transport);
+    const again = await resolveBillVendor(actor, selection, transport);
+    expect(result.id).not.toBe(saved.id); expect(again.id).toBe(result.id);
+    expect(result).toMatchObject({ name: "Books supplier", trn: saved.trn, externalVendorId: "2001", ...destination });
+    expect(vendors.find(vendor => vendor.id === saved.id)).toEqual(before.saved);
+    expect(mappings.find(mapping => mapping.id === originalMapping.id)).toEqual(before.originalMapping);
+    expect(vendors).toHaveLength(2); expect(mappings).toHaveLength(2); expect(syncs).toHaveLength(0);
+    expect(audit).toEqual([expect.objectContaining({ action: "BOOKS_VENDOR_SELECTED", entityId: result.id,
+      details: expect.objectContaining({ externalVendorId: "2001", providerFinancialWrites: 0 }) })]);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher.mock.calls.every(([url, init]) => new URL(url).pathname === "/books/v3/contacts/2001" && init?.method === "GET")).toBe(true);
+  });
+
+  it("requires independent proof for every shared-TRN record without treating the TRN as contact identity", async () => {
+    const first = local({ name: "Mapped branch one", trn: "100000000000001", externalZohoId: "2998" });
+    const second = local({ name: "Mapped branch two", trn: first.trn });
+    mapped(first, { externalVendorId: "2998" }); mapped(second, { externalVendorId: "2999" });
+    completedSync(first, "2998");
+    const before = structuredClone({ vendors, mappings, syncs });
+    const result = await resolveBillVendor(actor, selection, connection({ code: 0, contact: contact() }).transport);
+    expect(result.id).not.toBe(first.id); expect(result.id).not.toBe(second.id);
+    expect(vendors.slice(0, 2)).toEqual(before.vendors);
+    expect(mappings.slice(0, 2)).toEqual(before.mappings); expect(syncs).toEqual(before.syncs);
+  });
+
+  it("does not inspect or reuse a foreign company's same-TRN vendor", async () => {
+    const foreign = local({ companyId: "company-b", name: "Foreign unmapped supplier", trn: "100000000000001" });
+    const result = await resolveBillVendor(actor, selection, connection({ code: 0, contact: contact() }).transport);
+    expect(result.companyId).toBe("company-a"); expect(result.id).not.toBe(foreign.id);
+    expect(vendors.find(vendor => vendor.id === foreign.id)).toEqual(foreign);
+  });
+
+  it.each(["unmapped", "organization", "data-center", "environment", "extra-mapping", "legacy", "currency", "unproven-second"])(
+    "keeps shared-TRN %s ambiguity blocked without mutating existing suppliers", async mode => {
+      const saved = local({ name: "Different mapped supplier", trn: "100000000000001" });
+      if (mode !== "unmapped") mapped(saved, { externalVendorId: "2999",
+        ...(mode === "organization" ? { organizationId: "1002" } : {}),
+        ...(mode === "data-center" ? { dataCenter: "AE" } : {}),
+        ...(mode === "environment" ? { environment: "sandbox" } : {}) });
+      if (mode === "extra-mapping") mapped(saved, { externalVendorId: "2998", organizationId: "1002" });
+      if (mode === "legacy") saved.externalZohoId = "2997";
+      if (mode === "currency") saved.currency = "USD";
+      if (mode === "unproven-second") local({ name: "Unmapped same-tax branch", trn: saved.trn });
+      const before = structuredClone({ vendors, mappings, syncs });
+      await expect(resolveBillVendor(actor, selection, connection({ code: 0, contact: contact() }).transport)).rejects.toMatchObject({ status: 409 });
+      expect({ vendors, mappings, syncs }).toEqual(before); expect(audit).toHaveLength(0);
+      expect(store.vendor.create).not.toHaveBeenCalled();
+    });
+
+  it.each(["QUEUED", "PROCESSING", "UNKNOWN", "FAILED", "BLOCKED"])("keeps %s supplier-creation history ambiguous despite a distinct mapping", async status => {
+    const saved = local({ name: "Different supplier", trn: "100000000000001" });
+    mapped(saved, { externalVendorId: "2999" }); completedSync(saved, "2999", { status });
+    const before = structuredClone({ vendors, mappings, syncs });
+    await expect(resolveBillVendor(actor, selection, connection({ code: 0, contact: contact() }).transport)).rejects.toMatchObject({ status: 409 });
+    expect({ vendors, mappings, syncs }).toEqual(before); expect(audit).toHaveLength(0);
+  });
+
+  it.each(["other-contact", "organization", "company", "lease-token", "lease-expiry", "missing-completion", "future-completion", "second-operation"])(
+    "requires completed supplier history to agree with the scoped mapping (%s)", async mode => {
+      const saved = local({ name: "Different supplier", trn: "100000000000001" });
+      mapped(saved, { externalVendorId: "2999" });
+      const completed = completedSync(saved, "2999");
+      if (mode === "other-contact") completed.externalVendorId = "2998";
+      if (mode === "organization") completed.organizationId = "1002";
+      if (mode === "company") completed.companyId = "company-b";
+      if (mode === "lease-token") completed.leaseToken = "fictional-active-lease";
+      if (mode === "lease-expiry") completed.leaseUntil = new Date(Date.now() - 1000);
+      if (mode === "missing-completion") completed.completedAt = null;
+      if (mode === "future-completion") completed.completedAt = new Date(Date.now() + 60_000);
+      if (mode === "second-operation") completedSync(saved, "2999", { organizationId: "1002" });
+      const before = structuredClone({ vendors, mappings, syncs });
+      await expect(resolveBillVendor(actor, selection, connection({ code: 0, contact: contact() }).transport)).rejects.toMatchObject({ status: 409 });
+      expect({ vendors, mappings, syncs }).toEqual(before); expect(audit).toHaveLength(0);
+    });
+
+  it("keeps a database-collation name collision blocked even with a different mapped contact", async () => {
+    const saved = local({ name: "BOOKS SUPPLIER", trn: "100000000000001" }); mapped(saved, { externalVendorId: "2999" });
+    await expect(resolveBillVendor(actor, selection, connection({ code: 0, contact: contact() }).transport)).rejects.toMatchObject({ status: 409 });
+    expect(vendors).toHaveLength(1); expect(mappings).toHaveLength(1); expect(audit).toHaveLength(0);
+  });
+
+  it("bounds the complete shared-TRN proof set rather than silently ignoring excess records", async () => {
+    for (let index = 0; index < 26; index++) mapped(local({ name: `Mapped tax branch ${index}`, trn: "100000000000001" }), { externalVendorId: String(3000 + index) });
+    await expect(resolveBillVendor(actor, selection, connection({ code: 0, contact: contact() }).transport)).rejects.toMatchObject({ status: 409 });
+    expect(store.vendor.create).not.toHaveBeenCalled(); expect(audit).toHaveLength(0);
+    expect(store.vendor.findMany.mock.calls.at(-1)?.[0]).toMatchObject({ where: { companyId: "company-a", trn: "100000000000001" }, take: 26 });
+  });
+
+  it("rolls back the distinct-contact handle if access changes after creation without altering its shared-TRN peer", async () => {
+    const saved = local({ name: "Different mapped supplier", trn: "100000000000001" }); mapped(saved, { externalVendorId: "2999" });
+    const before = structuredClone({ vendors, mappings, syncs });
+    store.auditLog.create.mockImplementationOnce(async () => { authorized = false; return {}; });
+    await expect(resolveBillVendor(actor, selection, connection({ code: 0, contact: contact() }).transport)).rejects.toMatchObject({ status: 403 });
+    expect({ vendors, mappings, syncs }).toEqual(before);
   });
 
   it("drops invalid optional email/TRN metadata while retaining verified supplier identity", async () => {

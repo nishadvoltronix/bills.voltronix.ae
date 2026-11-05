@@ -268,6 +268,37 @@ export async function searchBillVendors(actor: Actor, payload: unknown, provided
   return { companyId: input.companyId, organizationId, ...scope, vendors, selectedVendor: null, warning, hasMore, page: input.page, perPage: 25 as const };
 }
 
+const vendorCollision = () => new HttpError(409, "A saved vendor has the same name, tax registration or external ID. Ask an administrator to verify its Books mapping; existing records were preserved.");
+
+/** A shared TRN cannot merge two explicitly distinct, scoped Books contacts. */
+async function assertDistinctTaxRegistrationContacts(store: Store, companyId: string,
+  contact: NonNullable<ReturnType<typeof parseContact>>, destination: Destination) {
+  if (!contact.trn) return;
+  const collisions = await store.vendor.findMany({ where: { companyId, trn: contact.trn },
+    select: { id: true, trn: true, currency: true, externalZohoId: true,
+      booksMappings: { select: { organizationId: true, dataCenter: true, environment: true, externalVendorId: true },
+        orderBy: [{ organizationId: "asc" }, { dataCenter: "asc" }, { environment: "asc" }], take: 2 },
+      booksSyncs: { select: { companyId: true, organizationId: true, dataCenter: true, environment: true,
+        externalVendorId: true, status: true, leaseToken: true, leaseUntil: true, completedAt: true },
+        orderBy: { id: "asc" }, take: 2 },
+    }, orderBy: { id: "asc" }, take: 26 });
+  if (collisions.length > 25) throw vendorCollision();
+  for (const vendor of collisions) {
+    const mapping = vendor.booksMappings[0];
+    if (vendor.trn !== contact.trn || vendor.currency !== contact.currency || vendor.booksMappings.length !== 1 ||
+      !mapping || mapping.organizationId !== destination.organizationId || mapping.dataCenter !== destination.dataCenter ||
+      mapping.environment !== destination.environment || !externalId.safeParse(mapping.externalVendorId).success ||
+      mapping.externalVendorId === contact.externalVendorId ||
+      (vendor.externalZohoId && vendor.externalZohoId !== mapping.externalVendorId)) throw vendorCollision();
+    // An outstanding creation or reconciliation must never be reinterpreted as a
+    // different supplier. A completed operation may only confirm this same map.
+    if (vendor.booksSyncs.length > 1 || vendor.booksSyncs.some(job => job.companyId !== companyId ||
+      job.status !== "SYNCED" || job.organizationId !== destination.organizationId || job.dataCenter !== destination.dataCenter ||
+      job.environment !== destination.environment || job.externalVendorId !== mapping.externalVendorId ||
+      job.leaseToken || job.leaseUntil || !job.completedAt || job.completedAt > new Date())) throw vendorCollision();
+  }
+}
+
 /** Resolves a verified provider selection into the existing local vendor identity model. */
 export async function resolveBillVendor(actor: Actor, payload: unknown, provided?: ZohoTransport): Promise<LocalVendor & Pick<VendorSuggestion, "booksVat" | "externalVendorId" | "organizationId" | "dataCenter" | "environment">> {
   const input = resolveInput.parse(payload);
@@ -299,10 +330,12 @@ export async function resolveBillVendor(actor: Actor, payload: unknown, provided
         const { id, companyId, name, currency, email, trn } = mapping.vendor;
         return { id, companyId, name, currency, email, trn, ...verifiedMetadata };
       }
+      // Preserve MySQL's own collation rules for hard name/legacy-ID conflicts.
       const collision = await tx.vendor.findFirst({ where: { companyId: input.companyId, OR: [
-        { name: contact.name }, { externalZohoId: input.externalVendorId }, ...(contact.trn ? [{ trn: contact.trn }] : []),
+        { name: contact.name }, { externalZohoId: input.externalVendorId },
       ] }, select: { id: true } });
-      if (collision) throw new HttpError(409, "A saved vendor has the same name, tax registration or external ID. Ask an administrator to verify its Books mapping; existing records were preserved.");
+      if (collision) throw vendorCollision();
+      await assertDistinctTaxRegistrationContacts(tx, input.companyId, contact, destination);
       const vendor = await tx.vendor.create({ data: { companyId: input.companyId, name: contact.name, currency: contact.currency,
         email: contact.email, trn: contact.trn, isDemo: before.company.isDemo }, select: localFields });
       await tx.vendorBooksMapping.create({ data: { vendorId: vendor.id, ...destination, externalVendorId: input.externalVendorId } });
