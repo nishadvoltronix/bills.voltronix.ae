@@ -30,10 +30,12 @@ function connection(options: { organizationId?: string; accounts?: unknown[]; ta
     expect(init?.method).toBe("GET");
     expect(url.searchParams.get("organization_id")).toBe(organizationId);
     options.onRead?.(url);
-    const overridden = options.intercept?.(url);
+    const overridden = await options.intercept?.(url);
     const body = overridden ?? (url.pathname.includes("/organizations/") ? { code: 0, organization: { organization_id: organizationId, is_org_active: true } }
       : url.pathname.endsWith("/chartofaccounts") ? { code: 0, chartofaccounts: options.accounts ?? [account()], page_context: pageContext }
       : url.pathname.endsWith("/taxes") ? { code: 0, taxes: options.taxes ?? [tax()], page_context: pageContext }
+      : /\/chartofaccounts\/\d+$/.test(url.pathname) ? { code: 0, chart_of_account: (options.accounts ?? [account()])[0] }
+      : /\/taxes\/\d+$/.test(url.pathname) ? { code: 0, tax: (options.taxes ?? [tax()])[0] }
       : url.pathname.endsWith("/contacts") ? { code: 0, contacts: options.customers ?? [customer()], page_context: pageContext }
       : { code: 0, contact: options.detail ?? customer() });
     return new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json" } });
@@ -214,7 +216,8 @@ describe("company Books dropdown options", () => {
     const valid = await getOptions(actor, { companyId: "company-a" }, createConnection(false).transport);
     expect(valid.accounts).toHaveLength(101);
     // Save verification must read fresh pages even when options were cached.
-    await expect(verifySelections(actor, "company-a", [{ ...selection, accountId: "3000" }], createConnection(true).transport)).rejects.toThrow("duplicate accounting options");
+    await expect(verifySelections(actor, "company-a", Array.from({ length: 13 }, (_, index) => ({ ...selection, accountId: String(3000 + index) })), createConnection(true).transport))
+      .rejects.toThrow("duplicate accounting options");
   });
 
   it("stops an oversized catalog without returning partial account options", async () => {
@@ -236,13 +239,136 @@ describe("company Books dropdown options", () => {
 
 const selection = { ...destination, accountId: "301", accountName: "Client account label", taxId: "401", taxName: "Client tax label", taxRate: "5", customerId: "501", customerName: "Client customer label" };
 describe("fresh bill Books selection verification", () => {
+  it("reads only the exact unique selected records and leaves the submitted accounting intent unchanged", async () => {
+    const input = [Object.freeze({ ...selection }), Object.freeze({ ...selection })];
+    const before = JSON.stringify(input), { transport, fetcher } = connection();
+    const result = await verifySelections(actor, "company-a", input, transport);
+    expect(fetcher.mock.calls.map(([url]) => new URL(url).pathname).sort()).toEqual([
+      "/books/v3/chartofaccounts/301", "/books/v3/contacts/501", "/books/v3/organizations/1001", "/books/v3/settings/taxes/401",
+    ]);
+    expect(JSON.stringify(input)).toBe(before);
+    expect(result.map(row => ({ accountId: row?.accountId, taxId: row?.taxId, taxRate: row?.taxRate, customerId: row?.customerId })))
+      .toEqual(input.map(row => ({ accountId: row.accountId, taxId: row.taxId, taxRate: "5.00", customerId: row.customerId })));
+  });
+
+  it("overlaps fresh reads while bounding organization, account, tax and customer requests together at four", async () => {
+    let release!: () => void, active = 0, maximum = 0, reads = 0;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const { transport, fetcher } = connection({ intercept: async url => {
+      reads++; active++; maximum = Math.max(maximum, active);
+      await gate; active--;
+      const id = url.pathname.split("/").at(-1)!;
+      if (url.pathname.includes("/chartofaccounts/")) return { code: 0, ...account({ account_id: id }) };
+      if (url.pathname.includes("/taxes/")) return { code: 0, tax: [tax({ tax_id: id })] };
+      if (url.pathname.includes("/contacts/")) return { code: 0, contact: customer({ contact_id: id }) };
+    } });
+    const input = Array.from({ length: 5 }, (_, index) => ({ ...selection, accountId: String(301 + index % 3),
+      taxId: String(401 + index % 2), customerId: String(501 + index) }));
+    const pending = verifySelections(actor, "company-a", input, transport);
+    await vi.waitFor(() => expect(reads).toBe(4));
+    expect(active).toBe(4);
+    // All four independent operations started before any response was released.
+    expect(fetcher.mock.calls.some(([url]) => new URL(url).pathname.includes("/chartofaccounts/"))).toBe(true);
+    release();
+    expect(await pending).toHaveLength(5);
+    expect(reads).toBe(11); expect(active).toBe(0); expect(maximum).toBe(4);
+  });
+
+  it.each(["flat", "nested"])("accepts an authoritative exact account detail in the %s envelope", async mode => {
+    const { transport } = connection({ intercept: url => url.pathname.endsWith("/chartofaccounts/301")
+      ? mode === "flat" ? { code: 0, ...account() } : { code: 0, chart_of_account: account() } : undefined });
+    expect((await verifySelections(actor, "company-a", [selection], transport))[0]?.accountName).toBe("Materials purchase");
+  });
+
+  it.each([null, [], "PRIVATE PROVIDER DATA", { account_id: "999" }])("rejects a present malformed nested account without borrowing valid flat fields: %o", async nested => {
+    const { transport } = connection({ intercept: url => url.pathname.endsWith("/chartofaccounts/301")
+      ? { code: 0, ...account(), chart_of_account: nested } : undefined });
+    await expect(verifySelections(actor, "company-a", [selection], transport)).rejects.toMatchObject({ status: 422, message: expect.stringContaining("account is unavailable") });
+  });
+
+  it.each(["301", "999"])("rejects dual account carriers that could hide conflicting activity or identity: %s", async flatId => {
+    const { transport } = connection({ intercept: url => url.pathname.endsWith("/chartofaccounts/301")
+      ? { code: 0, ...account({ account_id: flatId, is_active: false }), chart_of_account: account() } : undefined });
+    await expect(verifySelections(actor, "company-a", [selection], transport)).rejects.toMatchObject({ status: 422, message: expect.stringContaining("account is unavailable") });
+  });
+
+  it.each(["object", "singular-array", "plural-array"])("accepts exactly one selected tax in the %s envelope", async mode => {
+    const { transport } = connection({ intercept: url => url.pathname.endsWith("/taxes/401")
+      ? mode === "object" ? { code: 0, tax: tax() } : mode === "singular-array" ? { code: 0, tax: [tax()] } : { code: 0, taxes: [tax()] } : undefined });
+    expect((await verifySelections(actor, "company-a", [selection], transport))[0]?.taxRate).toBe("5.00");
+  });
+
+  it.each([
+    { tax: [] }, { tax: [tax(), tax()] }, { tax: [tax(), tax({ tax_id: "402" })] },
+    { tax: tax({ tax_id: "402" }) }, { tax: null }, { tax: tax(), taxes: [tax()] }, { taxes: tax() },
+  ])("rejects ambiguous, missing or unrelated selected-tax evidence: %o", async envelope => {
+    const { transport } = connection({ intercept: url => url.pathname.endsWith("/taxes/401") ? { code: 0, ...envelope } : undefined });
+    await expect(verifySelections(actor, "company-a", [selection], transport)).rejects.toMatchObject({ status: 422, message: expect.stringContaining("tax is unavailable") });
+  });
+
+  it.each(["account", "tax"])("reports an exact missing %s detail as an unavailable selection", async kind => {
+    const { transport } = connection();
+    const original = transport.request.bind(transport);
+    vi.spyOn(transport, "request").mockImplementation(async (path, options) => {
+      if (path === (kind === "account" ? "/books/v3/chartofaccounts/301" : "/books/v3/settings/taxes/401"))
+        throw new (await import("@/lib/integrations/config")).IntegrationError("REMOTE_NOT_FOUND", "The referenced external record was not found.", "FAILED");
+      return original(path, options);
+    });
+    await expect(verifySelections(actor, "company-a", [selection], transport)).rejects.toMatchObject({ status: 422 });
+  });
+
+  it("settles outstanding reads before reporting a deterministic organization failure", async () => {
+    let release!: () => void, completed = false;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const { transport, fetcher } = connection({ intercept: async url => {
+      if (url.pathname.includes("/organizations/")) { await gate; return { code: 0, organization: { organization_id: "999", is_org_active: true } }; }
+      if (url.pathname.endsWith("/chartofaccounts/301")) return { code: 0, chart_of_account: null };
+    } });
+    const pending = verifySelections(actor, "company-a", [selection], transport);
+    const result = pending.then(() => { completed = true; }, error => { completed = true; throw error; });
+    const assertion = expect(result).rejects.toThrow("active organization");
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(4));
+    expect(completed).toBe(false); release(); await assertion;
+  });
+
+  it("rechecks revocation after all reads even when an accounting detail is invalid", async () => {
+    const { transport } = connection({ intercept: url => {
+      if (url.pathname.endsWith("/chartofaccounts/301")) return { code: 0, chart_of_account: null };
+    }, onRead: url => { if (url.pathname.endsWith("/401")) grantRevoked = true; } });
+    await expect(verifySelections(actor, "company-a", [selection], transport)).rejects.toMatchObject({ status: 409, message: expect.stringContaining("connection changed") });
+  });
+
+  it.each([12, 13])("uses exact details up to twelve distinct account/tax IDs, then bounded full catalogs: %i", async count => {
+    const accounts = Array.from({ length: count - 1 }, (_, index) => account({ account_id: String(301 + index) }));
+    const input = accounts.map(row => ({ ...selection, accountId: String(row.account_id), customerId: null, customerName: null }));
+    const { transport, fetcher } = connection({ accounts, intercept: url => url.pathname.includes("/chartofaccounts/")
+      ? { code: 0, ...account({ account_id: url.pathname.split("/").at(-1) }) } : undefined });
+    expect(await verifySelections(actor, "company-a", input, transport)).toHaveLength(count - 1);
+    const paths = fetcher.mock.calls.map(([url]) => new URL(url).pathname);
+    if (count === 12) {
+      expect(paths).toHaveLength(13); expect(paths).not.toContain("/books/v3/chartofaccounts"); expect(paths).not.toContain("/books/v3/settings/taxes");
+    } else {
+      expect(paths.sort()).toEqual(["/books/v3/chartofaccounts", "/books/v3/organizations/1001", "/books/v3/settings/taxes"]);
+    }
+  });
+
+  it("does not read any tax endpoint for an entirely No VAT bill even in the diverse-account fallback", async () => {
+    const accounts = Array.from({ length: 13 }, (_, index) => account({ account_id: String(301 + index) }));
+    const input = accounts.map(row => ({ ...selection, accountId: row.account_id, taxId: BOOKS_NO_VAT,
+      taxName: BOOKS_NO_VAT_NAME, taxRate: "0.00", customerId: null, customerName: null }));
+    const { transport, fetcher } = connection({ accounts });
+    expect(await verifySelections(actor, "company-a", input, transport)).toHaveLength(13);
+    expect(fetcher.mock.calls.map(([url]) => new URL(url).pathname).sort())
+      .toEqual(["/books/v3/chartofaccounts", "/books/v3/organizations/1001"]);
+  });
+
   it("verifies No VAT account/customer identities without borrowing a zero-rate tax", async () => {
     const { transport, fetcher } = connection({ taxes: [tax({ tax_id: "402", tax_name: "Zero Rate", tax_percentage: 0 })] });
     const noVat = { ...selection, taxId: BOOKS_NO_VAT, taxName: BOOKS_NO_VAT_NAME, taxRate: "0.00" };
     expect(await verifySelections(actor, "company-a", [noVat], transport)).toEqual([
       { ...noVat, accountName: "Materials purchase", customerName: "Customer A" },
     ]);
-    expect(fetcher).toHaveBeenCalledTimes(4);
+    expect(fetcher).toHaveBeenCalledTimes(3);
     expect(fetcher.mock.calls.every(([url, init]) => init?.method === "GET" && !new URL(url).pathname.includes(BOOKS_NO_VAT))).toBe(true);
     await expect(verifySelections(actor, "company-a", [noVat], connection({ accounts: [account({ is_active: false })] }).transport))
       .rejects.toMatchObject({ status: 422 });
@@ -278,13 +404,13 @@ describe("fresh bill Books selection verification", () => {
     await getOptions(actor, { companyId: "company-a" }, connection().transport);
     const changed = connection({ accounts: [account({ is_active: false })] });
     await expect(verifySelections(actor, "company-a", [selection], changed.transport)).rejects.toMatchObject({ status: 422 });
-    expect(changed.fetcher).toHaveBeenCalledTimes(3);
+    expect(changed.fetcher).toHaveBeenCalledTimes(4);
   });
 
   it("rejects a changed or forged tax rate instead of silently changing reviewed totals", async () => {
     const { transport, fetcher } = connection({ taxes: [tax({ tax_percentage: 10 })] });
     await expect(verifySelections(actor, "company-a", [selection], transport)).rejects.toMatchObject({ status: 409, message: expect.stringContaining("tax rate changed") });
-    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(fetcher).toHaveBeenCalledTimes(4);
     await expect(verifySelections(actor, "company-a", [{ ...selection, taxRate: "99.00" }], connection().transport)).rejects.toMatchObject({ status: 409 });
   });
 
@@ -304,7 +430,7 @@ describe("fresh bill Books selection verification", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
-  it.each(["missing-account", "inactive-account", "unsupported-account", "missing-tax", "inactive-tax", "compound-tax", "precision-tax"])("rejects %s", async mode => {
+  it.each(["missing-account", "inactive-account", "unsupported-account", "missing-tax", "inactive-tax", "compound-tax", "precision-tax", "factor-tax", "conflicting-tax-activity"])("rejects %s", async mode => {
     const accounts = [account()]; const taxes = [tax()];
     if (mode === "missing-account") accounts[0].account_id = "999";
     if (mode === "inactive-account") accounts[0].is_active = false;
@@ -313,6 +439,8 @@ describe("fresh bill Books selection verification", () => {
     if (mode === "inactive-tax") taxes[0].is_active = false;
     if (mode === "compound-tax") taxes[0].tax_type = "tax_group";
     if (mode === "precision-tax") taxes[0].tax_percentage = 5.125;
+    if (mode === "factor-tax") Object.assign(taxes[0], { tax_factor: "share" });
+    if (mode === "conflicting-tax-activity") Object.assign(taxes[0], { is_active: true, status: "inactive" });
     await expect(verifySelections(actor, "company-a", [selection], connection({ accounts, taxes }).transport)).rejects.toMatchObject({ status: 422 });
   });
 

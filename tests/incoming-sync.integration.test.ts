@@ -50,6 +50,37 @@ async function oldIntervalState(data: Prisma.IncomingSyncStateUpdateInput = {}) 
 }
 
 describe("durable incoming worker fencing", () => {
+  it("does not change a future blocked source's large checkpoint or row timestamp on repeated idle ticks", async () => {
+    const previous = await oldIntervalState({ status: "BLOCKED", nextRunAt: new Date(Date.now() + 3600_000),
+      checkpoint: { pendingPage: "x".repeat(292_000) }, lastErrorCode: "INCOMING_AUTHORIZATION_REQUIRED", lastHeartbeatAt: new Date() });
+    for (let index = 0; index < 4; index++) await processIncomingSync(actor);
+    expect(await state()).toEqual(previous);
+    expect(mocks.books).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
+  });
+  it("coalesces simultaneous due heartbeats without changing the checkpoint, schedule or lease", async () => {
+    const previous = await oldIntervalState({ status: "BLOCKED", nextRunAt: new Date(Date.now() + 3600_000),
+      checkpoint: { pendingPage: "x".repeat(292_000) }, lastErrorCode: "INCOMING_AUTHORIZATION_REQUIRED", lastHeartbeatAt: new Date(Date.now() - 31_000) });
+    const write = vi.spyOn(db.incomingSyncState, "updateMany");
+    try {
+      await Promise.all([processIncomingSync(actor), processIncomingSync(actor)]);
+      const heartbeats = write.mock.calls.flatMap(([argument], index) => argument.data.lastHeartbeatAt && !argument.data.leaseToken ? [write.mock.results[index].value] : []);
+      expect((await Promise.all(heartbeats)).reduce((count, result) => count + result.count, 0)).toBe(1);
+    } finally { write.mockRestore(); }
+    const saved = await state();
+    expect(saved).toEqual({ ...previous, lastHeartbeatAt: saved.lastHeartbeatAt, updatedAt: saved.updatedAt });
+    expect(saved.lastHeartbeatAt!.valueOf()).toBeGreaterThan(previous.lastHeartbeatAt!.valueOf());
+    await processIncomingSync(actor); expect(await state()).toEqual(saved);
+    expect(mocks.books).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
+  });
+  it("commits a source-change block immediately and keeps identical blocked rows unchanged on subsequent ticks", async () => {
+    await oldIntervalState({ status: "IDLE", scopeHash: "f".repeat(64), lastErrorCode: null, lastHeartbeatAt: new Date() });
+    await processIncomingSync(actor);
+    const blocked = await state();
+    expect(blocked).toMatchObject({ status: "BLOCKED", lastErrorCode: "INCOMING_SOURCE_CHANGED" });
+    await processIncomingSync(actor); await processIncomingSync(actor);
+    expect(await state()).toEqual(blocked);
+    expect(mocks.books).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
+  });
   it.each([{ interval: "5", delay: 5000 }, { interval: "", delay: 60000 }])("commits freshness and schedules the next read after $delay ms without provider financial writes", async ({ interval, delay }) => {
     vi.stubEnv("INCOMING_SYNC_INTERVAL_SECONDS", interval);
     expect(await processIncomingSync(actor)).toMatchObject({ enabled: true, processed: 2, sources: 1 });

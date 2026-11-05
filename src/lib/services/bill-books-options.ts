@@ -12,7 +12,7 @@ import { booksConfigurationHash, getConfig, IntegrationError, type ZohoConfig } 
 import { connectionFingerprint } from "@/lib/integrations/connection-fingerprint";
 import { accessToken, LEGACY_UNSCOPED_ORGANIZATION } from "@/lib/integrations/oauth";
 import { ZohoTransport } from "@/lib/integrations/transport";
-import { parseBooksCatalogPage, type BooksCatalogEntry } from "./books-accounting-catalog";
+import { parseBooksCatalogDetail, parseBooksCatalogPage, type BooksCatalogEntry } from "./books-accounting-catalog";
 
 const externalId = z.string().regex(/^\d{1,30}$/);
 const label = z.string().trim().min(1).max(200).regex(/^[^\u0000-\u001f\u007f]+$/);
@@ -131,28 +131,28 @@ function transportFor(value: Context, provided?: ZohoTransport) {
   return provided ?? new ZohoTransport(config, () => accessToken(config));
 }
 
-async function readCatalog(transport: ZohoTransport): Promise<Catalog> {
+async function readOrganization(transport: ZohoTransport) {
   const organization = z.object({ code: z.literal(0), organization: z.object({ organization_id: externalId, is_org_active: z.literal(true) }) }).safeParse(
     await transport.request(`/books/v3/organizations/${transport.config.organizationId}`, { method: "GET" }),
   );
   if (!organization.success || organization.data.organization.organization_id !== transport.config.organizationId)
     throw invalid("Books did not confirm the requested active organization.");
-  async function read(kind: "accounts" | "taxes", path: string) {
-    const rows: BooksCatalogEntry[] = [];
-    const seen = new Set<string>();
-    for (let page = 1; page <= 10; page++) {
-      const parsed = parseBooksCatalogPage(kind, await transport.request(path, { method: "GET", query: { page: String(page), per_page: "100" } }), page);
-      for (const row of parsed.entries) {
-        if (seen.has(row.id)) throw invalid("Books returned duplicate accounting options.");
-        seen.add(row.id); rows.push(row);
-      }
-      if (!parsed.hasMore) return rows;
-      if (!parsed.entries.length) throw invalid("Books returned invalid accounting pagination.");
+}
+async function readCatalogRows(transport: ZohoTransport, kind: "accounts" | "taxes", path: string) {
+  const rows: BooksCatalogEntry[] = [];
+  const seen = new Set<string>();
+  for (let page = 1; page <= 10; page++) {
+    const parsed = parseBooksCatalogPage(kind, await transport.request(path, { method: "GET", query: { page: String(page), per_page: "100" } }), page);
+    for (const row of parsed.entries) {
+      if (seen.has(row.id)) throw invalid("Books returned duplicate accounting options.");
+      seen.add(row.id); rows.push(row);
     }
-    throw invalid("Books accounting options exceed the supported catalog limit.");
+    if (!parsed.hasMore) return rows;
+    if (!parsed.entries.length) throw invalid("Books returned invalid accounting pagination.");
   }
-  const accounts = await read("accounts", "/books/v3/chartofaccounts");
-  const taxes = await read("taxes", "/books/v3/settings/taxes");
+  throw invalid("Books accounting options exceed the supported catalog limit.");
+}
+function catalogOptions(accounts: BooksCatalogEntry[], taxes: BooksCatalogEntry[]): Catalog {
   return {
     accounts: accounts.map(row => ({ id: row.id, name: row.label, type: row.type!, selectable: row.active === true && billAccountTypes.has(row.type!) })),
     taxes: [{ id: BOOKS_NO_VAT, name: BOOKS_NO_VAT_NAME, rate: "0.00", selectable: true }, ...taxes.map(row => {
@@ -160,6 +160,42 @@ async function readCatalog(transport: ZohoTransport): Promise<Catalog> {
       return { id: row.id, name: row.label, rate: rate.toFixed(), selectable: row.supported && rate.decimalPlaces() <= 2 };
     })],
   };
+}
+async function readCatalog(transport: ZohoTransport): Promise<Catalog> {
+  await readOrganization(transport);
+  // Pagination remains sequential within each catalog; independent catalogs overlap.
+  const outcomes = await Promise.allSettled([
+    readCatalogRows(transport, "accounts", "/books/v3/chartofaccounts"),
+    readCatalogRows(transport, "taxes", "/books/v3/settings/taxes"),
+  ]);
+  for (const result of outcomes) if (result.status === "rejected") throw result.reason;
+  return catalogOptions((outcomes[0] as PromiseFulfilledResult<BooksCatalogEntry[]>).value,
+    (outcomes[1] as PromiseFulfilledResult<BooksCatalogEntry[]>).value);
+}
+
+/** Settle every bounded read and report failures in request order, not timing order. */
+async function settleVerificationReads(tasks: readonly (() => Promise<void>)[]) {
+  const failures: ({ error: unknown } | undefined)[] = new Array(tasks.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(4, tasks.length) }, async () => {
+    while (next < tasks.length) {
+      const index = next++;
+      try { await tasks[index](); } catch (error) { failures[index] = { error }; }
+    }
+  }));
+  return failures.find(Boolean);
+}
+const accountUnavailable = () => new HttpError(422, "A selected Books account is unavailable or unsupported. Choose a current purchase, expense or asset account.");
+const taxUnavailable = () => new HttpError(422, "A selected Books tax is unavailable or unsupported. Choose a current simple percentage tax.");
+async function readSelectedRecord(transport: ZohoTransport, kind: "accounts" | "taxes", id: string) {
+  let raw: unknown;
+  try { raw = await transport.request(`${kind === "accounts" ? "/books/v3/chartofaccounts" : "/books/v3/settings/taxes"}/${id}`, { method: "GET" }); }
+  catch (error) {
+    if (error instanceof IntegrationError && error.code === "REMOTE_NOT_FOUND") throw kind === "accounts" ? accountUnavailable() : taxUnavailable();
+    throw error;
+  }
+  try { return parseBooksCatalogDetail(kind, raw, id); }
+  catch { throw kind === "accounts" ? accountUnavailable() : taxUnavailable(); }
 }
 
 const customerSchema = z.object({ contact_id: externalId, contact_name: label, contact_type: z.literal("customer"), status: z.literal("active"), currency_code: currencySchema });
@@ -240,28 +276,38 @@ export async function verifyBillBooksSelections(
   const customerIds = [...new Set(selected.flatMap(selection => selection.customerId ? [selection.customerId] : []))];
   if (customerIds.length > 25) throw new HttpError(422, "A bill can verify up to 25 distinct Books customers. Split this bill before continuing.");
   const transport = transportFor(before, provided);
-  // Full bounded fresh catalogs detect inactive, missing or duplicated IDs and
-  // retain the provider's authoritative account/tax names and percentages.
-  const catalog = await readCatalog(transport);
+  const accountIds = [...new Set(selected.map(selection => selection.accountId))];
+  const taxIds = [...new Set(selected.flatMap(selection => selection.taxId !== BOOKS_NO_VAT ? [selection.taxId] : []))];
+  let accounts: BooksCatalogEntry[] = [], taxes: BooksCatalogEntry[] = [];
+  const customers = new Map<string, BillBooksCustomerOption>();
+  const tasks: (() => Promise<void>)[] = [() => readOrganization(transport)];
+  // Ordinary invoices read only their exact selected IDs. Highly diverse bills
+  // retain bounded full catalogs rather than issuing up to200 individual reads.
+  if (accountIds.length + taxIds.length <= 12) {
+    for (const id of accountIds) tasks.push(async () => { accounts.push(await readSelectedRecord(transport, "accounts", id)); });
+    for (const id of taxIds) tasks.push(async () => { taxes.push(await readSelectedRecord(transport, "taxes", id)); });
+  } else {
+    tasks.push(async () => { accounts = await readCatalogRows(transport, "accounts", "/books/v3/chartofaccounts"); });
+    if (taxIds.length) tasks.push(async () => { taxes = await readCatalogRows(transport, "taxes", "/books/v3/settings/taxes"); });
+  }
+  for (const customerId of customerIds) tasks.push(async () => {
+    const result = await readCustomers(transport, { companyId: input.companyId, customerQuery: "", customerId });
+    customers.set(customerId, result.customers[0]);
+  });
+  const failure = await settleVerificationReads(tasks);
+  await recheck(actor, before);
+  if (failure) throw failure.error;
+  const catalog = catalogOptions(accounts, taxes);
   for (const selection of selected) {
     if (!catalog.accounts.some(account => account.id === selection.accountId && account.selectable))
-      throw new HttpError(422, "A selected Books account is unavailable or unsupported. Choose a current purchase, expense or asset account.");
+      throw accountUnavailable();
     if (selection.taxId === BOOKS_NO_VAT) continue;
     const tax = catalog.taxes.find(tax => tax.id === selection.taxId && tax.selectable);
     if (!tax)
-      throw new HttpError(422, "A selected Books tax is unavailable or unsupported. Choose a current simple percentage tax.");
+      throw taxUnavailable();
     if (!new Decimal(tax.rate).equals(selection.taxRate))
       throw new HttpError(409, "A selected Books tax rate changed. Reload the options and review the invoice totals before saving.");
   }
-  const customers = new Map<string, BillBooksCustomerOption>();
-  for (let offset = 0; offset < customerIds.length; offset += 4) {
-    const batch = await Promise.all(customerIds.slice(offset, offset + 4).map(async customerId => {
-      const result = await readCustomers(transport, { companyId: input.companyId, customerQuery: "", customerId });
-      return result.customers[0];
-    }));
-    for (const customer of batch) customers.set(customer.id, customer);
-  }
-  await recheck(actor, before);
   return input.selections.map(selection => {
     if (!selection) return null;
     const account = catalog.accounts.find(row => row.id === selection.accountId)!;

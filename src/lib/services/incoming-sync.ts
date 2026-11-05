@@ -14,6 +14,12 @@ import { runIncomingBooksSync, syncIncomingBooksAttachments } from "./incoming-b
 import { syncIncomingCrm } from "./incoming-crm-sync";
 
 const txOptions = { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 60_000 };
+// Status considers a worker alive for120s. Avoid logging a large paused JSON
+// checkpoint every one-second poll merely to refresh its liveness timestamp.
+const heartbeatIntervalMs = 30_000;
+const heartbeatDue = (at: Date | null, now: Date) => !at || at.valueOf() <= now.valueOf() - heartbeatIntervalMs;
+const heartbeatBefore = (now: Date) => ({ OR: [{ lastHeartbeatAt: null },
+  { lastHeartbeatAt: { lte: new Date(now.valueOf() - heartbeatIntervalMs) } }] });
 const identity = (source: IncomingSource) => ({ target: source.target, organizationId: source.organizationId, dataCenter: source.dataCenter, environment: source.environment });
 function future(value: unknown) { const at = typeof value === "string" ? new Date(value) : null; return at && Number.isFinite(at.valueOf()) && at.valueOf() > Date.now() ? at : null; }
 export function incomingConfiguredDelay(source: IncomingSource, env: NodeJS.ProcessEnv = process.env) {
@@ -27,8 +33,13 @@ async function seedState(actor: Actor, source: IncomingSource & { scopeHash: str
   const existing = await db.incomingSyncState.findUnique({ where: { target_organizationId_dataCenter_environment: identity(source) } });
   if (existing) {
     if (existing.scopeHash !== source.scopeHash || existing.companyId !== source.companyId) {
-      await db.incomingSyncState.updateMany({ where: { id: existing.id, OR: [{ leaseToken: null }, { leaseExpiresAt: { lt: new Date() } }] },
-        data: { status: "BLOCKED", lastErrorCode: "INCOMING_SOURCE_CHANGED", lastHeartbeatAt: new Date() } });
+      const now = new Date();
+      if (existing.status !== "BLOCKED" || existing.lastErrorCode !== "INCOMING_SOURCE_CHANGED" || heartbeatDue(existing.lastHeartbeatAt, now))
+        await db.incomingSyncState.updateMany({ where: { id: existing.id,
+          OR: [{ leaseToken: null }, { leaseExpiresAt: { lt: now } }],
+          AND: [{ OR: [{ status: { not: "BLOCKED" } }, { lastErrorCode: null },
+            { lastErrorCode: { not: "INCOMING_SOURCE_CHANGED" } }, ...heartbeatBefore(now).OR] }] },
+          data: { status: "BLOCKED", lastErrorCode: "INCOMING_SOURCE_CHANGED", lastHeartbeatAt: now } });
       return null;
     }
     return existing;
@@ -65,7 +76,10 @@ export async function processIncomingSync(actor: Actor, options: { signal?: Abor
     if (options.signal?.aborted) break;
     let state = await seedState(actor, source);
     if (!state) continue;
-    await db.incomingSyncState.updateMany({ where: { id: state.id, scopeHash: source.scopeHash }, data: { lastHeartbeatAt: new Date() } });
+    const heartbeatAt = new Date();
+    if (heartbeatDue(state.lastHeartbeatAt, heartbeatAt))
+      await db.incomingSyncState.updateMany({ where: { id: state.id, scopeHash: source.scopeHash, ...heartbeatBefore(heartbeatAt) },
+        data: { lastHeartbeatAt: heartbeatAt } });
     let delay = incomingConfiguredDelay(source);
     const external = await options.externalDelay?.(source);
     if (external && (!delay || external > delay)) delay = external;

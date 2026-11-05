@@ -45,6 +45,33 @@ const pageSize = 100;
 const pageLimit = 10;
 const blocked = (code: string, message: string) => new IntegrationError(code, message, "BLOCKED");
 
+/** The exact-ID save path uses the same activity, type and rate rules as catalogs. */
+export function parseBooksCatalogDetail(kind: "accounts" | "taxes", value: unknown, expectedId: string): BooksCatalogEntry {
+  const envelope = z.object({ code: z.literal(0) }).loose().safeParse(value);
+  if (!envelope.success || !id.safeParse(expectedId).success)
+    throw blocked("CATALOG_RESPONSE_INVALID", "Books returned invalid selected accounting metadata.");
+  const response = envelope.data;
+  let candidate: unknown;
+  if (kind === "accounts") {
+    if (Object.hasOwn(response, "chart_of_account") && Object.hasOwn(response, "account_id"))
+      throw blocked("CATALOG_RESPONSE_INVALID", "Books returned ambiguous selected account metadata.");
+    candidate = Object.hasOwn(response, "chart_of_account") ? response.chart_of_account : response;
+  } else {
+    const singular = Object.hasOwn(response, "tax"), plural = Object.hasOwn(response, "taxes");
+    if (singular === plural || (plural && !Array.isArray(response.taxes)))
+      throw blocked("CATALOG_RESPONSE_INVALID", "Books returned ambiguous selected tax metadata.");
+    const raw = singular ? response.tax : response.taxes;
+    const rows = Array.isArray(raw) ? raw : [raw];
+    if (rows.length !== 1)
+      throw blocked("CATALOG_RESPONSE_INVALID", "Books did not return one exact selected tax.");
+    candidate = rows[0];
+  }
+  const parsed = schemas[kind].safeParse(candidate);
+  if (!parsed.success || parsed.data.id !== expectedId)
+    throw blocked("CATALOG_RESPONSE_INVALID", "Books did not confirm the exact selected accounting record.");
+  return parsed.data;
+}
+
 /** Strips balances, contact details and all unknown provider fields from operator output. */
 export function parseBooksCatalogPage(kind: CatalogKind, value: unknown, expectedPage: number) {
   const response = z.object({ code: z.literal(0), page_context: z.object({
