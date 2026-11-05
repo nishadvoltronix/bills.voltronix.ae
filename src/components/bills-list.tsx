@@ -41,7 +41,7 @@ export function BillsList({ approvals = false }: { approvals?: boolean }) {
   const [category, setCategory] = useState("");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
-  const [sort, setSort] = useState("date_desc");
+  const [sort, setSort] = useState(user.role === "ADMIN" && !approvals ? "updated_desc" : "date_desc");
   const [page, setPage] = useState(1);
   const [advanced, setAdvanced] = useState(false);
   const query = new URLSearchParams({ page: String(page), sort });
@@ -199,8 +199,9 @@ export function BillsList({ approvals = false }: { approvals?: boolean }) {
               setPage(1);
             }}
           >
-            <option value="date_desc">Newest first</option>
-            <option value="date_asc">Oldest first</option>
+            <option value="updated_desc">Latest updated</option>
+            <option value="date_desc">Invoice date: newest</option>
+            <option value="date_asc">Invoice date: oldest</option>
             <option value="total_desc">Highest amount</option>
             <option value="total_asc">Lowest amount</option>
           </Select>

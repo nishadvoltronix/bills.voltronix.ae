@@ -926,8 +926,8 @@ const listSchema = z.object({
   dateFrom: z.iso.date().optional(),
   dateTo: z.iso.date().optional(),
   sort: z
-    .enum(["date_desc", "date_asc", "total_desc", "total_asc"])
-    .default("date_desc"),
+    .enum(["updated_desc", "date_desc", "date_asc", "total_desc", "total_asc"])
+    .optional(),
   page: z.coerce.number().int().min(1).max(100000).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(25),
 });
@@ -964,15 +964,16 @@ export async function listBills(actor: Actor, params: URLSearchParams) {
     where.paidAmount = { gt: 0, lt: db.bill.fields.total };
   if (input.paymentStatus === "PAID")
     where.paidAmount = { gt: 0, equals: db.bill.fields.total };
-  const orderBy: Prisma.BillOrderByWithRelationInput[] = input.sort.startsWith(
-    "total",
-  )
-    ? [{ total: input.sort.endsWith("asc") ? "asc" : "desc" }, { id: "asc" }]
-    : [
-        { invoiceDate: input.sort.endsWith("asc") ? "asc" : "desc" },
-        { createdAt: "desc" },
-        { id: "asc" },
-      ];
+  const sort = input.sort ?? (actor.role === "ADMIN" ? "updated_desc" : "date_desc");
+  const orderBy: Prisma.BillOrderByWithRelationInput[] = sort === "updated_desc"
+    ? [{ updatedAt: "desc" }, { createdAt: "desc" }, { id: "desc" }]
+    : sort.startsWith("total")
+      ? [{ total: sort.endsWith("asc") ? "asc" : "desc" }, { id: "asc" }]
+      : [
+          { invoiceDate: sort.endsWith("asc") ? "asc" : "desc" },
+          { createdAt: "desc" },
+          { id: "asc" },
+        ];
   const [bills, total] = await db.$transaction(
     async (tx) => {
       const bills = await tx.bill.findMany({
