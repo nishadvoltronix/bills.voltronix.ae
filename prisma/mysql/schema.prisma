@@ -84,6 +84,7 @@ model User {
   booksImportRuns       BooksImportRun[]
   crmImportRuns         CrmImportRun[]
   initiatedVendorSyncs VendorBooksSync[] @relation("VendorSyncInitiator")
+  initiatedPaymentSyncs PaymentBooksSync[] @relation("PaymentSyncInitiator")
 }
 
 model Session {
@@ -236,6 +237,7 @@ model Bill {
   approvedBy              User?            @relation("BillApprover", fields: [approvedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
   lines                   BillLine[]
   payments                Payment[]
+  paymentBooksSyncs        PaymentBooksSync[]
   documents               Document[]
   syncRecords             SyncRecord[]
   ocrDocument             OcrDocument?
@@ -245,6 +247,7 @@ model Bill {
   @@unique([vendorId, normalizedInvoiceNumber])
   @@index([companyId, status, invoiceDate])
   @@index([jobId, status])
+  @@unique([id, companyId])
   @@index([createdById])
   @@index([status, invoiceDate])
   @@index([invoiceDate])
@@ -268,13 +271,52 @@ model Payment {
   billId      String   @db.VarChar(100)
   amount      Decimal  @db.Decimal(18, 2)
   reference   String   @db.VarChar(200)
+  paymentDate DateTime? @db.Date
+  paymentMode String?   @db.VarChar(50)
+  paidThroughAccountId String? @db.VarChar(100)
   createdById String   @db.VarChar(100)
   createdAt   DateTime @default(now()) @db.DateTime(3)
   bill        Bill     @relation(fields: [billId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   createdBy   User     @relation(fields: [createdById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  booksSync   PaymentBooksSync?
 
+  @@unique([id, billId])
   @@unique([billId, reference])
   @@index([billId])
+}
+
+model PaymentBooksSync {
+  id String @id @default(cuid()) @db.VarChar(100)
+  paymentId String @unique @db.VarChar(100)
+  billId String @db.VarChar(100)
+  companyId String @db.VarChar(100)
+  initiatedById String @db.VarChar(100)
+  organizationId String @db.VarChar(100)
+  dataCenter String @db.VarChar(2)
+  environment String @db.VarChar(10)
+  status String @default("QUEUED") @db.VarChar(16)
+  snapshot Json
+  sourceHash String @db.Char(64)
+  externalBillId String? @db.VarChar(100)
+  externalPaymentId String? @db.VarChar(100)
+  attempts Int @default(0)
+  submittedAt DateTime? @db.DateTime(3)
+  nextAttemptAt DateTime @default(now()) @db.DateTime(3)
+  leaseToken String? @db.Char(64)
+  leaseUntil DateTime? @db.DateTime(3)
+  errorCode String? @db.VarChar(80)
+  lastError String? @db.VarChar(500)
+  completedAt DateTime? @db.DateTime(3)
+  createdAt DateTime @default(now()) @db.DateTime(3)
+  updatedAt DateTime @updatedAt @db.DateTime(3)
+  payment Payment @relation(fields: [paymentId, billId], references: [id, billId], onDelete: Restrict, onUpdate: Restrict)
+  bill Bill @relation(fields: [billId, companyId], references: [id, companyId], onDelete: Restrict, onUpdate: Restrict)
+  initiatedBy User @relation("PaymentSyncInitiator", fields: [initiatedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  @@unique([paymentId, billId])
+  @@unique([organizationId, dataCenter, environment, externalPaymentId], map: "PaymentBooksSync_external_destination_key")
+  @@index([billId, companyId])
+  @@index([status, nextAttemptAt, leaseUntil])
+  @@index([initiatedById])
 }
 
 model Document {

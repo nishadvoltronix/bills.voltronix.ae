@@ -67,6 +67,9 @@ async function setup(page: Page, mode: "list" | "payment" = "payment", simultane
       if (state.mutationFailure.code === "AUTH_SESSION_REQUIRED") state.expired = true;
       return route.fulfill({ status: 401, json: state.mutationFailure });
     }
+    if (method === "GET" && path === `/api/companies/${company.id}/payment-accounts`)
+      return route.fulfill({ json: { companyId: company.id,
+        accounts: [{ id: "fictional-session-bank", name: "Fictional session bank", type: "bank", currency: "AED" }], warning: null } });
     if (method === "GET" && path === "/api/jobs") return route.fulfill({ json: { jobs: [state.bill.job] } });
     if (method === "GET" && path === "/api/vendors") return route.fulfill({ json: { vendors: [state.bill.vendor] } });
     state.unexpected.push(`${method} ${path}`);
@@ -83,10 +86,16 @@ async function reauthenticate(page: Page) {
 async function enterPayment(page: Page) {
   await page.getByLabel("Payment amount (AED)", { exact: true }).fill("25.00");
   await page.getByLabel("Payment reference", { exact: true }).fill("KEEP-SESSION-PAYMENT");
+  await page.getByLabel("Payment date", { exact: true }).fill("2026-11-05");
+  await page.getByLabel("Payment method", { exact: true }).selectOption("Bank Transfer");
+  await page.getByLabel("Paid through account", { exact: true }).selectOption("fictional-session-bank");
 }
 async function expectPaymentPreserved(page: Page) {
   await expect(page.getByLabel("Payment amount (AED)", { exact: true })).toHaveValue("25.00");
   await expect(page.getByLabel("Payment reference", { exact: true })).toHaveValue("KEEP-SESSION-PAYMENT");
+  await expect(page.getByLabel("Payment date", { exact: true })).toHaveValue("2026-11-05");
+  await expect(page.getByLabel("Payment method", { exact: true })).toHaveValue("Bank Transfer");
+  await expect(page.getByLabel("Paid through account", { exact: true })).toHaveValue("fictional-session-bank");
 }
 
 test("simultaneous company and bill session failures show one dialog and reload only reads after same-user sign-in", async ({ page }) => {

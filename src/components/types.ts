@@ -158,6 +158,14 @@ export type Payment = {
   amount: Money;
   reference?: string | null;
   createdAt: string;
+  paymentDate?: string | null;
+  paymentMode?: string | null;
+  paidThroughAccountId?: string | null;
+  booksSync?: {
+    status: "QUEUED" | "PROCESSING" | "SYNCED" | "FAILED" | "BLOCKED" | "UNKNOWN";
+    externalPaymentId: string | null;
+    errorCode?: string | null;
+  } | null;
 };
 export type Bill = {
   id: string;

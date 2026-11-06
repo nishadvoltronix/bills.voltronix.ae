@@ -64,6 +64,7 @@ model User {
   createdBills   Bill[]     @relation("BillCreator")
   approvedBills  Bill[]     @relation("BillApprover")
   payments       Payment[]
+  initiatedPaymentSyncs PaymentBooksSync[] @relation("PaymentSyncInitiator")
   documents      Document[]
   auditLogs      AuditLog[]
   ocrBatches     OcrBatch[]
@@ -172,6 +173,7 @@ model Bill {
   approvedBy              User?        @relation("BillApprover", fields: [approvedById], references: [id], onDelete: Restrict)
   lines                   BillLine[]
   payments                Payment[]
+  paymentBooksSyncs PaymentBooksSync[]
   documents               Document[]
   syncRecords             SyncRecord[]
   ocrDocument             OcrDocument?
@@ -179,6 +181,7 @@ model Bill {
 
   @@unique([vendorId, normalizedInvoiceNumber])
   @@index([jobId, status])
+  @@unique([id, companyId])
   @@index([createdById])
   @@index([status, invoiceDate])
   @@index([invoiceDate])
@@ -201,13 +204,52 @@ model Payment {
   billId      String
   amount      Decimal  @db.Decimal(18, 2)
   reference   String
+  paymentDate DateTime? @db.Date
+  paymentMode String?
+  paidThroughAccountId String?
   createdById String
   createdAt   DateTime @default(now())
   bill        Bill     @relation(fields: [billId], references: [id], onDelete: Restrict)
   createdBy   User     @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  booksSync PaymentBooksSync?
 
+  @@unique([id, billId])
   @@unique([billId, reference])
   @@index([billId])
+}
+
+model PaymentBooksSync {
+  id String @id @default(cuid())
+  paymentId String @unique
+  billId String
+  companyId String
+  initiatedById String
+  organizationId String
+  dataCenter String
+  environment String
+  status String @default("QUEUED")
+  snapshot Json
+  sourceHash String
+  externalBillId String?
+  externalPaymentId String?
+  attempts Int @default(0)
+  submittedAt DateTime?
+  nextAttemptAt DateTime @default(now())
+  leaseToken String?
+  leaseUntil DateTime?
+  errorCode String?
+  lastError String?
+  completedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  payment Payment @relation(fields: [paymentId, billId], references: [id, billId], onDelete: Restrict)
+  bill Bill @relation(fields: [billId, companyId], references: [id, companyId], onDelete: Restrict)
+  initiatedBy User @relation("PaymentSyncInitiator", fields: [initiatedById], references: [id], onDelete: Restrict)
+  @@unique([paymentId, billId])
+  @@unique([organizationId, dataCenter, environment, externalPaymentId], map: "PaymentBooksSync_external_destination_key")
+  @@index([billId, companyId])
+  @@index([status, nextAttemptAt, leaseUntil])
+  @@index([initiatedById])
 }
 
 model Document {

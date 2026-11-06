@@ -1,4 +1,10 @@
 import { randomUUID } from "node:crypto";
+// Payment-account catalog is an isolated provider fixture; ownership and transactions remain real.
+vi.mock("@/lib/services/payment-books-sync", async (original) => ({
+  ...await original<typeof import("@/lib/services/payment-books-sync")>(),
+  getPaymentAccounts: async (_actor: unknown, companyId: string) => ({ companyId,
+    accounts: [{ id: "9000001", name: "Fictional cash", type: "cash", currency: "AED" }], warning: null }),
+}));
 import { beforeAll, beforeEach, afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import type { Actor } from "@/lib/auth";
 import { db } from "@/lib/db";
@@ -181,7 +187,7 @@ describe("audited rejected finalized bill source corrections in disposable MySQL
   it("rejects stale proof after a legitimate local payment and preserves the payment", async () => {
     const fixture = await rejectedBill(false, "20.00");
     const prepared = await prepareBillSourceCorrection(admin, fixture.input, reader().transport);
-    await actOnBill(admin, fixture.bill.id, { action: "payment", version: fixture.bill.version, amount: "10", reference: `FICTIONAL-LATER-${tag}` });
+    await actOnBill(admin, fixture.bill.id, { action: "payment", paymentDate: "2026-11-06", paymentMode: "Cash", paidThroughAccountId: "9000001", version: fixture.bill.version, amount: "10", reference: `FICTIONAL-LATER-${tag}` });
     await expect(applyBillSourceCorrection(admin, prepared.proof)).rejects.toMatchObject({ status: 409 });
     expect((await db.bill.findUniqueOrThrow({ where: { id: fixture.bill.id } })).paidAmount.toFixed(2)).toBe("30.00");
     expect(await db.payment.count({ where: { billId: fixture.bill.id } })).toBe(2);

@@ -196,8 +196,21 @@ describe("server input schemas", () => {
         version: 1,
         amount: "25.00",
         reference: "REF",
+        paymentDate: "2026-11-06",
+        paymentMode: "Bank Transfer",
+        paidThroughAccountId: "123456",
       }).success,
     ).toBe(true);
+  });
+  it("requires payment accounting details without guessing a date, method or account", () => {
+    const payment = { action: "payment", version: 1, amount: "25.00", reference: "REF",
+      paymentDate: "2026-11-06", paymentMode: "Cash", paidThroughAccountId: "123456" };
+    for (const field of ["paymentDate", "paymentMode", "paidThroughAccountId"] as const) {
+      expect(billActionSchema.safeParse({ ...payment, [field]: undefined }).success).toBe(false);
+    }
+    expect(billActionSchema.safeParse({ ...payment, paymentDate: "2026-02-30" }).success).toBe(false);
+    expect(billActionSchema.safeParse({ ...payment, paymentMode: "unknown" }).success).toBe(false);
+    expect(billActionSchema.safeParse({ ...payment, paidThroughAccountId: "another-company" }).success).toBe(false);
   });
   it("permits missing job values while rejecting negative adjusted value", () => {
     const base = {

@@ -1,4 +1,10 @@
 import { randomUUID } from "node:crypto";
+// Payment-account catalog is an isolated provider fixture; ownership and transactions remain real.
+vi.mock("@/lib/services/payment-books-sync", async (original) => ({
+  ...await original<typeof import("@/lib/services/payment-books-sync")>(),
+  getPaymentAccounts: async (_actor: unknown, companyId: string) => ({ companyId,
+    accounts: [{ id: "9000001", name: "Fictional cash", type: "cash", currency: "AED" }], warning: null }),
+}));
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Actor } from "@/lib/auth";
 import { db } from "@/lib/db";
@@ -151,9 +157,9 @@ describe("real MySQL automatic final-save sync and preserved historical permissi
     const operation = await queueBill(staff, bill.id, "ZOHO", organizationId);
     expect(operation.initiatedById).toBe(staff.id);
     expect(await db.liveSyncAuthorization.count({ where: { billId: bill.id } })).toBe(0);
-    await expect(actOnBill(accounts, bill.id, { action: "payment", version: bill.version, amount: "20", reference: `FORBIDDEN-PAYMENT-${tag}` })).rejects.toMatchObject({ status: 404 });
+    await expect(actOnBill(accounts, bill.id, { action: "payment", paymentDate: "2026-11-06", paymentMode: "Cash", paidThroughAccountId: "9000001", version: bill.version, amount: "20", reference: `FORBIDDEN-PAYMENT-${tag}` })).rejects.toMatchObject({ status: 404 });
     expect(await db.payment.count({ where: { billId: bill.id } })).toBe(0);
-    await actOnBill(admin, bill.id, { action: "payment", version: bill.version, amount: "20", reference: `LOCAL-PAYMENT-${tag}` });
+    await actOnBill(admin, bill.id, { action: "payment", paymentDate: "2026-11-06", paymentMode: "Cash", paidThroughAccountId: "9000001", version: bill.version, amount: "20", reference: `LOCAL-PAYMENT-${tag}` });
     await db.integrationJob.update({ where: { id: operation.id }, data: { nextAttemptAt: new Date(0) } });
     const posts: string[] = [];
     await processIntegrationJobs({ limit: 1, adapterFactory: fakeProvider(posts) });

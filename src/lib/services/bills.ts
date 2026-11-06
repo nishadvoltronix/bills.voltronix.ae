@@ -29,6 +29,7 @@ import {
 } from "@/lib/finance";
 import { HttpError } from "@/lib/http";
 import { assertCurrentBillReader } from "./bill-ownership";
+import { enqueuePaymentBooksSync, getPaymentAccounts } from "./payment-books-sync";
 import {
   assertBillCancellationSyncSafe,
   enqueueApprovedBillTx,
@@ -65,7 +66,7 @@ export const billInclude = {
       createdAt: true,
     },
   },
-  payments: { orderBy: { createdAt: "desc" as const } },
+  payments: { orderBy: { createdAt: "desc" as const }, include: { booksSync: true } },
   syncRecords: true,
 } satisfies Prisma.BillInclude;
 
@@ -105,6 +106,12 @@ export function serializeBill(bill: DetailedBill) {
     payments: bill.payments.map((payment) => ({
       ...payment,
       amount: payment.amount.toFixed(2),
+      paymentDate: payment.paymentDate?.toISOString().slice(0, 10) ?? null,
+      booksSync: payment.booksSync ? {
+        status: payment.booksSync.status,
+        externalPaymentId: payment.booksSync.externalPaymentId,
+        errorCode: payment.booksSync.errorCode,
+      } : null,
     })),
   };
 }
@@ -784,6 +791,18 @@ export async function actOnBill(actor: Actor, id: string, payload: unknown) {
   assertWriter(actor);
   const input = billActionSchema.parse(payload);
   let vendorVat: BillVendorVatVerification | undefined;
+  if (input.action === "payment") {
+    const source = await db.bill.findUnique({ where: { id } });
+    if (!source) throw new HttpError(404, "Bill not found.");
+    await assertBillAccess(actor, source);
+    if (!["ADMIN", "ACCOUNTS"].includes(actor.role) || !isRecognizedBillStatus(source.status))
+      throw new HttpError(403, "Only Accounts or Admin may record payments against finalized bills.");
+    if (source.version !== input.version) throw new HttpError(409, "The bill has changed. Refresh before recording a payment.");
+    const available = await getPaymentAccounts(actor, source.companyId);
+    const account = available.accounts.find(item => item.id === input.paidThroughAccountId);
+    if (!account || (account.currency && account.currency !== source.currency))
+      throw new HttpError(422, "Choose an active payment account for this company and bill currency.");
+  }
   if (input.action === "submit") {
     const source = await db.bill.findUnique({ where: { id }, include: { lines: true } });
     if (!source) throw new HttpError(404, "Bill not found.");
@@ -860,7 +879,7 @@ export async function actOnBill(actor: Actor, id: string, payload: unknown) {
           if (paid.greaterThan(bill.total.toString()))
             throw new HttpError(422, "Payment exceeds the outstanding amount.");
           data.paidAmount = paid.toFixed(2);
-          await tx.payment.create({
+          const payment = await tx.payment.create({
             data: {
               billId: id,
               amount: amount.toFixed(2),
@@ -869,8 +888,12 @@ export async function actOnBill(actor: Actor, id: string, payload: unknown) {
                 .trim()
                 .toUpperCase(),
               createdById: actor.id,
+              paymentDate: new Date(`${input.paymentDate!}T00:00:00.000Z`),
+              paymentMode: input.paymentMode!,
+              paidThroughAccountId: input.paidThroughAccountId!,
             },
           });
+          await enqueuePaymentBooksSync(tx, payment.id);
           break;
         }
       }
@@ -902,6 +925,9 @@ export async function actOnBill(actor: Actor, id: string, payload: unknown) {
             reason: input.reason ?? null,
             paymentReference: input.reference ?? null,
             paymentAmount: input.amount ?? null,
+            paymentDate: input.paymentDate ?? null,
+            paymentMode: input.paymentMode ?? null,
+            paidThroughAccountId: input.paidThroughAccountId ?? null,
           },
         },
       });

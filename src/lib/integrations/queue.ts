@@ -692,6 +692,7 @@ async function claimJob(jobId?: string) {
       },
     });
     if (active) return null;
+    if (await tx.paymentBooksSync.count({ where: { billId: candidate.billId, status: { in: ["PROCESSING", "UNKNOWN"] } } })) return null;
     return tx.integrationJob.update({
       where: { id: selected[0].id },
       data: {

@@ -16,26 +16,48 @@ const bill: Bill = {
 const render = (changes: Partial<Bill> = {}) => renderToStaticMarkup(createElement(NativeBillPaymentRecord, { bill: { ...bill, ...changes } }));
 
 describe("native bill payment presentation", () => {
-  it("shows the saved supplier, job, totals and a real amount/reference form for an unpaid bill", () => {
+  it("shows the saved bill and requires actual payment facts without claiming a funds transfer", () => {
     const html = render();
     expect(html).toContain("Fictional supplier"); expect(html).toContain("JOB-FICTIONAL");
     expect(html).toContain("Invoice total"); expect(html).toContain("Balance due");
     expect(html).toContain('value="105.00"'); expect(html).toContain("Payment reference");
-    expect(html).toContain("does not transfer funds or update Zoho Books");
+    expect(html).toContain("does not transfer money");
+    expect(html).toContain('type="date"'); expect(html).toContain("Payment method");
+    expect(html).toContain("Paid through account");
+    expect(html).toContain("Select the actual payment method");
     expect(html).not.toContain('aria-label="Paid in full"');
-    expect(html).not.toMatch(/type="date"|Payment method|Bank account|Mark as paid/);
+    expect(html).not.toContain("Mark as paid");
   });
   it("keeps partial payment distinct and uses only the remaining amount", () => {
     const html = render({ paymentStatus: "PARTIALLY_PAID", paidAmount: "40.00", payments: [{ id: "payment", amount: "40.00",
       reference: "FICTIONAL-RECEIPT", createdAt: "2026-11-03T08:00:00.000Z" }] });
     expect(html).toContain("partially paid"); expect(html).toContain('value="65.00"');
-    expect(html).toContain("FICTIONAL-RECEIPT"); expect(html).toContain("Recorded on (Dubai)");
+    expect(html).toContain("FICTIONAL-RECEIPT"); expect(html).toContain("Not supplied");
+    expect(html).toContain("Not sent to Zoho Books: payment details are missing.");
     expect(html).not.toContain('aria-label="Paid in full"');
   });
   it("shows the green-ribbon label and no entry form only after the server confirms exact full payment", () => {
     const html = render({ paymentStatus: "PAID", paidAmount: "105.00" });
     expect(html).toContain('aria-label="Paid in full"'); expect(html).toContain("This bill has no outstanding amount.");
     expect(html).not.toContain("Confirm payment");
+  });
+  it("does not infer a confirmed Books payment from a local Paid bill or its synced bill record", () => {
+    const html = render({ paymentStatus: "PAID", paidAmount: "105.00",
+      syncRecords: [{ id: "synced-bill", status: "SYNCED", externalId: "fictional-books-bill" }],
+      payments: [{ id: "payment", amount: "105.00", createdAt: "2026-11-06T08:00:00Z", paymentDate: "2026-11-05",
+        paymentMode: "Cash", paidThroughAccountId: "fictional-cash",
+        booksSync: { status: "QUEUED", externalPaymentId: null, errorCode: null } }] });
+    expect(html).toContain("Local payment summary");
+    expect(html).toContain("05 Nov 2026");
+    expect(html).toContain("Queued for Zoho Books.");
+    expect(html).not.toContain("Payment confirmed in Zoho Books.");
+  });
+  it("requires a remote payment identity before presenting Books confirmation", () => {
+    const payment = { id: "payment", amount: "105.00", createdAt: "2026-11-06T08:00:00Z" };
+    expect(render({ payments: [{ ...payment, booksSync: { status: "SYNCED", externalPaymentId: null } }] }))
+      .toContain("Zoho Books payment confirmation is unavailable.");
+    expect(render({ payments: [{ ...payment, booksSync: { status: "SYNCED", externalPaymentId: "fictional-books-payment" } }] }))
+      .toContain("Payment confirmed in Zoho Books.");
   });
   it.each([
     { status: "DRAFT", paymentStatus: "PAID", paidAmount: "105.00" },

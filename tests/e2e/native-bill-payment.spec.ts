@@ -4,6 +4,7 @@ import type { Bill } from "../../src/components/types";
 // Only LOCAL authentication reaches the app. Every bill and payment response is
 // fictional and intercepted; no financial or provider mutation is sent through.
 const billId = "fictional-payment-page";
+const paymentFacts = { paymentDate: "2026-11-06", paymentMode: "Bank Transfer", paidThroughAccountId: "fictional-bank" };
 const fixture = (): Bill => ({
   id: billId, companyId: "fictional-company", invoiceNumber: "FICTIONAL-PAYMENT-001", vendorId: "supplier", jobId: "job",
   invoiceDate: "2026-11-03", category: "MATERIALS", currency: "AED", status: "READY", paymentStatus: "UNPAID", total: "105.00",
@@ -17,12 +18,26 @@ const fixture = (): Bill => ({
 type Action = (body: Record<string, unknown>) => Promise<{ status?: number; json: unknown }>;
 async function setup(page: Page, initial = fixture(), fromEntry = false) {
   const state = { bill: initial, unexpected: [] as string[], actions: [] as Record<string, unknown>[],
+    reads: 0,
+    holdRead: null as Promise<void> | null,
+    accounts: { companyId: "fictional-company", accounts: [
+      { id: "fictional-bank", name: "Fictional operating bank", type: "bank", currency: "AED" },
+      { id: "fictional-cash", name: "Fictional petty cash", type: "cash", currency: "AED" },
+      { id: "foreign-currency", name: "Fictional USD account", type: "bank", currency: "USD" },
+    ], warning: null as string | null },
+    accountsError: null as { status: number; error: string } | null,
     action: (async () => ({ status: 409, json: { error: "Fictional payment response not configured." } })) as Action };
   await page.route("**/api/**", async route => {
     const request = route.request(), url = new URL(request.url());
     if (url.hostname !== "127.0.0.1") { state.unexpected.push("External API request"); return route.abort(); }
     if (url.pathname.startsWith("/api/auth/")) return route.continue();
-    if (url.pathname === `/api/bills/${billId}` && request.method() === "GET") return route.fulfill({ json: { bill: state.bill } });
+    if (url.pathname === `/api/bills/${billId}` && request.method() === "GET") {
+      state.reads++; if (state.holdRead) await state.holdRead;
+      return route.fulfill({ json: { bill: state.bill } });
+    }
+    if (url.pathname === "/api/companies/fictional-company/payment-accounts" && request.method() === "GET")
+      return state.accountsError ? route.fulfill({ status: state.accountsError.status, json: { error: state.accountsError.error } })
+        : route.fulfill({ json: state.accounts });
     if (url.pathname === `/api/bills/${billId}/actions` && request.method() === "POST") {
       const body = request.postDataJSON() as Record<string, unknown>; state.actions.push(body);
       return route.fulfill(await state.action(body));
@@ -51,16 +66,25 @@ async function setup(page: Page, initial = fixture(), fromEntry = false) {
   return state;
 }
 const ribbon = (page: Page) => page.getByRole("img", { name: "Paid in full", exact: true });
+async function fillPaymentDetails(page: Page) {
+  await page.getByLabel("Payment date", { exact: true }).fill(paymentFacts.paymentDate);
+  await page.getByLabel("Payment method", { exact: true }).selectOption(paymentFacts.paymentMode);
+  await page.getByLabel("Paid through account", { exact: true }).selectOption(paymentFacts.paidThroughAccountId);
+}
 
-test("unpaid bill links to its own payment page with saved identity, balance and no extra payment fields", async ({ page }) => {
+test("unpaid bill requires actual payment details without assuming a method or paid-through account", async ({ page }) => {
   const state = await setup(page);
   await expect(page.getByRole("heading", { name: "Record payment", exact: true })).toBeVisible();
   await expect(page.getByLabel("Payment amount (AED)", { exact: true })).toHaveValue("105.00");
   await expect(page.getByText("Fictional supplier", { exact: true })).toBeVisible();
   await expect(page.getByText("JOB-FICTIONAL", { exact: false })).toBeVisible();
-  await expect(page.getByText("This records a local payment. It does not transfer funds or update Zoho Books.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Record a payment you have already made. This queues its record for Zoho Books; it does not transfer money.", { exact: true })).toBeVisible();
   await expect(ribbon(page)).toHaveCount(0);
-  await expect(page.locator('input[type="date"]')).toHaveCount(0);
+  await expect(page.getByLabel("Payment date", { exact: true })).toHaveValue(/^\d{4}-\d{2}-\d{2}$/);
+  await expect(page.getByLabel("Payment method", { exact: true })).toHaveValue("");
+  await expect(page.getByLabel("Paid through account", { exact: true })).toHaveValue("");
+  await expect(page.getByRole("option", { name: "Fictional USD account (USD)", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Confirm payment", exact: true })).toBeDisabled();
   await page.getByRole("link", { name: "Back to bill", exact: true }).click();
   await expect(page.getByRole("link", { name: "Record payment", exact: true })).toHaveAttribute("href", `/bills/${billId}/payment`);
   expect(state.actions).toEqual([]); expect(state.unexpected).toEqual([]);
@@ -68,10 +92,11 @@ test("unpaid bill links to its own payment page with saved identity, balance and
 
 test("confirmed partial then full payment refreshes history and Paid state, with no optimistic ribbon or inflight cancellation", async ({ page }) => {
   const state = await setup(page);
+  await fillPaymentDetails(page);
   let release!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; });
   state.action = async body => {
-    expect(body).toEqual({ action: "payment", version: 1, amount: "25.00", reference: "FICTIONAL-PARTIAL" });
+    expect(body).toEqual({ action: "payment", version: 1, amount: "25.00", reference: "FICTIONAL-PARTIAL", ...paymentFacts });
     await held;
     state.bill = { ...state.bill, version: 2, paidAmount: "25.00", outstanding: "80.00", paymentStatus: "PARTIALLY_PAID",
       payments: [{ id: "fictional-payment-1", amount: "25.00", reference: "FICTIONAL-PARTIAL", createdAt: "2026-11-03T08:30:00.000Z" }] };
@@ -84,13 +109,13 @@ test("confirmed partial then full payment refreshes history and Paid state, with
   await expect(page.getByRole("link", { name: "Cancel", exact: true })).toHaveCount(0);
   await expect(ribbon(page)).toHaveCount(0);
   release();
-  await expect(page.getByText("Payment recorded successfully.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Payment recorded. Check its Zoho Books status in the payment history below.", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Payment amount (AED)", { exact: true })).toHaveValue("80.00");
   await expect(page.getByLabel("Payment reference", { exact: true })).toHaveValue("");
   await expect(page.getByText("partially paid", { exact: true })).toBeVisible();
   await expect(ribbon(page)).toHaveCount(0);
   state.action = async body => {
-    expect(body).toEqual({ action: "payment", version: 2, amount: "80.00", reference: "FICTIONAL-FINAL" });
+    expect(body).toEqual({ action: "payment", version: 2, amount: "80.00", reference: "FICTIONAL-FINAL", ...paymentFacts });
     state.bill = { ...state.bill, version: 3, paidAmount: "105.00", outstanding: "0.00", paymentStatus: "PAID",
       payments: [...state.bill.payments!, { id: "fictional-payment-2", amount: "80.00", reference: "FICTIONAL-FINAL", createdAt: "2026-11-03T09:00:00.000Z" }] };
     return { json: { bill: state.bill } };
@@ -107,10 +132,11 @@ test("confirmed partial then full payment refreshes history and Paid state, with
 test("the shared receipt accepts a same-version status refresh after a confirmed payment without losing payment data", async ({ page }) => {
   const initial = fixture(); initial.syncRecords = [{ id: "same-version-sync", target: "ZOHO", status: "PENDING", externalId: null }];
   const state = await setup(page, initial, true);
+  await fillPaymentDetails(page);
   const outcome = page.getByRole("group", { name: "Saved bill confirmation", exact: true });
   await expect(outcome).toContainText("Provider confirmation is pending");
   state.action = async body => {
-    expect(body).toEqual({ action: "payment", version: 1, amount: "25.00", reference: "FICTIONAL-SAME-VERSION" });
+    expect(body).toEqual({ action: "payment", version: 1, amount: "25.00", reference: "FICTIONAL-SAME-VERSION", ...paymentFacts });
     state.bill = { ...state.bill, version: 2, paidAmount: "25.00", outstanding: "80.00", paymentStatus: "PARTIALLY_PAID",
       payments: [{ id: "same-version-payment", amount: "25.00", reference: "FICTIONAL-SAME-VERSION", createdAt: "2026-11-04T12:00:00Z" }] };
     return { json: { bill: state.bill } };
@@ -118,7 +144,7 @@ test("the shared receipt accepts a same-version status refresh after a confirmed
   await page.getByLabel("Payment amount (AED)", { exact: true }).fill("25.00");
   await page.getByLabel("Payment reference", { exact: true }).fill("FICTIONAL-SAME-VERSION");
   await page.getByRole("button", { name: "Confirm payment", exact: true }).click();
-  await expect(page.getByText("Payment recorded successfully.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Payment recorded. Check its Zoho Books status in the payment history below.", { exact: true })).toBeVisible();
   await expect(outcome.getByRole("button", { name: "Refresh saved bill status", exact: true })).toBeEnabled();
   state.bill = { ...state.bill, syncRecords: [{ id: "same-version-sync", target: "ZOHO", status: "SYNCED", externalId: "fictional-external-bill" }] };
   await page.getByLabel("Payment reference", { exact: true }).fill("KEEP-NEXT-PAYMENT");
@@ -136,6 +162,7 @@ for (const failure of [
   { status: 409, message: "A record with these details already exists." },
 ]) test(`retains entered amount/reference after server rejection: ${failure.message}`, async ({ page }) => {
   const state = await setup(page);
+  await fillPaymentDetails(page);
   state.action = async () => ({ status: failure.status, json: { error: failure.message } });
   await page.getByLabel("Payment amount (AED)", { exact: true }).fill("25.00");
   await page.getByLabel("Payment reference", { exact: true }).fill("KEEP-THIS-REFERENCE");
@@ -143,12 +170,16 @@ for (const failure of [
   await expect(page.getByText(failure.message, { exact: true })).toBeVisible();
   await expect(page.getByLabel("Payment amount (AED)", { exact: true })).toHaveValue("25.00");
   await expect(page.getByLabel("Payment reference", { exact: true })).toHaveValue("KEEP-THIS-REFERENCE");
+  await expect(page.getByLabel("Payment date", { exact: true })).toHaveValue(paymentFacts.paymentDate);
+  await expect(page.getByLabel("Payment method", { exact: true })).toHaveValue(paymentFacts.paymentMode);
+  await expect(page.getByLabel("Paid through account", { exact: true })).toHaveValue(paymentFacts.paidThroughAccountId);
   await expect(ribbon(page)).toHaveCount(0);
   expect(state.actions).toHaveLength(1); expect(state.unexpected).toEqual([]);
 });
 
 test("rejects wrong bill or nonadvancing response identity before reporting success or clearing inputs", async ({ page }) => {
   const state = await setup(page);
+  await fillPaymentDetails(page);
   state.action = async () => ({ json: { bill: { ...state.bill, id: "wrong-bill", version: 2, paymentStatus: "PAID", paidAmount: "105.00" } } });
   await page.getByLabel("Payment amount (AED)", { exact: true }).fill("25.00");
   await page.getByLabel("Payment reference", { exact: true }).fill("KEEP-UNVERIFIED");
@@ -187,6 +218,7 @@ test("Paid detail and payment cards show the diagonal ribbon without mobile over
     for (const suffix of ["/payment", ""]) {
       await page.goto(`/bills/${billId}${suffix}`);
       await expect(ribbon(page)).toBeVisible();
+      if (suffix) await expect(page.getByText("Not sent to Zoho Books: payment details are missing.", { exact: true })).toBeVisible();
       const corner = await ribbon(page).boundingBox();
       const firstLabel = await ribbon(page).locator("..").locator("dt").first().boundingBox();
       expect(corner).not.toBeNull(); expect(firstLabel).not.toBeNull();
@@ -222,10 +254,11 @@ test("entry continuation skips payment and opens a blank bill for the actual sav
 
 test("entry continuation records only an explicit payment and retains same-job navigation after confirmation", async ({ page }) => {
   const state = await setup(page, { ...fixture(), editEligibility: { allowed: true, reason: null, mode: "provider_update" } }, true);
+  await fillPaymentDetails(page);
   let release!: () => void;
   const pending = new Promise<void>(resolve => { release = resolve; });
   state.action = async body => {
-    expect(body).toEqual({ action: "payment", version: 1, amount: "105.00", reference: "FICTIONAL-EXPLICIT-PAYMENT" });
+    expect(body).toEqual({ action: "payment", version: 1, amount: "105.00", reference: "FICTIONAL-EXPLICIT-PAYMENT", ...paymentFacts });
     await pending;
     state.bill = { ...state.bill, version: 2, paidAmount: "105.00", outstanding: "0.00", paymentStatus: "PAID",
       payments: [{ id: "fictional-explicit-payment", amount: "105.00", reference: "FICTIONAL-EXPLICIT-PAYMENT", createdAt: "2026-11-04T10:00:00Z" }] };
@@ -245,9 +278,105 @@ test("entry continuation records only an explicit payment and retains same-job n
   await expect(ribbon(page)).toHaveCount(0);
   release();
   await expect(ribbon(page)).toBeVisible();
-  await expect(page.getByText("Payment recorded successfully.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Payment recorded. Check its Zoho Books status in the payment history below.", { exact: true })).toBeVisible();
   await page.getByRole("link", { name: "Add another bill", exact: true }).click();
   await expect(page).toHaveURL(/\/bills\/new\?jobId=job$/);
   await expect(page.getByRole("heading", { name: "New Bill", exact: true })).toBeVisible();
+  expect(state.actions).toHaveLength(1); expect(state.unexpected).toEqual([]);
+});
+
+test("account lookup failure or a foreign company response blocks recording without clearing payment facts", async ({ page }) => {
+  const state = await setup(page);
+  await fillPaymentDetails(page);
+  await page.getByLabel("Payment amount (AED)", { exact: true }).fill("20.00");
+  await page.getByLabel("Payment reference", { exact: true }).fill("KEEP-ACTUAL-FACTS");
+  state.accountsError = { status: 503, error: "Fictional payment account permission is unavailable." };
+  await page.getByRole("button", { name: "Refresh payment accounts", exact: true }).click();
+  await expect(page.getByText(state.accountsError.error, { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Confirm payment", exact: true })).toBeDisabled();
+  state.accountsError = null;
+  state.accounts.companyId = "another-company";
+  await page.getByRole("button", { name: "Refresh payment accounts", exact: true }).click();
+  await expect(page.getByText("Payment accounts could not be verified for this company.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("option", { name: "Fictional operating bank (AED)", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Confirm payment", exact: true })).toBeDisabled();
+  state.accounts.companyId = "fictional-company";
+  await page.getByRole("button", { name: "Refresh payment accounts", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Confirm payment", exact: true })).toBeEnabled();
+  await expect(page.getByLabel("Payment amount (AED)", { exact: true })).toHaveValue("20.00");
+  await expect(page.getByLabel("Payment reference", { exact: true })).toHaveValue("KEEP-ACTUAL-FACTS");
+  await expect(page.getByLabel("Payment date", { exact: true })).toHaveValue(paymentFacts.paymentDate);
+  await expect(page.getByLabel("Payment method", { exact: true })).toHaveValue(paymentFacts.paymentMode);
+  await expect(page.getByLabel("Paid through account", { exact: true })).toHaveValue(paymentFacts.paidThroughAccountId);
+  expect(state.actions).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("local payment stays distinct from Books confirmation and bounded polling preserves the next payment facts", async ({ page }) => {
+  await page.clock.install();
+  const initial = { ...fixture(), paidAmount: "25.00", paymentStatus: "PARTIALLY_PAID", outstanding: "80.00",
+    syncRecords: [{ id: "fictional-synced-bill", target: "ZOHO", status: "SYNCED", externalId: "fictional-books-bill" }],
+    payments: [{ id: "queued-payment", amount: "25.00", reference: "FICTIONAL-QUEUED", createdAt: "2026-11-06T08:00:00Z", ...paymentFacts,
+      booksSync: { status: "QUEUED" as const, externalPaymentId: null, errorCode: null } }] };
+  const state = await setup(page, initial);
+  await expect(page.getByText("Queued for Zoho Books.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Payment confirmed in Zoho Books.", { exact: true })).toHaveCount(0);
+  await fillPaymentDetails(page);
+  await page.getByLabel("Payment amount (AED)", { exact: true }).fill("12.00");
+  await page.getByLabel("Payment reference", { exact: true }).fill("NEXT-PAYMENT-FACTS");
+  await page.evaluate(() => {
+    Object.defineProperty(document, "hidden", { configurable: true, value: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  const initialReads = state.reads;
+  await page.clock.fastForward(12_000);
+  expect(state.reads).toBe(initialReads);
+  let release!: () => void;
+  state.holdRead = new Promise<void>(resolve => { release = resolve; });
+  await page.evaluate(() => {
+    Object.defineProperty(document, "hidden", { configurable: true, value: false });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.clock.fastForward(3_100);
+  await expect.poll(() => state.reads).toBe(initialReads + 1);
+  await page.clock.fastForward(12_000);
+  expect(state.reads).toBe(initialReads + 1);
+  state.bill = { ...state.bill, payments: [{ ...state.bill.payments![0], booksSync: {
+    status: "FAILED", externalPaymentId: null, errorCode: "FICTIONAL_ACCOUNT_REJECTED",
+  } }] };
+  state.holdRead = null; release();
+  await expect(page.getByText("Zoho Books payment failed.", { exact: true })).toBeVisible();
+  await page.clock.fastForward(12_000);
+  expect(state.reads).toBe(initialReads + 1);
+  state.bill = { ...state.bill, payments: [{ ...state.bill.payments![0], booksSync: {
+    status: "SYNCED", externalPaymentId: "fictional-confirmed-payment", errorCode: null,
+  } }] };
+  await page.getByRole("button", { name: "Refresh bill", exact: true }).click();
+  await expect(page.getByText("Payment confirmed in Zoho Books.", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Payment amount (AED)", { exact: true })).toHaveValue("12.00");
+  await expect(page.getByLabel("Payment reference", { exact: true })).toHaveValue("NEXT-PAYMENT-FACTS");
+  await expect(page.getByLabel("Payment date", { exact: true })).toHaveValue(paymentFacts.paymentDate);
+  await expect(page.getByLabel("Payment method", { exact: true })).toHaveValue(paymentFacts.paymentMode);
+  await expect(page.getByLabel("Paid through account", { exact: true })).toHaveValue(paymentFacts.paidThroughAccountId);
+  expect(state.actions).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("a confirmed local payment reports its queued Books record without claiming remote Paid", async ({ page }) => {
+  const state = await setup(page);
+  await fillPaymentDetails(page);
+  state.action = async body => {
+    expect(body).toEqual({ action: "payment", version: 1, amount: "105.00", reference: "FICTIONAL-LOCAL-PAID", ...paymentFacts });
+    state.bill = { ...state.bill, version: 2, paidAmount: "105.00", outstanding: "0.00", paymentStatus: "PAID",
+      payments: [{ id: "new-payment", amount: "105.00", reference: "FICTIONAL-LOCAL-PAID", createdAt: "2026-11-06T08:00:00Z", ...paymentFacts,
+        booksSync: { status: "QUEUED", externalPaymentId: null, errorCode: null } }] };
+    return { json: { bill: state.bill } };
+  };
+  await page.getByLabel("Payment reference", { exact: true }).fill("FICTIONAL-LOCAL-PAID");
+  expect(state.actions).toEqual([]);
+  await page.getByRole("button", { name: "Confirm payment", exact: true }).click();
+  await expect(ribbon(page)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Local payment summary", exact: true })).toBeVisible();
+  await expect(page.getByText("Queued for Zoho Books.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Payment confirmed in Zoho Books.", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("cell", { name: "06 Nov 2026", exact: true })).toBeVisible();
   expect(state.actions).toHaveLength(1); expect(state.unexpected).toEqual([]);
 });

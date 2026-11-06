@@ -1,4 +1,10 @@
 import { randomUUID } from "node:crypto";
+// Payment-account catalog is an isolated provider fixture; ownership and transactions remain real.
+vi.mock("@/lib/services/payment-books-sync", async (original) => ({
+  ...await original<typeof import("@/lib/services/payment-books-sync")>(),
+  getPaymentAccounts: async (_actor: unknown, companyId: string) => ({ companyId,
+    accounts: [{ id: "9000001", name: "Fictional cash", type: "cash", currency: "AED" }], warning: null }),
+}));
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Actor } from "@/lib/auth";
 import { db } from "@/lib/db";
@@ -190,7 +196,7 @@ describe("finalized saved bill edits in guarded disposable MySQL", () => {
   it("invalidates edit preparation if a real local payment changes the source during the provider GET", async () => {
     const value = await fixture(); let paid = false;
     reader(value, { beforeRead: async () => { if (!paid) { paid = true; await actOnBill(owner, value.bill.id,
-      { action: "payment", amount: "10", reference: `FICTIONAL-RACE-${tag}`, version: value.bill.version }); } } });
+      { action: "payment", paymentDate: "2026-11-06", paymentMode: "Cash", paidThroughAccountId: "9000001", amount: "10", reference: `FICTIONAL-RACE-${tag}`, version: value.bill.version }); } } });
     await expect(updateBill(owner, value.bill.id, editInput(value))).rejects.toMatchObject({ code: "BILL_EDIT_BLOCKED" });
     expect(await db.bill.findUnique({ where: { id: value.bill.id } })).toMatchObject({ version: value.bill.version + 1, paidAmount: expect.anything() });
     expect((await db.bill.findUniqueOrThrow({ where: { id: value.bill.id } })).paidAmount.toFixed(2)).toBe("30.00");

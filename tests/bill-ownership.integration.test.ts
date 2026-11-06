@@ -1,4 +1,10 @@
 import { randomUUID } from "node:crypto";
+// Payment-account catalog is an isolated provider fixture; ownership and transactions remain real.
+vi.mock("@/lib/services/payment-books-sync", async (original) => ({
+  ...await original<typeof import("@/lib/services/payment-books-sync")>(),
+  getPaymentAccounts: async (_actor: unknown, companyId: string) => ({ companyId,
+    accounts: [{ id: "9000001", name: "Fictional cash", type: "cash", currency: "AED" }], warning: null }),
+}));
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Prisma } from "@prisma/client";
 import type { Actor } from "@/lib/auth";
@@ -93,7 +99,7 @@ describe("creator-only bills for every non-Admin on disposable MySQL", () => {
         await expect(getBooksBill(actor, mirrors[other])).rejects.toMatchObject({ status: 404 });
         await expect(downloadDocument(actor, bills[other].documents[0].id)).rejects.toMatchObject({ status: 404 });
         await expect(downloadBooksBillAttachment(actor, mirrors[other], originals[other])).rejects.toMatchObject({ status: 404 });
-        await expect(actOnBill(actor, bills[other].id, { action: "payment", version: bills[other].version, amount: "1.00", reference: "FORBIDDEN" })).rejects.toMatchObject({ status: 404 });
+        await expect(actOnBill(actor, bills[other].id, { action: "payment", paymentDate: "2026-11-06", paymentMode: "Cash", paidThroughAccountId: "9000001", version: bills[other].version, amount: "1.00", reference: "FORBIDDEN" })).rejects.toMatchObject({ status: 404 });
         await expect(updateBill(actor, bills[other].id, { ...input(other), version: bills[other].version })).rejects.toMatchObject({ status: 404 });
         await expect(queueBill(actor, bills[other].id, "ZOHO", organizationId)).rejects.toMatchObject({ status: 404 });
         await expect(scheduleIntegrationJob(actor, operations[other], { action: "retry" })).rejects.toMatchObject({ status: 404 });
@@ -116,7 +122,7 @@ describe("creator-only bills for every non-Admin on disposable MySQL", () => {
     const exported = exportExpenseReport(report);
     expect(exported).toContain(bills[3].invoiceNumber); expect(exported).not.toContain(bills[0].invoiceNumber);
     expect((await operationSummary(manager)).syncFailures).toBe(0);
-    await expect(actOnBill(manager, bills[3].id, { action: "payment", version: bills[3].version, amount: "1", reference: "READ-ONLY" })).rejects.toMatchObject({ status: 403 });
+    await expect(actOnBill(manager, bills[3].id, { action: "payment", paymentDate: "2026-11-06", paymentMode: "Cash", paidThroughAccountId: "9000001", version: bills[3].version, amount: "1", reference: "READ-ONLY" })).rejects.toMatchObject({ status: 403 });
     expect((await listBills(entry, new URLSearchParams({ companyId }))).bills.map(row => row.id)).toEqual([bills[4].id]);
     expect((await getJob(entry, jobId)).bills.map(row => row.id)).toEqual([bills[4].id]);
     expect((await getJob(entry, jobId)).booksBills).toEqual([]);
@@ -138,7 +144,7 @@ describe("creator-only bills for every non-Admin on disposable MySQL", () => {
   });
   it("preserves an Accounts user's own payment capability without changing ownership or another user's balance", async () => {
     const current = await getBill(writers[0], bills[0].id);
-    const paid = await actOnBill(writers[0], current.id, { action: "payment", version: current.version, amount: "1.00", reference: `OWN-PAYMENT-${tag}` });
+    const paid = await actOnBill(writers[0], current.id, { action: "payment", paymentDate: "2026-11-06", paymentMode: "Cash", paidThroughAccountId: "9000001", version: current.version, amount: "1.00", reference: `OWN-PAYMENT-${tag}` });
     expect(paid.createdBy.id).toBe(writers[0].id); expect(paid.paidAmount).toBe("1.00"); expect(paid.paymentStatus).toBe("PARTIALLY_PAID");
     expect((await getBill(writers[1], bills[1].id)).paidAmount).toBe("0.00");
     await expect(getBill(writers[1], current.id)).rejects.toMatchObject({ status: 404 });

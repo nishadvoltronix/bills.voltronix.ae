@@ -170,6 +170,9 @@ export const billActionSchema = z
     reason: optionalText(1000),
     amount: money.optional(),
     reference: optionalText(200),
+    paymentDate: z.iso.date().optional(),
+    paymentMode: z.enum(["Cash", "Bank Transfer", "Credit Card", "Cheque", "Other"]).optional(),
+    paidThroughAccountId: z.string().regex(/^\d{1,30}$/).optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -198,6 +201,8 @@ export const billActionSchema = z
           path: ["reference"],
           message: "A payment reference is required.",
         });
+      for (const field of ["paymentDate", "paymentMode", "paidThroughAccountId"] as const)
+        if (!value[field]) ctx.addIssue({ code: "custom", path: [field], message: "Payment date, method and paid-through account are required." });
     }
   });
 

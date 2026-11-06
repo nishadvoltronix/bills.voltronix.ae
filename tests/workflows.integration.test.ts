@@ -1,5 +1,11 @@
 import { beforeAll, afterAll, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
+// Payment-account catalog is an isolated provider fixture; ownership and transactions remain real.
+vi.mock("@/lib/services/payment-books-sync", async (original) => ({
+  ...await original<typeof import("@/lib/services/payment-books-sync")>(),
+  getPaymentAccounts: async (_actor: unknown, companyId: string) => ({ companyId,
+    accounts: [{ id: "9000001", name: "Fictional cash", type: "cash", currency: "AED" }], warning: null }),
+}));
 import path from "node:path";
 import type { Actor } from "@/lib/auth";
 import { db } from "@/lib/db";
@@ -194,9 +200,9 @@ describe("core bill workflow on real MySQL", () => {
       expect(accountHistory.job).toMatchObject({ recognizedExpenses: null, outstanding: null, contractValue: null });
       expect(accountHistory.bills.some(bill => bill.id === saved.id)).toBe(false);
       expect((await getJob(admin, job.id)).job).toMatchObject({ recognizedExpenses: "190.00", outstanding: "199.50" });
-      await expect(actOnBill(accounts, saved.id, { action: "payment", version: saved.version, amount: "50.00", reference: `FORBIDDEN-PAY-${tag}` })).rejects.toMatchObject({ status: 404 });
+      await expect(actOnBill(accounts, saved.id, { action: "payment", paymentDate: "2026-11-06", paymentMode: "Cash", paidThroughAccountId: "9000001", version: saved.version, amount: "50.00", reference: `FORBIDDEN-PAY-${tag}` })).rejects.toMatchObject({ status: 404 });
       expect(await db.payment.count({ where: { billId: saved.id } })).toBe(0);
-      await actOnBill(admin, saved.id, { action: "payment", version: saved.version, amount: "50.00", reference: `MANUAL-PAY-${tag}` });
+      await actOnBill(admin, saved.id, { action: "payment", paymentDate: "2026-11-06", paymentMode: "Cash", paidThroughAccountId: "9000001", version: saved.version, amount: "50.00", reference: `MANUAL-PAY-${tag}` });
       expect((await getBill(staff, saved.id))).toMatchObject({ status: "READY", paidAmount: "50.00", outstanding: "149.50" });
       expect((await expenseReport(admin, new URLSearchParams({ jobId: job.id, currency: "AED" }))).totals)
         .toEqual({ invoiced: "199.50", recognized: "190.00", paid: "50.00", outstanding: "149.50" });
@@ -426,9 +432,11 @@ describe("core bill workflow on real MySQL", () => {
         },
       }),
     ).toBe(1);
+    const corrected = await updateBill(staff, draft.id, { ...original, version: ready.version });
+    expect(corrected).toMatchObject({ status: "READY", paidAmount: "0.00", version: ready.version + 1 });
     await expect(
       updateBill(staff, draft.id, { ...original, version: ready.version }),
-    ).rejects.toMatchObject({ status: 403 });
+    ).rejects.toMatchObject({ status: 409 });
     const own = await createBill(accounts, input({ submit: true }));
     expect(own).toMatchObject({
       status: "READY",
@@ -443,7 +451,7 @@ describe("core bill workflow on real MySQL", () => {
   it("tracks partial/full payments, blocks overpayment, and rolls back rejected mutations", async () => {
     let bill = await createBill(accounts, input({ submit: true }));
     bill = await actOnBill(accounts, bill.id, {
-      action: "payment",
+      action: "payment", paymentDate: "2026-11-06", paymentMode: "Cash", paidThroughAccountId: "9000001",
       version: bill.version,
       amount: "50",
       reference: `PAY-${tag}-1`,
@@ -452,7 +460,7 @@ describe("core bill workflow on real MySQL", () => {
     const before = await db.payment.count({ where: { billId: bill.id } });
     await expect(
       actOnBill(accounts, bill.id, {
-        action: "payment",
+        action: "payment", paymentDate: "2026-11-06", paymentMode: "Cash", paidThroughAccountId: "9000001",
         version: bill.version,
         amount: "1",
         reference: ` pay-${tag}-1 `,
@@ -460,7 +468,7 @@ describe("core bill workflow on real MySQL", () => {
     ).rejects.toMatchObject({ code: "P2002" });
     await expect(
       actOnBill(accounts, bill.id, {
-        action: "payment",
+        action: "payment", paymentDate: "2026-11-06", paymentMode: "Cash", paidThroughAccountId: "9000001",
         version: bill.version,
         amount: "200",
         reference: "TOO-MUCH",
@@ -476,7 +484,7 @@ describe("core bill workflow on real MySQL", () => {
       }),
     ).rejects.toMatchObject({ status: 409 });
     bill = await actOnBill(accounts, bill.id, {
-      action: "payment",
+      action: "payment", paymentDate: "2026-11-06", paymentMode: "Cash", paidThroughAccountId: "9000001",
       version: bill.version,
       amount: "149.50",
       reference: `PAY-${tag}-2`,

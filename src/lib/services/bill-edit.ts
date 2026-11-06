@@ -171,6 +171,8 @@ export async function assertFinalizedBillEdit(tx: Store, actor: Actor, proof: Fi
     throw blocked("Prepare the exact current bill edit again before saving.");
   if (held.mutationId) await tx.$queryRaw(Prisma.sql`SELECT \`id\` FROM \`IntegrationJob\` WHERE \`id\`=${held.mutationId} FOR UPDATE`);
   await tx.$queryRaw(Prisma.sql`SELECT \`id\` FROM \`Bill\` WHERE \`id\`=${held.billId} FOR UPDATE`);
+  if (await tx.paymentBooksSync.count({ where: { billId: held.billId, status: { in: ["PROCESSING", "UNKNOWN"] } } }))
+    throw new HttpError(409, "This bill's Books payment synchronization is in progress or its outcome is uncertain. Wait for confirmation or reconcile the payment before editing the bill.", "PAYMENT_SYNC_ACTIVE");
   await tx.$queryRaw(Prisma.sql`SELECT \`id\` FROM \`IntegrationJob\` WHERE \`billId\`=${held.billId} FOR UPDATE`);
   await tx.$queryRaw(Prisma.sql`SELECT \`id\` FROM \`Payment\` WHERE \`billId\`=${held.billId} FOR UPDATE`);
   await tx.$queryRaw(Prisma.sql`SELECT \`id\` FROM \`Document\` WHERE \`billId\`=${held.billId} FOR UPDATE`);

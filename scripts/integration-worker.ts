@@ -2,6 +2,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { db } from "../src/lib/db";
 import { processIntegrationJobs } from "../src/lib/integrations/queue";
 import { processVendorBooksSyncs } from "../src/lib/services/vendor-books-sync";
+import { processPaymentBooksSyncs } from "../src/lib/services/payment-books-sync";
 
 // A service/scheduler owns this process. It never exposes a public worker API.
 async function main() {
@@ -24,8 +25,9 @@ async function main() {
       try {
         const result = await processIntegrationJobs({ ...(jobId ? { jobId } : { limit }), signal: stop.signal });
         const vendors = jobId ? { processed: 0 } : await processVendorBooksSyncs(limit);
+        const payments = jobId ? { processed: 0 } : await processPaymentBooksSyncs(limit);
         failures = 0;
-        if (!watch || result.processed || vendors.processed) console.log(JSON.stringify({ processed: result.processed, suppliersProcessed: vendors.processed }));
+        if (!watch || result.processed || vendors.processed || payments.processed) console.log(JSON.stringify({ processed: result.processed, suppliersProcessed: vendors.processed, paymentsProcessed: payments.processed }));
       } catch (error) {
         if (!watch) throw error;
         failures = Math.min(failures + 1, 5);
