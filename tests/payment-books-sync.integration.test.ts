@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import Decimal from "decimal.js";
 import { ZodError } from "zod";
@@ -125,13 +125,18 @@ afterEach(async () => {
 });
 afterAll(() => db.$disconnect());
 
-async function fixture() {
+async function fixture(withAttachment = false) {
   const externalId = String(++sequence), invoice = `FICTIONAL-PAYMENT-${randomUUID()}`;
   const bill = await db.bill.create({ data: { companyId, vendorId, jobId, invoiceNumber: invoice, normalizedInvoiceNumber: invoice,
     invoiceDate: new Date("2026-11-06T00:00:00Z"), dueDate: new Date("2026-11-20T00:00:00Z"), paymentTerms: "CUSTOM", category: "MATERIALS", currency: "AED",
     status: "READY", createdById: owner.id, subtotal: "100", discount: "0", vatRate: "5", vatAmount: "5", total: "105", paidAmount: "0",
     lines: { create: { description: "FICTIONAL saved payment source", quantity: "1", unitPrice: "100", lineTotal: "100" } },
     syncRecords: { create: { target: "ZOHO", status: "SYNCED", organizationId, externalId, attempts: 1, lastSyncedAt: new Date() } } } });
+  if (withAttachment) {
+    const bytes = Buffer.from("%PDF-1.4 FICTIONAL payment attachment fixture");
+    await db.document.create({ data: { billId: bill.id, uploadedById: owner.id, fileName: "fictional-payment-source.pdf",
+      storageKey: `${randomUUID()}.pdf`, mimeType: "application/pdf", byteSize: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") } });
+  }
   const snapshot = approvedSnapshot(await db.bill.findUniqueOrThrow({ where: { id: bill.id }, include: sourceInclude }), VENDOR);
   const canonical = await db.integrationJob.create({ data: { billId: bill.id, target: "ZOHO", operation: "CREATE_BILL", status: "SUCCEEDED",
     idempotencyKey: `ZOHO:${bill.id}:CREATE_BILL`, organizationId, sourceVersion: bill.version, initiatedById: owner.id,
@@ -253,6 +258,47 @@ describe("saved payment outbox with real disposable MySQL and a fake Books provi
     expect(await syncPayment(payment.id)).toEqual({ processed: 1 });
     expect(await state(payment.id)).toMatchObject({ status: "QUEUED", errorCode: "PAYMENT_BILL_PENDING", submittedAt: null });
     expect(value.remote.posts).toHaveLength(0);
+  });
+
+  it("confirms the exact payment despite an uncertain attachment while preserving its recovery state and originals", async () => {
+    const value = await fixture(true), payment = await record(value);
+    const source = snapshotSchema.parse(value.canonical.snapshot), document = source.documents[0];
+    const attachment = await db.integrationJob.create({ data: { billId: value.bill.id, target: "ZOHO", operation: "ATTACH_DOCUMENT", status: "UNKNOWN",
+      idempotencyKey: `ZOHO:${value.bill.id}:ATTACH_DOCUMENT:${document.id}`, documentId: document.id, organizationId,
+      sourceVersion: value.canonical.sourceVersion, initiatedById: owner.id, snapshot: value.canonical.snapshot as Prisma.InputJsonValue,
+      payloadHash: value.canonical.payloadHash, externalId: value.remote.id, attempts: 1, needsReconciliation: true, errorCode: "ATTACHMENT_UNCONFIRMED" } });
+    const before = await preserved(value.bill.id);
+    expect(await syncPayment(payment.id)).toEqual({ processed: 1 });
+    expect(await state(payment.id)).toMatchObject({ status: "SYNCED", externalBillId: value.remote.id, attempts: 1, externalPaymentId: expect.any(String) });
+    expect(value.remote.posts).toHaveLength(1);
+    expect(await db.integrationJob.findUniqueOrThrow({ where: { id: attachment.id } })).toEqual(attachment);
+    expect(await preserved(value.bill.id)).toBe(before);
+    expect(await syncPayment(payment.id)).toEqual({ processed: 0 });
+    expect(value.remote.posts).toHaveLength(1);
+  });
+
+  it("still defers an in-flight attachment to avoid concurrent provider writes", async () => {
+    const value = await fixture(true), payment = await record(value), document = snapshotSchema.parse(value.canonical.snapshot).documents[0];
+    const attachment = await db.integrationJob.create({ data: { billId: value.bill.id, target: "ZOHO", operation: "ATTACH_DOCUMENT", status: "PROCESSING",
+      idempotencyKey: `ZOHO:${value.bill.id}:ATTACH_DOCUMENT:${document.id}`, documentId: document.id, organizationId,
+      sourceVersion: value.canonical.sourceVersion, initiatedById: owner.id, snapshot: value.canonical.snapshot as Prisma.InputJsonValue,
+      payloadHash: value.canonical.payloadHash, attempts: 1, leaseToken: "a".repeat(64), leaseUntil: new Date(Date.now() + 60000) } });
+    expect(await syncPayment(payment.id)).toEqual({ processed: 0 });
+    expect(await state(payment.id)).toMatchObject({ status: "QUEUED", attempts: 0, submittedAt: null });
+    expect(value.remote.posts).toHaveLength(0);
+    expect(await db.integrationJob.findUniqueOrThrow({ where: { id: attachment.id } })).toEqual(attachment);
+  });
+
+  it.each(["CREATE_BILL", "UPDATE_BILL", "CREATE_EXPENSE"] as const)("still blocks uncertain financial operation %s", async operation => {
+    const value = await fixture(), payment = await record(value);
+    const uncertain = await db.integrationJob.create({ data: { billId: value.bill.id, target: "ZOHO", operation, status: "UNKNOWN",
+      idempotencyKey: `FICTIONAL:${value.bill.id}:${operation}:UNKNOWN`, organizationId, sourceVersion: value.canonical.sourceVersion,
+      initiatedById: owner.id, snapshot: value.canonical.snapshot as Prisma.InputJsonValue, payloadHash: value.canonical.payloadHash,
+      attempts: 1, needsReconciliation: true } });
+    expect(await syncPayment(payment.id)).toEqual({ processed: 0 });
+    expect(await state(payment.id)).toMatchObject({ status: "QUEUED", attempts: 0, submittedAt: null });
+    expect(value.remote.posts).toHaveLength(0);
+    expect(await db.integrationJob.findUniqueOrThrow({ where: { id: uncertain.id } })).toEqual(uncertain);
   });
 
   it.each(["payment", "bill", "membership", "grant"] as const)("blocks changed %s authority/source before any provider POST", async change => {

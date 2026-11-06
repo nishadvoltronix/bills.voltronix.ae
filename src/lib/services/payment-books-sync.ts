@@ -145,7 +145,10 @@ async function claim(paymentId?: string) {
     if (!rows.length) return null;
     const row = rows[0];
     if (!(await tx.$queryRaw<{ id: string }[]>(Prisma.sql`SELECT id FROM Bill WHERE id=${row.billId} FOR UPDATE SKIP LOCKED`)).length) return null;
-    if (await tx.integrationJob.count({ where: { billId: row.billId, target: "ZOHO", OR: [{ status: "PROCESSING" }, { status: "UNKNOWN" }, { needsReconciliation: true, status: { not: "SUCCEEDED" } }] } }) ||
+    if (await tx.integrationJob.count({ where: { billId: row.billId, target: "ZOHO", OR: [
+      { status: "PROCESSING" },
+      { operation: { not: "ATTACH_DOCUMENT" }, OR: [{ status: "UNKNOWN" }, { needsReconciliation: true, status: { not: "SUCCEEDED" } }] },
+    ] } }) ||
       await tx.paymentBooksSync.count({ where: { billId: row.billId, id: { not: row.id }, status: { in: ["PROCESSING", "UNKNOWN"] } } })) return null;
     return tx.paymentBooksSync.update({ where: { id: row.id }, data: { status: "PROCESSING", attempts: { increment: 1 },
       leaseToken: randomBytes(32).toString("hex"), leaseUntil: new Date(Date.now() + 180_000) } });

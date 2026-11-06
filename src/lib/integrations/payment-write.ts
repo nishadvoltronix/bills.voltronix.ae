@@ -24,7 +24,10 @@ export async function assertPaymentBooksWrite(capability: PaymentWriteCapability
   const { assertPaymentBooksSource, assertPaymentAccount } = await import("@/lib/services/payment-books-sync");
   const source = await assertPaymentBooksSource(job, config);
   if (source.externalBillId !== job.externalBillId || paymentSourceHash(request.body) !== paymentSourceHash(buildPaymentPayload(source.snapshot, job.externalBillId))) throw denied();
-  if (await db.integrationJob.count({ where: { billId: job.billId, target: "ZOHO", OR: [{ status: "PROCESSING" }, { status: "UNKNOWN" }, { needsReconciliation: true, status: { not: "SUCCEEDED" } }] } })) throw denied();
+  if (await db.integrationJob.count({ where: { billId: job.billId, target: "ZOHO", OR: [
+    { status: "PROCESSING" },
+    { operation: { not: "ATTACH_DOCUMENT" }, OR: [{ status: "UNKNOWN" }, { needsReconciliation: true, status: { not: "SUCCEEDED" } }] },
+  ] } })) throw denied();
   const reader = new ZohoTransport(config, () => accessToken(config));
   await assertPaymentAccount(config, source.snapshot.payment.paidThroughAccountId, source.snapshot.bill.currency, reader);
   validatePaymentBill(await reader.request(`/books/v3/bills/${job.externalBillId}`, { method: "GET" }), source.snapshot, job.externalBillId);
