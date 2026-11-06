@@ -44,6 +44,7 @@ import {
 import { AmountRow } from "./records";
 import { CompanySelect } from "./company-select";
 import { VendorAutocomplete } from "./vendor-autocomplete";
+import { JobItemAutocomplete } from "./job-item-autocomplete";
 import { SavedBillOutcome, type SavedJobBill } from "./saved-bill-outcome";
 import { InvoiceAttachmentPicker, type InvoiceFileSelection } from "./invoice-attachment-picker";
 import { ManualBillAutofill, useManualBillAutofill } from "./manual-bill-autofill";
@@ -1051,16 +1052,16 @@ function BillForm({
                   {lines.map((line, index) => (
                     <tr key={line.key}>
                       <td>
-                        <Textarea
-                          aria-label={`Line ${index + 1} description`}
-                          placeholder="Enter an item or service description"
+                        <JobItemAutocomplete
+                          key={`${user.id}:${user.role}:${companyId}:${selectedJob?.id ?? ""}:${line.key}`}
+                          id={`bill-line-${line.key}-description`}
+                          actorKey={`${user.id}:${user.role}`}
+                          companyId={companyId}
+                          jobId={selectedJob?.id ?? ""}
+                          lineNumber={index + 1}
                           value={line.description}
-                          onChange={(e) =>
-                            updateLine(line.key, "description", e.target.value)
-                          }
-                          required
-                          maxLength={500}
-                          rows={2}
+                          disabled={busy}
+                          onChange={description => updateLine(line.key, "description", description)}
                         />
                       </td>
                       {showBooksLines && <td className="books-line-account">

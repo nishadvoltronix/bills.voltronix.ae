@@ -1,0 +1,48 @@
+.root {
+  min-width: 0;
+}
+
+.panel {
+  position: fixed;
+  z-index: 1200;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  border: 1px solid #d7dde5;
+  border-radius: 5px;
+  background: #fff;
+  box-shadow: 0 8px 24px #27344426;
+}
+
+.message {
+  margin: 0;
+  padding: 9px 12px;
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.options {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.option {
+  padding: 10px 12px;
+  color: #344054;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.option[aria-selected="true"] {
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 var(--accent-hover);
+}
+
+.retry {
+  margin: 0 8px 6px;
+}
