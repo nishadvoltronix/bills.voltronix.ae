@@ -6,6 +6,8 @@ import { AUTH_RESOURCE_PATH_HEADER, canAccessRoleApiPath } from "@/lib/route-acc
 describe("restricted accountant HTTP resources", () => {
   it.each([
     "/api/auth/me", "/api/auth/logout", "/api/companies",
+    "/api/companies/company-books-us-828765858/payment-accounts",
+    "/api/companies/company-books-us-802911060/payment-accounts/",
     "/api/bills", "/api/bills/bill_1", "/api/bills/bill_1/attachment", "/api/bills/books/book_1",
     "/api/bills/books/book_1/attachments/file_1", "/api/bills/options",
     "/api/vendors", "/api/vendors/search", "/api/vendors/resolve", "/api/vendors/directory",
@@ -22,6 +24,10 @@ describe("restricted accountant HTTP resources", () => {
     "/api/ocr/templates", "/api/ocr/batches/batch_1", "/api/ocr/documents/document_1/review",
     "/api/integrations/jobs", "/api/integrations/incoming-status", "/api/integrations/crm/authorization",
     "/api/integrations/oauth/zoho/authorize", "/api/scanner/imports", "/api/hub/job-billing",
+    "/api/companies/company-books-us-828765858", "/api/companies/company-books-us-828765858/settings",
+    "/api/companies/company-books-us-828765858/payment-accounts/export", "/api/companies/payment-accounts",
+    "/api/companies/company-books-us-828765858/payment-accounts-admin", "/api/companies//payment-accounts",
+    "/api/companies/../payment-accounts", "/api/companies/%2fsecret/payment-accounts",
     "/dashboard", "/api/bills/../dashboard", "/api/bills/%2fsecret", "/api/bills?role=ADMIN", "",
   ])("denies resources outside bill/vendor entry: %s", pathname => {
     expect(canAccessRoleApiPath("ACCOUNTS", pathname)).toBe(false);
@@ -48,5 +54,15 @@ describe("restricted accountant HTTP resources", () => {
     }));
     expect(response.headers.get(`x-middleware-request-${AUTH_RESOURCE_PATH_HEADER}`)).toBe(pathname);
     expect(response.headers.get(AUTH_RESOURCE_PATH_HEADER)).toBeNull();
+  });
+
+  it("retains the actual payment-account path for accountant authorization", () => {
+    const pathname = "/api/companies/company-books-us-828765858/payment-accounts";
+    const response = proxy(new NextRequest(`http://local.test${pathname}`, {
+      headers: { [AUTH_RESOURCE_PATH_HEADER]: "/api/companies" },
+    }));
+    const actualPath = response.headers.get(`x-middleware-request-${AUTH_RESOURCE_PATH_HEADER}`);
+    expect(actualPath).toBe(pathname);
+    expect(canAccessRoleApiPath("ACCOUNTS", actualPath)).toBe(true);
   });
 });

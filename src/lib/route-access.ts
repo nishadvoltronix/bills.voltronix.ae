@@ -11,6 +11,7 @@ export function canAccessRoleApiPath(
   if (!pathname || pathname.length > 512) return false;
   return /^\/api\/auth\/(?:me|logout)\/?$/.test(pathname) ||
     /^\/api\/companies\/?$/.test(pathname) ||
+    /^\/api\/companies\/[A-Za-z0-9_-]+\/payment-accounts\/?$/.test(pathname) ||
     /^\/api\/(?:bills|vendors)(?:\/[A-Za-z0-9_-]+)*\/?$/.test(pathname) ||
     /^\/api\/documents\/[A-Za-z0-9_-]+\/?$/.test(pathname) ||
     /^\/api\/jobs(?:\/(?:[A-Za-z0-9_-]+|crm\/[A-Za-z0-9_-]+))?\/?$/.test(pathname) ||
