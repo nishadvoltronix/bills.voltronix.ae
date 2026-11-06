@@ -12,6 +12,7 @@ import { connectionFingerprint } from "@/lib/integrations/connection-fingerprint
 import { accessToken, LEGACY_UNSCOPED_ORGANIZATION } from "@/lib/integrations/oauth";
 import { ZohoTransport } from "@/lib/integrations/transport";
 import { booksVendorVatMetadata, type BooksVendorVatMetadata } from "@/lib/integrations/books-vendor-tax";
+import { matchesAutofillVendorIdentity, usableAutofillVendorIdentity } from "@/lib/bill-autofill-vendor";
 
 const id = z.string().trim().min(1).max(100);
 const externalId = z.string().regex(/^\d{1,30}$/);
@@ -20,7 +21,9 @@ const directoryInput = z.object({ companyId: id, q: z.string().trim().max(100).d
 const destinationInput = z.object({ organizationId: externalId,
   dataCenter: z.enum(Object.keys(centers) as [DataCenter, ...DataCenter[]]), environment: z.enum(["production", "sandbox"]),
 });
-const resolveInput = destinationInput.extend({ companyId: id, externalVendorId: externalId }).strict();
+const expectedIdentity = z.object({ vendorName: z.string().max(250).nullable(), vendorTrn: z.string().max(40).nullable(), currency: currencySchema })
+  .strict().refine(usableAutofillVendorIdentity, "A readable supplier identity is required.");
+const resolveInput = destinationInput.extend({ companyId: id, externalVendorId: externalId, expectedIdentity: expectedIdentity.optional() }).strict();
 const localFields = { id: true, companyId: true, name: true, currency: true, email: true, trn: true } as const;
 type LocalVendor = Prisma.VendorGetPayload<{ select: typeof localFields }>;
 type Store = Prisma.TransactionClient;
@@ -311,6 +314,8 @@ export async function resolveBillVendor(actor: Actor, payload: unknown, provided
   const contact = response.success ? parseContact(response.data.contact) : null;
   if (!contact || contact.externalVendorId !== input.externalVendorId)
     throw blocked("BOOKS_VENDOR_INVALID", "Select an active Books vendor with a supported currency. The selected vendor could not be verified.");
+  if (input.expectedIdentity && !matchesAutofillVendorIdentity(input.expectedIdentity, contact))
+    throw new HttpError(409, "The supplier's current identity no longer matches the invoice. Select and verify the supplier again.");
   const verifiedMetadata = { booksVat: contact.booksVat, externalVendorId: contact.externalVendorId,
     organizationId: input.organizationId, dataCenter: input.dataCenter, environment: input.environment };
   await recheck(db, actor, before);

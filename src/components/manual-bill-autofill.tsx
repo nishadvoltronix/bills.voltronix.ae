@@ -9,6 +9,7 @@ import type { InvoiceFileSelection } from "./invoice-attachment-picker";
 import styles from "./manual-bill-autofill.module.css";
 
 type Applied = { kept: boolean };
+export type AutofillSource = { key: string; revision: number };
 type Reading = { key: string; revision: number; status: "reading" | "ready" | "failed"; preview?: InvoiceAutofillResponse["preview"]; message?: string; kept?: boolean };
 function matchesSource(value: InvoiceAutofillResponse, requestId: string, companyId: string, jobId: string, currency: string, files: InvoiceFileSelection[]) {
   const source = value?.source, preview = value?.preview;
@@ -16,19 +17,33 @@ function matchesSource(value: InvoiceAutofillResponse, requestId: string, compan
     !/^[a-f0-9]{64}$/.test(source.fingerprint ?? "") || !Array.isArray(source.files) || source.files.length !== files.length ||
     !source.files.every((file, index) => file.index === index && file.sha256 === files[index].id && file.byteSize === files[index].file.size && file.mimeType === files[index].file.type) ||
     preview?.requiresHumanReview !== false || !preview.fields || typeof preview.fields !== "object" ||
-    !preview.evidence || !Array.isArray(preview.warnings) || !preview.warnings.every(warning => typeof warning === "string")) return false;
+    !preview.evidence || !Array.isArray(preview.vendorCandidates) || preview.vendorCandidates.length > 10 ||
+    !Array.isArray(preview.warnings) || !preview.warnings.every(warning => typeof warning === "string")) return false;
   const fields = preview.fields;
   if (Object.keys(fields).some(key => !["invoiceNumber", "invoiceDate", "dueDate", "orderNumber", "description", "discount", "vatRate", "lines", "vendorId", "currency"].includes(key)) ||
     Object.entries(fields).some(([key, field]) => key !== "lines" && typeof field !== "string") ||
     fields.lines && (!Array.isArray(fields.lines) || fields.lines.length > 100 || !fields.lines.every(line =>
       line && typeof line.description === "string" && typeof line.quantity === "string" && typeof line.unitPrice === "string")) ||
     fields.currency && fields.currency !== currency || fields.vendorId && (!preview.vendor || preview.vendor.id !== fields.vendorId || preview.vendor.currency !== currency)) return false;
+  const candidate = preview.vendorSelection;
+  if (candidate !== undefined && candidate !== null) {
+    const usable = (value: unknown, maximum: number) => typeof value === "string" && value.length <= maximum && /[\p{L}\p{N}]/u.test(value.normalize("NFKC"));
+    if (fields.vendorId || preview.vendor || candidate.companyId !== companyId || candidate.currency !== currency ||
+      !(candidate.id === null || typeof candidate.id === "string" && candidate.id.length > 0 && candidate.id.length <= 100) ||
+      !usable(candidate.name, 200) || !(candidate.trn === null || usable(candidate.trn, 40)) ||
+      !/^\d{1,30}$/.test(candidate.externalVendorId ?? "") || !/^\d{1,30}$/.test(candidate.organizationId ?? "") ||
+      !["US", "EU", "IN", "AU", "JP", "CA", "CN", "SA", "AE"].includes(candidate.dataCenter) ||
+      !["production", "sandbox"].includes(candidate.environment) ||
+      !(preview.evidence.vendorName === null || usable(preview.evidence.vendorName, 250)) ||
+      !(preview.evidence.vendorTrn === null || usable(preview.evidence.vendorTrn, 40)) ||
+      !preview.evidence.vendorName && !preview.evidence.vendorTrn) return false;
+  }
   return true;
 }
 
-export function useManualBillAutofill({ eligible, companyId, jobId, currency, files, checking, apply }: {
-  eligible: boolean; companyId: string; jobId: string; currency: string; files: InvoiceFileSelection[]; checking: boolean;
-  apply: (result: InvoiceAutofillResponse) => Applied;
+export function useManualBillAutofill({ eligible, actorKey, companyId, jobId, currency, files, checking, apply }: {
+  eligible: boolean; actorKey: string; companyId: string; jobId: string; currency: string; files: InvoiceFileSelection[]; checking: boolean;
+  apply: (result: InvoiceAutofillResponse, source: AutofillSource) => Applied;
 }) {
   const scoped = !!companyId && !!jobId;
   const capability = useApi<InvoiceAutofillCapability>(eligible && scoped ? `/api/bills/autofill?${new URLSearchParams({ companyId, jobId })}` : null);
@@ -38,7 +53,7 @@ export function useManualBillAutofill({ eligible, companyId, jobId, currency, fi
   const paused = useRef<string | null>(null), active = useRef(false), mounted = useRef(true);
   const [settled, setSettled] = useState(0);
   const [reading, setReading] = useState<Reading | null>(null);
-  const key = JSON.stringify([companyId, jobId, currency, files.map(file => [file.id, file.file.size, file.file.type])]);
+  const key = JSON.stringify([actorKey, companyId, jobId, currency, files.map(file => [file.id, file.file.size, file.file.type])]);
   const current = reading?.key === key ? reading : null;
   const available = capability.data?.enabled === true && capability.data.configured === true;
   const canRead = eligible && !!companyId && !!jobId && files.length > 0 && !checking && available && pausedKey !== key;
@@ -64,7 +79,7 @@ export function useManualBillAutofill({ eligible, companyId, jobId, currency, fi
         if (!isCurrent()) return;
         if (!matchesSource(result, requestId, companyId, jobId, currency, files))
           throw new Error("The reading did not match these originals and the selected job. Retry reading or enter this invoice manually.");
-        const applied = callbacks.current.apply(result);
+        const applied = callbacks.current.apply(result, { key, revision });
         setReading({ key, revision, status: "ready", preview: result.preview, kept: applied.kept });
       } catch (failure) {
         if (isCurrent()) setReading({ key, revision, status: "failed", message: errorMessage(failure) });
@@ -84,7 +99,7 @@ export function useManualBillAutofill({ eligible, companyId, jobId, currency, fi
   const retry = () => { paused.current = null; setPausedKey(null); setRevision(value => value + 1); if (!available) capability.reload(); };
   const waiting = eligible && scoped && files.length > 0 && pausedKey !== key && (capability.loading || canRead && (!current || current.status === "reading" || current.revision !== revision));
   const queued = waiting && reading?.status === "reading" && reading.key !== key;
-  return { capability, available, current, waiting, queued, canRead, scoped, stop, retry, hasFiles: files.length > 0,
+  return { capability, available, current, waiting, queued, canRead, scoped, stop, retry, hasFiles: files.length > 0, sourceKey: key, revision,
     preview: current?.status === "ready" ? current.preview : undefined };
 }
 

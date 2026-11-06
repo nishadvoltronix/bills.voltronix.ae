@@ -3,16 +3,25 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { api, errorMessage } from "./api";
 import type { Vendor, VendorSearchResult, VendorSuggestion } from "./types";
+import type { InvoiceAutofillVendorSelection } from "@/lib/manual-bill-autofill-types";
 import { Button, Input } from "./ui";
 
+type ExpectedIdentity = { vendorName: string | null; vendorTrn: string | null; currency: string };
+type SelectionOrigin = "selection" | "automatic";
+export type AutomaticVendorSelection = {
+  key: string;
+  candidate: InvoiceAutofillVendorSelection;
+  expectedIdentity: ExpectedIdentity;
+};
 type Props = {
   id: string;
   companyId: string;
   value: string;
   initialQuery?: string;
+  automaticSelection?: AutomaticVendorSelection | null;
   disabled?: boolean;
-  onChange: (vendor: Vendor | null, source: "selection" | "hydration" | "clear") => void;
-  onPendingChange: (pending: boolean) => void;
+  onChange: (vendor: Vendor | null, source: "selection" | "hydration" | "clear" | "automatic", automaticKey?: string) => void;
+  onPendingChange: (pending: boolean, automaticKey?: string) => void;
 };
 function mergePages(previous: VendorSuggestion[], next: VendorSuggestion[]) {
   const rows = [...previous];
@@ -27,7 +36,7 @@ function mergePages(previous: VendorSuggestion[], next: VendorSuggestion[]) {
 
 // The parent keys this field by company so changing company also discards its text,
 // results and requests, without resetting any other bill fields.
-export function VendorAutocomplete({ id, companyId, value, initialQuery = "", disabled, onChange, onPendingChange }: Props) {
+export function VendorAutocomplete({ id, companyId, value, initialQuery = "", automaticSelection = null, disabled, onChange, onPendingChange }: Props) {
   const [text, setText] = useState(initialQuery.slice(0, 100));
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
@@ -36,12 +45,16 @@ export function VendorAutocomplete({ id, companyId, value, initialQuery = "", di
   const [hydrationRevision, setHydrationRevision] = useState(0);
   const [hydrationError, setHydrationError] = useState<{ vendorId: string; message: string } | null>(null);
   const [resolving, setResolving] = useState(false);
-  const [resolutionError, setResolutionError] = useState<{ suggestion: VendorSuggestion; message: string } | null>(null);
+  const [resolutionError, setResolutionError] = useState<{ suggestion: VendorSuggestion; message: string; origin: SelectionOrigin;
+    expectedIdentity?: ExpectedIdentity; automaticKey?: string } | null>(null);
   const [search, setSearch] = useState<{ key: string; data?: VendorSearchResult; error?: string } | null>(null);
   const [more, setMore] = useState<{ key: string; busy: boolean; error?: string } | null>(null);
   const moreRequest = useRef<AbortController | null>(null);
   const selectionRequest = useRef<AbortController | null>(null);
   const selectionVersion = useRef(0);
+  const selectionOrigin = useRef<{ origin: SelectionOrigin; key?: string } | null>(null);
+  const automaticKey = useRef(automaticSelection?.key ?? null);
+  const startAutomatic = useRef<(request: AutomaticVendorSelection) => void>(() => {});
   const mounted = useRef(false);
   const callbacks = useRef({ onChange, onPendingChange });
   const selectedMatches = selected?.id === value && selected?.companyId === companyId;
@@ -76,6 +89,7 @@ export function VendorAutocomplete({ id, companyId, value, initialQuery = "", di
   useLayoutEffect(() => {
     callbacks.current = { onChange, onPendingChange };
   }, [onChange, onPendingChange]);
+  useLayoutEffect(() => { automaticKey.current = automaticSelection?.key ?? null; }, [automaticSelection?.key]);
 
   useEffect(() => {
     if (!companyId || !value || selectedMatches) return;
@@ -167,20 +181,22 @@ export function VendorAutocomplete({ id, companyId, value, initialQuery = "", di
     }
   }
 
-  function cancelSelection() {
+  function cancelSelection(source: "clear" | "automatic" = "clear", key?: string) {
     selectionVersion.current += 1;
     selectionRequest.current?.abort();
+    selectionOrigin.current = null;
     setResolving(false);
     setResolutionError(null);
     setHydrationError(null);
     setSelected(null);
-    onPendingChange(false);
-    onChange(null, "clear");
+    callbacks.current.onPendingChange(false, key);
+    callbacks.current.onChange(null, source, key);
   }
 
-  async function choose(suggestion: VendorSuggestion) {
+  async function choose(suggestion: VendorSuggestion, origin: SelectionOrigin = "selection", expectedIdentity?: ExpectedIdentity, key?: string) {
     if (disabled || suggestion.selectable === false || suggestion.companyId !== companyId) return;
-    cancelSelection();
+    if (origin === "automatic" && (!key || automaticKey.current !== key || !expectedIdentity)) return;
+    cancelSelection(origin === "automatic" ? "automatic" : "clear", key);
     setText(suggestion.name);
     setOpen(false);
     setActiveIndex(-1);
@@ -188,18 +204,20 @@ export function VendorAutocomplete({ id, companyId, value, initialQuery = "", di
       if (!suggestion.id) return;
       const vendor: Vendor = { ...suggestion, id: suggestion.id };
       setSelected({ ...vendor, booksMappingRequired: suggestion.booksMappingRequired });
-      onChange(vendor, "selection");
+      callbacks.current.onChange(vendor, origin, key);
       return;
     }
     if (!suggestion.organizationId || !suggestion.dataCenter || !suggestion.environment) {
-      setResolutionError({ suggestion, message: "This vendor's Books destination is incomplete. Search again to refresh the vendor list." });
+      setResolutionError({ suggestion, origin, expectedIdentity, automaticKey: key,
+        message: "This vendor's Books destination is incomplete. Search again to refresh the vendor list." });
       return;
     }
     const controller = new AbortController();
     const version = ++selectionVersion.current;
     selectionRequest.current = controller;
+    selectionOrigin.current = { origin, key };
     setResolving(true);
-    onPendingChange(true);
+    callbacks.current.onPendingChange(true, key);
     try {
       const { vendor } = await api<{ vendor: Vendor }>("/api/vendors/resolve", {
         method: "POST",
@@ -210,22 +228,45 @@ export function VendorAutocomplete({ id, companyId, value, initialQuery = "", di
           dataCenter: suggestion.dataCenter,
           environment: suggestion.environment,
           externalVendorId: suggestion.externalVendorId,
+          ...(origin === "automatic" ? { expectedIdentity } : {}),
         }),
       });
-      if (!mounted.current || controller.signal.aborted || version !== selectionVersion.current) return;
+      if (!mounted.current || controller.signal.aborted || version !== selectionVersion.current ||
+        origin === "automatic" && automaticKey.current !== key) return;
       if (!vendor?.id || vendor.companyId !== companyId) throw new Error("The selected vendor did not match this company. Search again to continue.");
+      if (origin === "automatic" && (vendor.currency !== expectedIdentity?.currency || suggestion.id && vendor.id !== suggestion.id))
+        throw new Error("The matched vendor changed. Search and select the correct vendor before saving.");
+      selectionOrigin.current = null;
       setResolving(false);
-      callbacks.current.onPendingChange(false);
+      callbacks.current.onPendingChange(false, key);
       setSelected(vendor);
       setText(vendor.name);
-      callbacks.current.onChange(vendor, "selection");
+      callbacks.current.onChange(vendor, origin, key);
     } catch (error: unknown) {
-      if (!mounted.current || controller.signal.aborted || version !== selectionVersion.current) return;
+      if (!mounted.current || controller.signal.aborted || version !== selectionVersion.current ||
+        origin === "automatic" && automaticKey.current !== key) return;
       setResolving(false);
-      callbacks.current.onPendingChange(false);
-      setResolutionError({ suggestion, message: errorMessage(error) });
+      callbacks.current.onPendingChange(false, key);
+      setResolutionError({ suggestion, message: errorMessage(error), origin, expectedIdentity, automaticKey: key });
     }
   }
+
+  useLayoutEffect(() => {
+    startAutomatic.current = request => { void choose(request.candidate, "automatic", request.expectedIdentity, request.key); };
+  });
+  useEffect(() => {
+    if (!automaticSelection || disabled) return;
+    startAutomatic.current(automaticSelection);
+    return () => {
+      if (selectionOrigin.current?.origin !== "automatic" || selectionOrigin.current.key !== automaticSelection.key) return;
+      selectionVersion.current += 1;
+      selectionRequest.current?.abort();
+      selectionOrigin.current = null;
+      setResolving(false);
+      setResolutionError(current => current?.automaticKey === automaticSelection.key ? null : current);
+      callbacks.current.onPendingChange(false, automaticSelection.key);
+    };
+  }, [automaticSelection, disabled]);
 
   function handleKeyDown(event: KeyboardEvent<HTMLInputElement>) {
     if (event.key === "Enter") {
@@ -333,7 +374,7 @@ export function VendorAutocomplete({ id, companyId, value, initialQuery = "", di
       <div id={statusId} className="vendor-selection-status" aria-live="polite">
         {selectedMatches && selected?.booksMappingRequired && <p>Local supplier selected. Save a draft; a verified Books mapping is required before sync.</p>}
         {hydrating && <p>Loading selected vendor…</p>}
-        {resolving && <p>Selecting vendor…</p>}
+        {(resolving || automaticSelection && !selectedMatches && !resolutionError) && <p>{automaticSelection ? "Selecting matched vendor…" : "Selecting vendor…"}</p>}
         {currentHydrationError && <div role="alert">
           <p>{currentHydrationError}</p>
           <Button type="button" variant="secondary" onClick={() => {
@@ -343,7 +384,8 @@ export function VendorAutocomplete({ id, companyId, value, initialQuery = "", di
         </div>}
         {resolutionError && <div role="alert">
           <p>{resolutionError.message}</p>
-          <Button type="button" variant="secondary" onClick={() => void choose(resolutionError.suggestion)}>Retry vendor selection</Button>
+          <Button type="button" variant="secondary" onClick={() => void choose(resolutionError.suggestion, resolutionError.origin,
+            resolutionError.expectedIdentity, resolutionError.automaticKey)}>Retry vendor selection</Button>
         </div>}
       </div>
     </div>

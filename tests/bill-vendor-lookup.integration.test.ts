@@ -139,6 +139,39 @@ describe("bill vendor lookup on disposable MySQL", () => {
     expect(await db.document.count()).toBe(documents);
   });
 
+  it("rejects stale automatic identity before changing any actual local table", async () => {
+    const row = contact("810", `Fresh automatic supplier ${tag}`);
+    const before = await Promise.all([db.vendor.findMany({ orderBy: { id: "asc" } }), db.vendorBooksMapping.findMany({ orderBy: { id: "asc" } }),
+      db.auditLog.count(), db.bill.count(), db.payment.count(), db.document.count()]);
+    for (const expectedIdentity of [
+      { vendorName: `Stale invoice supplier ${tag}`, vendorTrn: row.tax_reg_no, currency: "AED" },
+      { vendorName: row.contact_name, vendorTrn: "999999999999999", currency: "AED" },
+      { vendorName: row.contact_name, vendorTrn: row.tax_reg_no, currency: "USD" },
+    ]) await expect(resolveBillVendor(actor, { ...selection(companyA, organizationA, "810"), expectedIdentity }, transport(organizationA, row)))
+      .rejects.toMatchObject({ status: 409 });
+    expect(await Promise.all([db.vendor.findMany({ orderBy: { id: "asc" } }), db.vendorBooksMapping.findMany({ orderBy: { id: "asc" } }),
+      db.auditLog.count(), db.bill.count(), db.payment.count(), db.document.count()])).toEqual(before);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("creates and reuses only one actual local mapping for a fresh exact automatic identity", async () => {
+    const row = contact("811", `Fictional Auto Supplier L.L.C. ${tag}`);
+    const expectedIdentity = { vendorName: `FICTIONAL AUTO SUPPLIER LLC ${tag}`, vendorTrn: row.tax_reg_no, currency: "AED" };
+    const payload = { ...selection(companyA, organizationA, "811"), expectedIdentity };
+    const financialBefore = await Promise.all([db.bill.count(), db.billLine.count(), db.payment.count(), db.document.count()]);
+    const countsBefore = await Promise.all([db.vendor.count(), db.vendorBooksMapping.count(), db.auditLog.count()]);
+    const onRead = vi.fn(async () => {});
+    const first = await resolveBillVendor(actor, payload, transport(organizationA, row, onRead));
+    const second = await resolveBillVendor(actor, payload, transport(organizationA, row, onRead));
+    expect(second.id).toBe(first.id); expect(onRead).toHaveBeenCalledTimes(2);
+    expect(await db.vendorBooksMapping.findMany({ where: { organizationId: organizationA, externalVendorId: "811" } })).toMatchObject([
+      { vendorId: first.id, organizationId: organizationA, externalVendorId: "811", dataCenter: "US", environment: "production" },
+    ]);
+    expect(await Promise.all([db.vendor.count(), db.vendorBooksMapping.count(), db.auditLog.count()])).toEqual(countsBefore.map(value => value + 1));
+    expect(await Promise.all([db.bill.count(), db.billLine.count(), db.payment.count(), db.document.count()])).toEqual(financialBefore);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("isolates identical external IDs in the two actual destination keys", async () => {
     const a = await resolveBillVendor(actor, selection(), transport(organizationA));
     const b = await resolveBillVendor(actor, selection(companyB, organizationB), transport(organizationB));

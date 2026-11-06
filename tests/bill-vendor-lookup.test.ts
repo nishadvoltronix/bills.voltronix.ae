@@ -419,6 +419,40 @@ describe("company-specific bill vendor search", () => {
 });
 
 describe("resolving an existing Books supplier for bill entry", () => {
+  it("automatically resolves only the fresh exact printed identity and reuses the same local handle", async () => {
+    const payload = { ...selection, expectedIdentity: { vendorName: "BOOKS SUPPLIER", vendorTrn: "100-000-000-000-001", currency: "AED" } };
+    const first = await resolveBillVendor(actor, payload, connection({ code: 0, contact: contact() }).transport);
+    const again = await resolveBillVendor(actor, payload, connection({ code: 0, contact: contact() }).transport);
+    expect(again.id).toBe(first.id); expect(vendors).toHaveLength(1); expect(mappings).toHaveLength(1); expect(audit).toHaveLength(1);
+  });
+
+  it("accepts the extraction's full 250-character name bound while comparing normalized identity", async () => {
+    const vendorName = "Books supplier".padStart(250, " ");
+    const payload = { ...selection, expectedIdentity: { vendorName, vendorTrn: "100000000000001", currency: "AED" } };
+    await expect(resolveBillVendor(actor, payload, connection({ code: 0, contact: contact() }).transport)).resolves.toMatchObject({ name: "Books supplier" });
+  });
+
+  it.each([
+    { vendorName: "Different supplier", vendorTrn: "100000000000001", currency: "AED" },
+    { vendorName: "Books supplier", vendorTrn: "999999999999999", currency: "AED" },
+    { vendorName: "Books supplier", vendorTrn: "100000000000001", currency: "USD" },
+  ])("rejects changed automatic identity before any local transaction: %j", async expectedIdentity => {
+    const { transport, fetcher } = connection({ code: 0, contact: contact() });
+    await expect(resolveBillVendor(actor, { ...selection, expectedIdentity }, transport)).rejects.toMatchObject({ status: 409 });
+    expect(fetcher).toHaveBeenCalledTimes(1); expect(store.$transaction).not.toHaveBeenCalled();
+    expect(vendors).toEqual([]); expect(mappings).toEqual([]); expect(audit).toEqual([]);
+  });
+
+  it.each([
+    { vendorName: "Books supplier", vendorTrn: "---", currency: "AED" },
+    { vendorName: null, vendorTrn: null, currency: "AED" },
+    { vendorName: "Books supplier", vendorTrn: null, currency: "AED", id: "untrusted" },
+  ])("rejects invalid automatic identity without provider or local writes: %j", async expectedIdentity => {
+    const { transport, fetcher } = connection({ code: 0, contact: contact() });
+    await expect(resolveBillVendor(actor, { ...selection, expectedIdentity }, transport)).rejects.toThrow();
+    expect(fetcher).not.toHaveBeenCalled(); expect(store.$transaction).not.toHaveBeenCalled();
+  });
+
   it("resolves a real company supplier on the hosted production runtime using provider reads only", async () => {
     vi.stubEnv("APP_ENV", "production");
     vi.stubEnv("NODE_ENV", "production");

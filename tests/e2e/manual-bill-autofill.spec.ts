@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { expect, test, type Page } from "@playwright/test";
-import type { InvoiceAutofillResponse } from "../../src/lib/manual-bill-autofill-types";
+import type { InvoiceAutofillResponse, InvoiceAutofillVendorSelection } from "../../src/lib/manual-bill-autofill-types";
 import type { Bill, BillBooksOptions, Job, Vendor } from "../../src/components/types";
 import { calculateBill } from "../../src/lib/finance";
 
@@ -11,6 +11,12 @@ const job: Job = { id: "autofill-job", companyId: company.id, jobNumber: "JOB-53
   currency: "AED", contractValue: null, approvedVariations: "0" };
 const vendor: Vendor = { id: "autofill-vendor", companyId: company.id, name: "Fictional Exact Supplier", trn: "100000000000003", currency: "AED",
   booksVat: { status: "verified", taxTreatment: "vat_registered", hasTaxRegistrationNumber: true, checkedAt: "2026-11-04T12:00:00Z", warning: null } };
+const otherCompany = { id: "autofill-other-company", name: "Fictional other company" };
+const otherJob: Job = { ...job, id: "autofill-other-job", companyId: otherCompany.id, jobNumber: "JOB-5384" };
+const otherVendor: Vendor = { ...vendor, id: "autofill-other-vendor", companyId: otherCompany.id, name: "Fictional Other Supplier", trn: "100000000000005" };
+const booksVendor: Vendor = { ...vendor, id: "autofill-books-local", name: "Fictional Books-only Supplier", trn: "100000000000004" };
+const booksCandidate: InvoiceAutofillVendorSelection = { companyId: company.id, id: null, name: booksVendor.name,
+  trn: booksVendor.trn!, currency: "AED", externalVendorId: "998800001", organizationId, dataCenter: "US", environment: "production" };
 const options: BillBooksOptions = { companyId: company.id, organizationId, dataCenter: "US", environment: "production",
   accounts: [{ id: "88101", name: "Fictional Expense", type: "expense", selectable: true }],
   taxes: [{ id: "88111", name: "Fictional VAT", rate: "5.00", selectable: true }, { id: "NO_VAT", name: "No VAT", rate: "0.00", selectable: true }],
@@ -18,44 +24,68 @@ const options: BillBooksOptions = { companyId: company.id, organizationId, dataC
 const original = (name: string) => ({ name, mimeType: "application/pdf", buffer: Buffer.from(`%PDF-1.4\n% Fictional autofill original ${name}\n%%EOF`) });
 type Reply = { status?: number; json: unknown };
 type Fixture = { enabled: boolean; reads: InvoiceAutofillResponse[]; creates: Record<string, unknown>[]; uploads: string[]; uploadedNames: string[]; actions: string[];
-  unexpected: string[]; bill: Bill | null; respond: (reply: InvoiceAutofillResponse, ordinal: number) => Promise<Reply> };
+  unexpected: string[]; bill: Bill | null; vendors: Vendor[]; hydrations: { companyId: string | null; vendorId: string | null }[];
+  resolutions: Record<string, unknown>[]; resolve: (input: Record<string, unknown>) => Promise<Reply>;
+  respond: (reply: InvoiceAutofillResponse, ordinal: number) => Promise<Reply> };
 
 async function fixture(page: Page): Promise<Fixture> {
   const state: Fixture = { enabled: true, reads: [], creates: [], uploads: [], uploadedNames: [], actions: [], unexpected: [], bill: null,
+    vendors: [vendor, otherVendor], hydrations: [], resolutions: [], resolve: async () => ({ json: { vendor: booksVendor } }),
     respond: async reply => ({ json: reply }) };
+  state.resolve = async () => {
+    if (!state.vendors.some(row => row.id === booksVendor.id)) state.vendors.push(booksVendor);
+    return { json: { vendor: booksVendor } };
+  };
   await page.route("**/api/**", async route => {
     const request = route.request(), url = new URL(request.url()), path = url.pathname, method = request.method();
     if (path.startsWith("/api/auth/")) return route.continue();
-    if (method === "GET" && path === "/api/companies") return route.fulfill({ json: { companies: [company, { id: "autofill-other-company", name: "Fictional other company" }] } });
-    if (method === "GET" && path === "/api/jobs") return route.fulfill({ json: { jobs: [job] } });
-    if (method === "GET" && path === `/api/jobs/${job.id}`) return route.fulfill({ json: { job, bills: [] } });
-    if (method === "GET" && path === "/api/bills/options") return route.fulfill({ json: options });
+    if (method === "GET" && path === "/api/companies") return route.fulfill({ json: { companies: [company, otherCompany] } });
+    if (method === "GET" && path === "/api/jobs") return route.fulfill({ json: { jobs: [job, otherJob] } });
+    const selectedJob = [job, otherJob].find(row => path === `/api/jobs/${row.id}`);
+    if (method === "GET" && selectedJob) return route.fulfill({ json: { job: selectedJob, bills: [] } });
+    if (method === "GET" && path === "/api/bills/options") return route.fulfill({ json: { ...options, companyId: url.searchParams.get("companyId") } });
+    if (method === "GET" && path === "/api/bills/item-suggestions") return route.fulfill({ json: {
+      companyId: url.searchParams.get("companyId"), jobId: url.searchParams.get("jobId"), suggestions: [],
+    } });
     if (method === "GET" && path === "/api/integrations") return route.fulfill({ json: { zoho: { organizations: [{ companyId: company.id,
       organizationId, name: company.name, writeEnabled: true, connected: true, status: "CONNECTED", dataCenter: "US", environment: "production" }] } } });
-    if (method === "GET" && path === "/api/vendors/search") return route.fulfill({ json: { companyId: company.id, organizationId,
-      dataCenter: "US", environment: "production", vendors: [vendor], selectedVendor: url.searchParams.has("vendorId") ? vendor : null,
-      hasMore: false, warning: null } });
+    if (method === "GET" && path === "/api/vendors/search") {
+      const companyId = url.searchParams.get("companyId"), vendorId = url.searchParams.get("vendorId");
+      if (vendorId) state.hydrations.push({ companyId, vendorId });
+      const rows = state.vendors.filter(row => row.companyId === companyId);
+      return route.fulfill({ json: { companyId, organizationId, dataCenter: "US", environment: "production",
+        vendors: vendorId ? [] : rows.filter(row => row.name.toLowerCase().includes((url.searchParams.get("q") ?? "").toLowerCase())),
+        selectedVendor: vendorId ? rows.find(row => row.id === vendorId) ?? null : null, hasMore: false, warning: null } });
+    }
+    if (method === "POST" && path === "/api/vendors/resolve") {
+      const input = request.postDataJSON() as Record<string, unknown>; state.resolutions.push(input);
+      return route.fulfill(await state.resolve(input)).catch(() => undefined);
+    }
     if (method === "GET" && path === "/api/bills/autofill") {
-      expect(Object.fromEntries(url.searchParams)).toEqual({ companyId: company.id, jobId: job.id });
+      const requestedJob = [job, otherJob].find(row => row.id === url.searchParams.get("jobId"));
+      expect(requestedJob?.companyId).toBe(url.searchParams.get("companyId"));
       return route.fulfill({ json: { enabled: state.enabled, configured: state.enabled, message: "Fictional capability; provider calls are mocked." } });
     }
     if (method === "POST" && path === "/api/bills/autofill") {
       const bytes = request.postDataBuffer();
       if (!bytes) throw new Error("The synthetic multipart body is required.");
       const form = await new Response(Uint8Array.from(bytes).buffer, { headers: { "Content-Type": request.headers()["content-type"] } }).formData();
-      expect(form.get("companyId")).toBe(company.id); expect(form.get("jobId")).toBe(job.id);
+      const requestedJob = [job, otherJob].find(row => row.id === form.get("jobId"));
+      if (!requestedJob) throw new Error("Fictional extraction job is unavailable.");
+      expect(form.get("companyId")).toBe(requestedJob.companyId);
+      const requestedVendor = requestedJob.companyId === company.id ? vendor : otherVendor;
       const files = await Promise.all(form.getAll("files").map(async (value, index) => {
         if (typeof value === "string") throw new Error("The synthetic originals must be multipart Files.");
         return { index, sha256: createHash("sha256").update(Buffer.from(await value.arrayBuffer())).digest("hex"), byteSize: value.size,
           mimeType: value.type as "application/pdf" | "image/png" | "image/jpeg" };
       }));
-      const reply: InvoiceAutofillResponse = { requestId: String(form.get("requestId")), source: { companyId: company.id, jobId: job.id,
+      const reply: InvoiceAutofillResponse = { requestId: String(form.get("requestId")), source: { companyId: requestedJob.companyId, jobId: requestedJob.id,
         currency: "AED", fingerprint: "a".repeat(64), files }, preview: {
         fields: { invoiceNumber: `AUTO-${state.reads.length + 1}`, invoiceDate: "2026-10-31", dueDate: "2026-11-30", orderNumber: "AUTO-ORDER",
-          description: "Fictional extracted description", discount: "0.00", vatRate: "5.00", vendorId: vendor.id, currency: "AED",
+          description: "Fictional extracted description", discount: "0.00", vatRate: "5.00", vendorId: requestedVendor.id, currency: "AED",
           lines: [{ description: "Fictional extracted first line", quantity: "1", unitPrice: "10.00" }, { description: "Fictional extracted second line", quantity: "1", unitPrice: "20.00" }] },
-        vendor: { id: vendor.id, name: vendor.name, trn: vendor.trn!, currency: "AED", match: "TRN" }, vendorCandidates: [],
-        evidence: { vendorName: vendor.name, vendorTrn: vendor.trn!, currency: "AED", jobNumber: "5383", subtotal: "30.00", discount: "0.00",
+        vendor: { id: requestedVendor.id, name: requestedVendor.name, trn: requestedVendor.trn!, currency: "AED", match: "TRN" }, vendorCandidates: [],
+        evidence: { vendorName: requestedVendor.name, vendorTrn: requestedVendor.trn!, currency: "AED", jobNumber: requestedJob.jobNumber.replace("JOB-", ""), subtotal: "30.00", discount: "0.00",
           vatAmount: "1.50", vatRate: "5.00", total: "31.50" }, warnings: [], requiresHumanReview: false } };
       state.reads.push(reply);
       return route.fulfill(await state.respond(reply, state.reads.length)).catch(() => undefined);
@@ -64,7 +94,8 @@ async function fixture(page: Page): Promise<Fixture> {
       const input = request.postDataJSON(); state.creates.push(input);
       const totals = calculateBill(input.lines, input.discount, input.vatRate);
       state.bill = { ...input, ...totals, id: "autofill-saved", version: 1, status: "DRAFT", createdAt: "2026-11-04T12:00:00Z", paidAmount: "0.00",
-        paymentStatus: "UNPAID", vendor, job, documents: [], payments: [], syncRecords: [] };
+        paymentStatus: "UNPAID", vendor: state.vendors.find(row => row.id === input.vendorId),
+        job: [job, otherJob].find(row => row.id === input.jobId), documents: [], payments: [], syncRecords: [] };
       return route.fulfill({ json: { bill: state.bill } });
     }
     if (state.bill && path === `/api/bills/${state.bill.id}` && method === "GET") return route.fulfill({ json: { bill: state.bill } });
@@ -98,6 +129,14 @@ const manualFiles = (page: Page) => page.getByLabel("Manual invoice attachment",
 const manualList = (page: Page) => page.getByRole("list", { name: "Selected manual invoice attachments", exact: true });
 const preview = (page: Page) => page.locator('[aria-label="Invoice automatic reading"]');
 async function ready(page: Page) { await expect(preview(page)).toContainText("Details filled. You can edit them below."); }
+function booksOnly(reply: InvoiceAutofillResponse) {
+  delete reply.preview.fields.vendorId;
+  reply.preview.vendor = null;
+  reply.preview.vendorSelection = { ...booksCandidate };
+  reply.preview.evidence.vendorName = booksVendor.name;
+  reply.preview.evidence.vendorTrn = booksVendor.trn!;
+  return reply;
+}
 async function chooseLine(page: Page, line: number, kind: "account" | "tax", name: string) {
   await page.getByRole("combobox", { name: `Line ${line} ${kind}`, exact: true }).fill(name);
   await page.getByRole("option", { name: new RegExp(`^${name}`) }).click();
@@ -160,6 +199,8 @@ test("attachment-first reads all pages once and saves explicitly without a verif
   await expect(page.locator("#invoice-number")).toHaveValue("AUTO-1");
   await expect(page.locator("#invoice-date")).toHaveValue("2026-10-31");
   await expect(page.getByRole("combobox", { name: "Vendor Name", exact: true })).toHaveValue(vendor.name);
+  expect(state.hydrations).toEqual([{ companyId: company.id, vendorId: vendor.id }]);
+  expect(state.resolutions).toEqual([]);
   await expect(page.getByLabel("Line 2 unit price", { exact: true })).toHaveValue("20.00");
   await expect(page.getByRole("combobox", { name: "Line 1 account", exact: true })).toHaveValue("");
   expect(state.reads).toHaveLength(1); expect(state.reads[0].source.files).toHaveLength(2);
@@ -176,6 +217,145 @@ test("attachment-first reads all pages once and saves explicitly without a verif
   await expect(page.locator("#bill-job")).toHaveValue(job.id); await expect(page.locator("#bill-job")).toBeDisabled();
   await expect(page.locator("#invoice-number")).toHaveValue("");
   expect(state.unexpected).toEqual([]);
+});
+
+test("a unique Books supplier binds automatically, gates Save while resolving and saves without a dropdown click", async ({ page }) => {
+  const state = await fixture(page);
+  state.respond = async reply => ({ json: booksOnly(reply) });
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const resolve = state.resolve;
+  state.resolve = async input => { await pending; return resolve(input); };
+  try {
+    await open(page);
+    await files(page).setInputFiles(original("FICTIONAL-books-only.pdf"));
+    await ready(page);
+    await expect(page.getByRole("button", { name: "Save as draft", exact: true })).toBeDisabled();
+    await expect(page.getByText("Selecting matched vendor…", { exact: true })).toBeVisible();
+    await expect.poll(() => state.resolutions.length).toBe(1);
+    expect(state.resolutions[0]).toEqual({ companyId: company.id, organizationId, dataCenter: "US", environment: "production",
+      externalVendorId: booksCandidate.externalVendorId,
+      expectedIdentity: { vendorName: booksVendor.name, vendorTrn: booksVendor.trn, currency: "AED" } });
+    await page.locator("form.books-bill-form").dispatchEvent("submit");
+    expect(state.creates).toEqual([]);
+    release();
+    await expect(page.getByRole("region", { name: "Vendor details", exact: true })).toContainText(booksVendor.trn!);
+    await expect(page.getByRole("combobox", { name: "Vendor Name", exact: true })).toHaveValue(booksVendor.name);
+    await expect(page.getByRole("listbox", { name: "Vendor suggestions", exact: true })).toHaveCount(0);
+    for (const line of [1, 2]) { await chooseLine(page, line, "account", options.accounts[0].name); await chooseLine(page, line, "tax", options.taxes[0].name); }
+    await page.getByRole("button", { name: "Save and sync", exact: true }).click();
+    await expect(page).toHaveURL(/\/bills\/autofill-saved\/payment\?entry=1&saved=1$/);
+    expect(state.creates[0]).toMatchObject({ companyId: company.id, jobId: job.id, vendorId: booksVendor.id });
+    expect([state.reads.length, state.resolutions.length, state.creates.length, state.uploads.length, state.actions.length]).toEqual([1, 1, 1, 1, 1]);
+    expect(state.unexpected).toEqual([]);
+  } finally { release(); }
+});
+
+test("ambiguous automatic suppliers stay unbound until a user chooses the correct supplier", async ({ page }) => {
+  const state = await fixture(page);
+  state.respond = async reply => {
+    delete reply.preview.fields.vendorId; reply.preview.vendor = null; reply.preview.vendorSelection = null;
+    reply.preview.vendorCandidates = [{ id: vendor.id, name: vendor.name, trn: vendor.trn!, currency: "AED", match: "TRN" },
+      { id: "fictional-shared-trn-peer", name: "Fictional distinct supplier", trn: vendor.trn!, currency: "AED", match: "TRN" }];
+    return { json: reply };
+  };
+  await open(page); await files(page).setInputFiles(original("FICTIONAL-ambiguous-supplier.pdf")); await ready(page);
+  await expect(page.getByText("Several vendors match the invoice. Choose the correct vendor.", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Save as draft", exact: true }).click();
+  await expect(page.getByText("Select a vendor from the suggestions before saving.", { exact: true })).toBeVisible();
+  expect(state.resolutions).toEqual([]); expect(state.creates).toEqual([]); expect(state.hydrations).toEqual([]);
+  await page.getByRole("combobox", { name: "Vendor Name", exact: true }).click();
+  await page.getByRole("option", { name: /^Fictional Exact Supplier/ }).click();
+  await page.getByRole("button", { name: "Save as draft", exact: true }).click();
+  await expect.poll(() => state.creates.length).toBe(1);
+  expect(state.creates[0].vendorId).toBe(vendor.id);
+  expect(state.unexpected).toEqual([]);
+});
+
+test("a user's supplier selection wins over a late automatic Books resolution", async ({ page }) => {
+  const state = await fixture(page);
+  const manual: Vendor = { ...vendor, id: "autofill-manual-vendor", name: "Fictional human selected supplier", trn: "100000000000006" };
+  state.vendors.push(manual);
+  state.respond = async reply => ({ json: booksOnly(reply) });
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const resolve = state.resolve; state.resolve = async input => { await pending; return resolve(input); };
+  try {
+    await open(page); await files(page).setInputFiles(original("FICTIONAL-human-vendor-override.pdf")); await ready(page);
+    await expect.poll(() => state.resolutions.length).toBe(1);
+    const supplier = page.getByRole("combobox", { name: "Vendor Name", exact: true });
+    await supplier.fill(manual.name);
+    await page.getByRole("option", { name: /^Fictional human selected supplier/ }).click();
+    release();
+    await expect(page.getByRole("region", { name: "Vendor details", exact: true })).toContainText(manual.trn!);
+    await expect(supplier).toHaveValue(manual.name);
+    await page.getByRole("button", { name: "Save as draft", exact: true }).click();
+    await expect.poll(() => state.creates.length).toBe(1);
+    expect(state.creates[0].vendorId).toBe(manual.id);
+    expect(state.reads).toHaveLength(1); expect(state.resolutions).toHaveLength(1); expect(state.unexpected).toEqual([]);
+  } finally { release(); }
+});
+
+for (const changed of ["originals", "company"] as const) test(`changing ${changed} discards a pending automatic vendor and binds only the current invoice source`, async ({ page }) => {
+  const state = await fixture(page);
+  state.respond = async (reply, ordinal) => ({ json: ordinal === 1 ? booksOnly(reply) : reply });
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const resolve = state.resolve; state.resolve = async input => { await pending; return resolve(input); };
+  try {
+    if (changed === "company") {
+      await page.goto("/bills/new");
+      await page.getByRole("combobox", { name: "Company", exact: true }).selectOption(company.id);
+      await page.locator("#bill-job").selectOption(job.id);
+    } else await open(page);
+    await files(page).setInputFiles(original(`FICTIONAL-stale-${changed}.pdf`)); await ready(page);
+    await expect.poll(() => state.resolutions.length).toBe(1);
+    if (changed === "originals") await files(page).setInputFiles(original("FICTIONAL-current-back.pdf"));
+    else {
+      await page.getByRole("combobox", { name: "Company", exact: true }).selectOption(otherCompany.id);
+      await page.locator("#bill-job").selectOption(otherJob.id);
+    }
+    await expect.poll(() => state.reads.length).toBe(2); await ready(page);
+    const current = changed === "company" ? otherVendor : vendor;
+    await expect(page.getByRole("region", { name: "Vendor details", exact: true })).toContainText(current.trn!);
+    release();
+    await expect(page.getByRole("combobox", { name: "Vendor Name", exact: true })).toHaveValue(current.name);
+    await page.getByRole("button", { name: "Save as draft", exact: true }).click();
+    await expect.poll(() => state.creates.length).toBe(1);
+    expect(state.creates[0]).toMatchObject({ companyId: current.companyId, jobId: changed === "company" ? otherJob.id : job.id, vendorId: current.id });
+    expect(state.resolutions).toHaveLength(1); expect(state.unexpected).toEqual([]);
+  } finally { release(); }
+});
+
+test("automatic vendor retry retains its evidence and original fields without rereading AI", async ({ page }) => {
+  const state = await fixture(page);
+  state.respond = async reply => ({ json: booksOnly(reply) });
+  const resolve = state.resolve;
+  state.resolve = async input => state.resolutions.length === 1
+    ? { status: 503, json: { error: "Fictional matched supplier verification interrupted." } } : resolve(input);
+  await open(page); await files(page).setInputFiles(original("FICTIONAL-vendor-retry.pdf")); await ready(page);
+  await expect(page.getByText("Fictional matched supplier verification interrupted.", { exact: true })).toBeVisible();
+  await expect(page.locator("#invoice-number")).toHaveValue("AUTO-1");
+  await expect(page.getByLabel("Line 2 unit price", { exact: true })).toHaveValue("20.00");
+  await expect(page.getByRole("group", { name: "Attachment FICTIONAL-vendor-retry.pdf", exact: true })).toBeVisible();
+  expect(state.creates).toEqual([]); expect(state.reads).toHaveLength(1);
+  await page.getByRole("button", { name: "Retry vendor selection", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Vendor details", exact: true })).toContainText(booksVendor.trn!);
+  expect(state.resolutions).toHaveLength(2); expect(state.resolutions[1]).toEqual(state.resolutions[0]);
+  expect(state.reads).toHaveLength(1); expect(state.creates).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("an automatic candidate from a different company cannot bind or replace the invoice fields", async ({ page }) => {
+  const state = await fixture(page);
+  state.respond = async reply => {
+    booksOnly(reply); reply.preview.vendorSelection!.companyId = otherCompany.id;
+    return { json: reply };
+  };
+  await open(page); await files(page).setInputFiles(original("FICTIONAL-foreign-vendor-candidate.pdf"));
+  await expect(preview(page)).toContainText("The reading did not match these originals and the selected job.");
+  await expect(page.locator("#invoice-number")).toHaveValue("");
+  await expect(page.getByRole("combobox", { name: "Vendor Name", exact: true })).toHaveValue("");
+  expect(state.resolutions).toEqual([]); expect(state.hydrations).toEqual([]); expect(state.creates).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
 test("a late reading keeps human fields and line edits, while filling only untouched values", async ({ page }) => {

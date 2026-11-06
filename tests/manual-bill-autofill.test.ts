@@ -3,6 +3,7 @@ import { PDFDocument } from "pdf-lib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Actor } from "@/lib/auth";
 import type { InvoiceAutofillExtraction } from "@/lib/bill-autofill";
+import { HttpError } from "@/lib/http";
 import { manualBillAutofillCapability, previewManualBillAutofill, readManualBillAutofillUpload } from "@/lib/services/manual-bill-autofill";
 import { GET, POST } from "@/app/api/bills/autofill/route";
 
@@ -11,9 +12,11 @@ const store = vi.hoisted(() => ({ user: { findFirst: vi.fn() }, job: { findFirst
 const model = vi.hoisted(() => ({ extractInvoice: vi.fn(), invoiceAutofillStatus: vi.fn() }));
 const reserve = vi.hoisted(() => vi.fn());
 const requireUser = vi.hoisted(() => vi.fn());
+const vendorLookup = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/db", () => ({ db: store }));
 vi.mock("@/lib/services/openai-invoice", () => model);
 vi.mock("@/lib/auth", () => ({ requireUser }));
+vi.mock("@/lib/services/bill-vendor-lookup", () => ({ searchBillVendors: vendorLookup }));
 vi.mock("@/lib/security/authentication-attempts", () => ({ reserveAuthenticationAttempt: reserve,
   authenticationAttemptKey: (purpose: string, identity: string) => `${purpose}:${identity}` }));
 
@@ -21,6 +24,10 @@ const actor = { id: "fictional-accounts", role: "ACCOUNTS" } as Actor;
 const job = { id: "fictional-job", companyId: "fictional-company", jobNumber: "JOB-5383", currency: "AED" };
 const vendor = { id: "fictional-vendor", name: "Fictional Supplier LLC", trn: "100000000000003", currency: "AED" };
 const available = { enabled: true, configured: true, message: "Review the invoice before saving." };
+const remoteVendor = (extra: Record<string, unknown> = {}) => ({ id: null, companyId: job.companyId,
+  name: vendor.name, trn: vendor.trn, currency: "AED", externalVendorId: "2001", organizationId: "1001", dataCenter: "US", environment: "production", selectable: true, ...extra });
+const vendorPage = (vendors = [remoteVendor()], extra: Record<string, unknown> = {}) => ({ companyId: job.companyId,
+  organizationId: "1001", dataCenter: "US", environment: "production", vendors, hasMore: false, warning: null, ...extra });
 function extraction(): InvoiceAutofillExtraction {
   return { fields: { invoiceNumber: "DEMO-001", invoiceDate: "2026-11-04", dueDate: "2026-12-04", discount: "0.00", vatRate: "5.00",
     lines: [{ description: "Fictional invoice item", quantity: "2", unitPrice: "10.00" }] },
@@ -47,6 +54,7 @@ beforeEach(() => {
   store.user.findFirst.mockResolvedValue({ id: actor.id }); store.job.findFirst.mockResolvedValue({ ...job });
   store.vendor.findMany.mockResolvedValue([{ ...vendor }]); store.bill.findFirst.mockResolvedValue(null);
   model.invoiceAutofillStatus.mockReturnValue({ ...available }); model.extractInvoice.mockResolvedValue(extraction()); reserve.mockResolvedValue(1); requireUser.mockResolvedValue(actor);
+  vendorLookup.mockReset().mockResolvedValue({ companyId: job.companyId, organizationId: null, dataCenter: null, environment: null, vendors: [], hasMore: false, warning: null });
   vi.stubEnv("APP_URL", "http://127.0.0.1:3000");
   vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("Real provider requests are forbidden in preview service tests."); }));
 });
@@ -129,6 +137,73 @@ describe("transient manual invoice preview", () => {
     const result = await previewManualBillAutofill(actor, await input());
     expect(result.preview.vendor).toBeNull(); expect(result.preview.vendorCandidates).toHaveLength(2); expect(result.preview.fields.vendorId).toBeUndefined();
     expect(result.preview.warnings).toContainEqual(expect.stringMatching(/Several suppliers/));
+    expect(vendorLookup).not.toHaveBeenCalled();
+  });
+  it("requires the printed name as well as a shared local TRN", async () => {
+    store.vendor.findMany.mockResolvedValue([{ ...vendor, id: "wrong-shared-trn", name: "Different Group Supplier LLC" }]);
+    const result = await previewManualBillAutofill(actor, await input());
+    expect(result.preview.vendor).toBeNull(); expect(result.preview.fields.vendorId).toBeUndefined();
+    store.vendor.findMany.mockResolvedValue([{ ...vendor }, { ...vendor, id: "wrong-shared-trn", name: "Different Group Supplier LLC" }]);
+    expect((await previewManualBillAutofill(actor, await input())).preview.vendor?.id).toBe(vendor.id);
+  });
+  it("returns one unique Books-only candidate without creating a local vendor or inventing its ID", async () => {
+    store.vendor.findMany.mockResolvedValue([]);
+    vendorLookup.mockResolvedValue(vendorPage());
+    const result = await previewManualBillAutofill(actor, await input());
+    expect(result.preview.vendor).toBeNull(); expect(result.preview.fields.vendorId).toBeUndefined();
+    expect(result.preview.vendorSelection).toEqual({ companyId: job.companyId, id: null, name: vendor.name, trn: vendor.trn,
+      currency: "AED", externalVendorId: "2001", organizationId: "1001", dataCenter: "US", environment: "production" });
+    expect(vendorLookup.mock.calls.map(([, request]) => request)).toEqual([
+      { companyId: job.companyId, q: vendor.name, page: 1 }, { companyId: job.companyId, q: "Fictional", page: 1 },
+    ]);
+    expect(store.$transaction).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
+  });
+  it("finds punctuation variants via one distinctive token but checks the full printed identity", async () => {
+    store.vendor.findMany.mockResolvedValue([]);
+    vendorLookup.mockImplementation(async (_actor, request) => vendorPage(request.q === "Fictional" ? [remoteVendor({ name: "FICTIONAL SUPPLIER, L.L.C." })] : []));
+    expect((await previewManualBillAutofill(actor, await input())).preview.vendorSelection?.externalVendorId).toBe("2001");
+    expect(vendorLookup).toHaveBeenCalledTimes(2);
+  });
+  it("refuses normalized duplicate contacts revealed only by the broader token search", async () => {
+    store.vendor.findMany.mockResolvedValue([]);
+    vendorLookup.mockImplementation(async (_actor, request) => vendorPage(request.q === "Fictional"
+      ? [remoteVendor(), remoteVendor({ externalVendorId: "2002", name: "FICTIONAL SUPPLIER, L.L.C." })] : [remoteVendor()]));
+    const result = await previewManualBillAutofill(actor, await input());
+    expect(result.preview.vendorSelection).toBeNull(); expect(result.preview.fields.vendorId).toBeUndefined();
+  });
+  it("completes bounded search pages before choosing and deduplicates the same contact across queries", async () => {
+    store.vendor.findMany.mockResolvedValue([]);
+    vendorLookup.mockImplementation(async (_actor, request) => vendorPage(request.page === 1 ? [] : [remoteVendor()], { hasMore: request.page === 1 }));
+    expect((await previewManualBillAutofill(actor, await input())).preview.vendorSelection?.externalVendorId).toBe("2001");
+    expect(vendorLookup).toHaveBeenCalledTimes(4);
+  });
+  it.each([
+    { hasMore: true }, { warning: "Incomplete provider catalog" }, { organizationId: null },
+  ])("refuses incomplete or unavailable provider evidence: %j", async extra => {
+    store.vendor.findMany.mockResolvedValue([]);
+    vendorLookup.mockResolvedValue(vendorPage([remoteVendor()], extra));
+    const result = await previewManualBillAutofill(actor, await input());
+    expect(result.preview.vendorSelection).toBeNull(); expect(result.preview.fields.vendorId).toBeUndefined();
+    expect(vendorLookup.mock.calls.length).toBeLessThanOrEqual(2);
+  });
+  it.each([
+    { selectable: false }, { currency: "USD" }, { trn: "999999999999999" }, { name: "Another supplier with the shared TRN" },
+    { companyId: "foreign-company" }, { organizationId: "1002" }, { dataCenter: "EU" }, { environment: "sandbox" }, { externalVendorId: "invalid" },
+  ])("does not automatically select a conflicting provider candidate: %j", async extra => {
+    store.vendor.findMany.mockResolvedValue([]); vendorLookup.mockResolvedValue(vendorPage([remoteVendor(extra)]));
+    expect((await previewManualBillAutofill(actor, await input())).preview.vendorSelection).toBeNull();
+  });
+  it("does not let a destination change between the two searches prove a match", async () => {
+    store.vendor.findMany.mockResolvedValue([]);
+    vendorLookup.mockResolvedValueOnce(vendorPage()).mockResolvedValueOnce(vendorPage([remoteVendor({ organizationId: "1002" })], { organizationId: "1002" }));
+    expect((await previewManualBillAutofill(actor, await input())).preview.vendorSelection).toBeNull();
+  });
+  it("discards remote matches when access is revoked during discovery", async () => {
+    store.vendor.findMany.mockResolvedValue([]);
+    vendorLookup.mockImplementation(async () => { store.user.findFirst.mockResolvedValue(null); return vendorPage(); });
+    await expect(previewManualBillAutofill(actor, await input())).rejects.toMatchObject({ status: 403 });
+    vendorLookup.mockRejectedValue(new HttpError(403, "Access changed.")); store.user.findFirst.mockResolvedValue({ id: actor.id });
+    await expect(previewManualBillAutofill(actor, await input())).rejects.toMatchObject({ status: 403 });
   });
   it("bounds supplier lookup and preserves manual selection when the catalog is too large", async () => {
     store.vendor.findMany.mockResolvedValue(Array.from({ length: 5001 }, (_, index) => ({ ...vendor, id: `vendor-${index}` })));

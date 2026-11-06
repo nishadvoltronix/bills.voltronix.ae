@@ -7,6 +7,17 @@ export type InvoiceAutofillVendor = {
   currency: string;
   match: "TRN" | "NAME";
 };
+export type InvoiceAutofillVendorSelection = {
+  companyId: string;
+  id: string | null;
+  name: string;
+  trn: string | null;
+  currency: string;
+  externalVendorId: string;
+  organizationId: string;
+  dataCenter: string;
+  environment: "production" | "sandbox";
+};
 export type InvoiceAutofillResponse = {
   requestId: string;
   source: {
@@ -19,6 +30,7 @@ export type InvoiceAutofillResponse = {
   preview: {
     fields: InvoiceAutofillExtraction["fields"] & { vendorId?: string; currency?: string };
     vendor: InvoiceAutofillVendor | null;
+    vendorSelection?: InvoiceAutofillVendorSelection | null;
     vendorCandidates: InvoiceAutofillVendor[];
     evidence: InvoiceAutofillExtraction["evidence"];
     warnings: string[];

@@ -6,14 +6,15 @@ import type { Actor } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { HttpError } from "@/lib/http";
 import { normalizeInvoiceNumber } from "@/lib/finance";
-import { matchingOcrVendors } from "@/lib/ocr-extraction";
+import { matchesAutofillVendorIdentity, usableAutofillVendorIdentity, type AutofillVendorIdentity } from "@/lib/bill-autofill-vendor";
 import { matchesExactJobSearch, parseExactJobSearch } from "@/lib/job-search";
 import { billScope, canCreateBill } from "@/lib/permissions";
 import { MAX_INVOICE_ATTACHMENTS, MAX_INVOICE_FILE_BYTES, MAX_INVOICE_TOTAL_BYTES } from "@/lib/invoice-attachments";
 import { authenticationAttemptKey, reserveAuthenticationAttempt } from "@/lib/security/authentication-attempts";
-import type { InvoiceAutofillCapability, InvoiceAutofillResponse, InvoiceAutofillVendor } from "@/lib/manual-bill-autofill-types";
+import type { InvoiceAutofillCapability, InvoiceAutofillResponse, InvoiceAutofillVendor, InvoiceAutofillVendorSelection } from "@/lib/manual-bill-autofill-types";
 import { detectDocumentType } from "./documents";
 import { extractInvoice, invoiceAutofillStatus } from "./openai-invoice";
+import { searchBillVendors } from "./bill-vendor-lookup";
 
 const identity = z.string().regex(/^[A-Za-z0-9_-]{1,100}$/);
 const contextSchema = z.object({ companyId: identity, jobId: identity }).strict();
@@ -28,6 +29,40 @@ const maximumInflight = 3;
 let inflight = 0;
 const inflightActors = new Set<string>();
 const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
+
+async function discoverBooksVendor(actor: Actor, companyId: string, identity: AutofillVendorIdentity): Promise<InvoiceAutofillVendorSelection | null> {
+  if (!usableAutofillVendorIdentity(identity) || !identity.vendorName) return null;
+  const fullName = identity.vendorName.trim().slice(0, 100);
+  const generic = new Set(["the", "and", "llc", "ltd", "limited", "company", "trading", "co", "inc", "llp", "fze", "fzco", "services", "materials", "building"]);
+  const token = identity.vendorName.normalize("NFKC").match(/[\p{L}\p{N}]+/gu)?.filter(value => value.length >= 3 && !generic.has(value.toLowerCase()))
+    .sort((left, right) => right.length - left.length)[0]?.slice(0, 100);
+  const queries = [...new Set([fullName, ...(token && token !== fullName ? [token] : [])])];
+  const matches = new Map<string, InvoiceAutofillVendorSelection>();
+  let destination: string | null = null;
+  for (const q of queries) {
+    let completed = false;
+    for (let page = 1; page <= 2; page++) {
+      const result = await searchBillVendors(actor, { companyId, q, page });
+      if (result.warning || !result.organizationId || !result.dataCenter || !result.environment || result.companyId !== companyId) return null;
+      const currentDestination = JSON.stringify([result.organizationId, result.dataCenter, result.environment]);
+      if (destination && destination !== currentDestination) return null;
+      destination = currentDestination;
+      for (const row of result.vendors) {
+        if (row.companyId !== companyId || row.selectable === false || !row.externalVendorId || !/^\d{1,30}$/.test(row.externalVendorId) ||
+          row.organizationId !== result.organizationId || row.dataCenter !== result.dataCenter || row.environment !== result.environment ||
+          !matchesAutofillVendorIdentity(identity, row)) continue;
+        matches.set(JSON.stringify([row.organizationId, row.dataCenter, row.environment, row.externalVendorId]), {
+          companyId, id: row.id, name: row.name, trn: row.trn, currency: row.currency,
+          externalVendorId: row.externalVendorId, organizationId: row.organizationId, dataCenter: row.dataCenter, environment: row.environment,
+        });
+      }
+      if (matches.size > 1) return null;
+      if (!result.hasMore) { completed = true; break; }
+    }
+    if (!completed) return null;
+  }
+  return matches.size === 1 ? [...matches.values()][0] : null;
+}
 
 async function authorizedJob(actor: Actor, input: Scope) {
   if (!canCreateBill(actor)) throw new HttpError(403, "Your role cannot prepare bill entries.");
@@ -167,13 +202,17 @@ export async function previewManualBillAutofill(actor: Actor, input: Input): Pro
     const rows = await db.vendor.findMany({ where: { companyId: scope.companyId, currency: job.currency },
       orderBy: { id: "asc" }, take: maximumVendors + 1, select: { id: true, name: true, trn: true, currency: true } });
     const suppliedTrn = extraction.evidence.vendorTrn;
-    const unusableTrn = suppliedTrn !== null && !/[\p{L}\p{N}]/u.test(suppliedTrn.normalize("NFKC"));
-    const matches = rows.length > maximumVendors || unusableTrn ? [] : matchingOcrVendors({ vendorName: extraction.evidence.vendorName ?? undefined,
-      vendorTrn: extraction.evidence.vendorTrn ?? undefined }, rows);
+    const identity = { vendorName: extraction.evidence.vendorName, vendorTrn: suppliedTrn, currency: job.currency };
+    const matches = rows.length > maximumVendors ? [] : rows.filter(row => matchesAutofillVendorIdentity(identity, row));
     const vendorCandidates: InvoiceAutofillVendor[] = matches.slice(0, 10).map(row => ({ ...row, match: suppliedTrn ? "TRN" : "NAME" }));
     const vendor = matches.length === 1 ? vendorCandidates[0] : null;
+    let vendorSelection: InvoiceAutofillVendorSelection | null = null;
+    if (!vendor && matches.length === 0 && rows.length <= maximumVendors && usableAutofillVendorIdentity(identity)) {
+      try { vendorSelection = await discoverBooksVendor(actor, scope.companyId, identity); }
+      catch (error) { if (error instanceof HttpError && [401, 403, 409].includes(error.status)) throw error; }
+    }
     if (vendor) fields.vendorId = vendor.id;
-    else warnings.push(rows.length > maximumVendors ? "The supplier catalog is too large for automatic matching. Select the supplier manually." :
+    else if (!vendorSelection) warnings.push(rows.length > maximumVendors ? "The supplier catalog is too large for automatic matching. Select the supplier manually." :
       matches.length > 1 ? "Several suppliers exactly match the printed identity. Select the correct supplier." : "No exact supplier match was found. Select and verify the supplier manually.");
     if (vendor && fields.invoiceNumber && await db.bill.findFirst({ where: { companyId: scope.companyId, ...billScope(actor), vendorId: vendor.id,
       normalizedInvoiceNumber: normalizeInvoiceNumber(fields.invoiceNumber) }, select: { id: true } }))
@@ -188,6 +227,6 @@ export async function previewManualBillAutofill(actor: Actor, input: Input): Pro
     const publicFiles = files.map(({ index, sha256, byteSize, mimeType }) => ({ index, sha256, byteSize, mimeType }));
     return { requestId: scope.requestId, source: { companyId: scope.companyId, jobId: scope.jobId, currency: job.currency,
       fingerprint: sha(JSON.stringify({ companyId: scope.companyId, jobId: scope.jobId, currency: job.currency, files: publicFiles })), files: publicFiles },
-      preview: { fields, vendor, vendorCandidates, evidence: extraction.evidence, warnings: [...new Set(warnings)], requiresHumanReview: false } };
+      preview: { fields, vendor, vendorSelection, vendorCandidates, evidence: extraction.evidence, warnings: [...new Set(warnings)], requiresHumanReview: false } };
   } finally { inflightActors.delete(actor.id); inflight--; }
 }

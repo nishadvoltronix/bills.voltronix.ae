@@ -1,6 +1,6 @@
 "use client";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   CheckCircle2,
@@ -43,11 +43,11 @@ import {
 } from "./ui";
 import { AmountRow } from "./records";
 import { CompanySelect } from "./company-select";
-import { VendorAutocomplete } from "./vendor-autocomplete";
+import { VendorAutocomplete, type AutomaticVendorSelection } from "./vendor-autocomplete";
 import { JobItemAutocomplete } from "./job-item-autocomplete";
 import { SavedBillOutcome, type SavedJobBill } from "./saved-bill-outcome";
 import { InvoiceAttachmentPicker, type InvoiceFileSelection } from "./invoice-attachment-picker";
-import { ManualBillAutofill, useManualBillAutofill } from "./manual-bill-autofill";
+import { ManualBillAutofill, useManualBillAutofill, type AutofillSource } from "./manual-bill-autofill";
 import type { InvoiceAutofillResponse } from "@/lib/manual-bill-autofill-types";
 import { BooksLinePicker, booksLineSelection, hasBooksLineDraft, type BooksLineDraft } from "./books-line-picker";
 
@@ -166,7 +166,11 @@ function BillForm({
   const [chosenVendor, setChosenVendor] = useState<Vendor | null>(null);
   const [vendorQuerySeed, setVendorQuerySeed] = useState<{ companyId: string; value: string } | null>(null);
   const [vendorLookupRevision, setVendorLookupRevision] = useState(0);
-  const [vendorPending, setVendorPending] = useState<{ companyId: string; pending: boolean } | null>(null);
+  const [vendorPending, setVendorPending] = useState<{ companyId: string; pending: boolean; automaticKey?: string } | null>(null);
+  const [automaticVendor, setAutomaticVendor] = useState<{ actorKey: string; source: AutofillSource; request: AutomaticVendorSelection;
+    status: "pending" | "resolved" | "failed" } | null>(null);
+  const [vendorMatchNotice, setVendorMatchNotice] = useState<{ actorKey: string; source: AutofillSource; message: string } | null>(null);
+  const automaticVendorKey = useRef<string | null>(null);
   const [jobId, setJobId] = useState(initial?.jobId ?? initialJob?.id ?? "");
   const [jobQuery, setJobQuery] = useState("");
   const [invoiceNumber, setInvoiceNumber] = useState(
@@ -240,22 +244,30 @@ function BillForm({
   const selectedVendor = chosenVendor?.id === vendorId && chosenVendor.companyId === companyId
     ? chosenVendor
     : null;
-  const vendorResolving = vendorPending?.companyId === companyId && vendorPending.pending;
   const vendorVat = selectedVendor?.booksVat;
   const vendorTaxConflict = !manualEntryOnly && vendorVat?.status === "verified" && hasBooksVendorTaxConflict(vendorVat.taxTreatment,
     usesLineBooks ? lines.map(line => ({ tax_id: line.booksDraft?.taxId && line.booksDraft.taxId !== BOOKS_NO_VAT ? line.booksDraft.taxId : null }))
       : [{ tax_id: Number(vatRate) > 0 ? "configured-vat" : null }]);
-  const handleVendorChange = useCallback((vendor: Vendor | null, source: "selection" | "hydration" | "clear") => {
+  const handleVendorChange = useCallback((vendor: Vendor | null, source: "selection" | "hydration" | "clear" | "automatic", key?: string) => {
     if (vendor && vendor.companyId !== companyId) return;
-    if (source !== "hydration") { markEdited("vendor"); setVendorQuerySeed(null); }
+    if (source === "automatic" && automaticVendorKey.current !== key) return;
+    if (source === "selection" || source === "clear") {
+      markEdited("vendor"); setVendorQuerySeed(null); setAutomaticVendor(null); setVendorMatchNotice(null);
+    }
+    if (source === "automatic" && vendor) {
+      setVendorQuerySeed(null);
+      setAutomaticVendor(current => current && current.request.key === key ? { ...current, status: "resolved" } : current);
+    }
     setVendorId(vendor?.id ?? "");
     setChosenVendor(vendor);
     if (source === "selection" && vendor && !jobId) setCurrency(vendor.currency);
   }, [companyId, jobId, markEdited]);
-  const handleVendorPending = useCallback((pending: boolean) => {
+  const handleVendorPending = useCallback((pending: boolean, key?: string) => {
+    if (key && automaticVendorKey.current !== key) return;
+    if (key) setAutomaticVendor(current => current && current.request.key === key ? { ...current, status: pending ? "pending" : "failed" } : current);
     setVendorPending((current) => {
       if (!pending && current?.companyId !== companyId) return current;
-      return { companyId, pending };
+      return { companyId, pending, automaticKey: key };
     });
   }, [companyId]);
   function refreshVendor() {
@@ -273,7 +285,7 @@ function BillForm({
   const attachmentFirst = !bill && !draft && !review;
   const aiFiles = files.filter(file => file.readingMode !== "manual");
   const manualFiles = files.filter(file => file.readingMode === "manual");
-  function applyAutofill(result: InvoiceAutofillResponse) {
+  function applyAutofill(result: InvoiceAutofillResponse, source: AutofillSource) {
     const fields = result.preview.fields;
     let kept = false;
     const scalar = (name: string, value: string | undefined, fallback: string, setter: (value: string) => void, clearUnknown = false) => {
@@ -294,22 +306,36 @@ function BillForm({
     setLineReadingReview(merged.review); kept ||= merged.kept;
     if (!humanEdited.current.has("vendor")) {
       const nextVendor = result.preview.vendor?.id === fields.vendorId ? fields.vendorId : undefined;
+      const candidate = nextVendor ? null : result.preview.vendorSelection;
       const query = nextVendor ? "" : result.preview.evidence.vendorName?.trim().slice(0, 100) ?? "";
       const previousQuery = vendorQuerySeed?.companyId === companyId ? vendorQuerySeed.value : "";
-      if (nextVendor || query || autoOwned.current.has("vendor")) {
-        setVendorId(nextVendor ?? "");
-        setVendorQuerySeed(query ? { companyId, value: query } : null);
-        if (nextVendor !== vendorId || query !== previousQuery) { setChosenVendor(null); setVendorLookupRevision(value => value + 1); }
-        autoOwned.current.add("vendor");
-      }
+      const actorKey = `${user.id}:${user.role}`;
+      setAutomaticVendor(candidate ? { actorKey, source, status: "pending", request: {
+        key: JSON.stringify([actorKey, source.key, source.revision, result.source.fingerprint, result.requestId]), candidate,
+        expectedIdentity: { vendorName: result.preview.evidence.vendorName, vendorTrn: result.preview.evidence.vendorTrn, currency: result.source.currency },
+      } } : null);
+      setVendorMatchNotice(nextVendor || candidate ? null : { actorKey, source,
+        message: result.preview.vendorCandidates.length > 1 ? "Several vendors match the invoice. Choose the correct vendor."
+          : "No exact vendor match was found. Search and choose the correct vendor." });
+      setVendorId(nextVendor ?? "");
+      setVendorQuerySeed(query ? { companyId, value: query } : null);
+      if (nextVendor !== vendorId || query !== previousQuery || candidate) { setChosenVendor(null); setVendorLookupRevision(value => value + 1); }
+      autoOwned.current.add("vendor");
     } else kept = true;
     return { kept };
   }
   const autofill = useManualBillAutofill({ eligible: attachmentFirst && !savedId && !busy && user.role !== "MANAGEMENT",
-    companyId, jobId: selectedJob?.id ?? "", currency: selectedJob?.currency ?? currency,
+    actorKey: `${user.id}:${user.role}`, companyId, jobId: selectedJob?.id ?? "", currency: selectedJob?.currency ?? currency,
     // Only validated AI originals are committed to this subset. Hashing a manual
     // file or duplicate must not cancel, invalidate or restart an active read.
     files: aiFiles, checking: false, apply: applyAutofill });
+  const currentVendorSource = (value: { actorKey: string; source: AutofillSource } | null) => value?.actorKey === `${user.id}:${user.role}` &&
+    value.source.key === autofill.sourceKey && value.source.revision === autofill.revision;
+  const currentAutomaticVendor = currentVendorSource(automaticVendor) ? automaticVendor : null;
+  const currentVendorNotice = currentVendorSource(vendorMatchNotice) ? vendorMatchNotice?.message : null;
+  useLayoutEffect(() => { automaticVendorKey.current = currentAutomaticVendor?.request.key ?? null; }, [currentAutomaticVendor?.request.key]);
+  const vendorResolving = currentAutomaticVendor?.status === "pending" || vendorPending?.companyId === companyId && vendorPending.pending &&
+    (!vendorPending.automaticKey || vendorPending.automaticKey === currentAutomaticVendor?.request.key);
   const printedJob = autofill.preview?.evidence.jobNumber;
   const printedJobMismatch = printedJob && selectedJob && printedJob.toUpperCase().replace(/^JOB[- ]?/, "") !== selectedJob.jobNumber.toUpperCase().replace(/^JOB[- ]?/, "");
   function captureHumanEdit(event: React.FormEvent<HTMLFormElement>) {
@@ -770,15 +796,17 @@ function BillForm({
                   <Field label="Vendor Name" htmlFor="bill-vendor" required>
                     <div className="books-vendor-control">
                       <VendorAutocomplete
-                        key={`${companyId}:${vendorLookupRevision}`}
+                        key={`${user.id}:${user.role}:${companyId}:${vendorLookupRevision}`}
                         id="bill-vendor"
                         companyId={companyId}
                         value={vendorId}
                         initialQuery={vendorQuerySeed?.companyId === companyId ? vendorQuerySeed.value : ""}
+                        automaticSelection={currentAutomaticVendor?.status === "resolved" ? null : currentAutomaticVendor?.request}
                         onChange={handleVendorChange}
                         onPendingChange={handleVendorPending}
                         disabled={busy}
                       />
+                      {currentVendorNotice && <p className="field-hint" role="status">{currentVendorNotice}</p>}
                       {selectedVendor && (
                         <p className="books-vendor-info">
                           {selectedVendor.trn
