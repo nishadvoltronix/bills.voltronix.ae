@@ -18,6 +18,7 @@ import { calculateBill } from "@/lib/finance";
 import { matchesExactJobSearch, parseExactJobSearch } from "@/lib/job-search";
 import { savedBillState } from "@/lib/bill-save-outcome";
 import { mergeAutofillLines, type AutofillLineEdit, type AutofillLineOrigin } from "@/lib/bill-autofill-lines";
+import { compareAutofillAmounts, fillUnsetAutofillTax } from "@/lib/bill-autofill-totals";
 import { BOOKS_NO_VAT, BOOKS_NO_VAT_NAME, type BooksSelection } from "@/lib/books-selection";
 import { MAX_INVOICE_ATTACHMENTS, MAX_INVOICE_FILE_BYTES, MAX_INVOICE_TOTAL_BYTES } from "@/lib/invoice-attachments";
 import { BOOKS_VENDOR_VAT_REVIEW_MESSAGE, hasBooksVendorTaxConflict } from "@/lib/integrations/books-vendor-tax";
@@ -226,6 +227,8 @@ function BillForm({
   const markEdited = useCallback((field: string) => { humanEdited.current.add(field); }, []);
   const lineOrigins = useRef<AutofillLineOrigin[]>([]);
   const lineEdits = useRef(new Map<number, Set<AutofillLineEdit>>());
+  const lineTaxEdited = useRef(new Set<number>());
+  const [manualAutofillSource, setManualAutofillSource] = useState<AutofillSource | null>(null);
   const [lineReadingReview, setLineReadingReview] = useState(false);
   function markLineEdited(key: number, field: AutofillLineEdit) {
     const fields = lineEdits.current.get(key) ?? new Set<AutofillLineEdit>();
@@ -333,6 +336,25 @@ function BillForm({
     value.source.key === autofill.sourceKey && value.source.revision === autofill.revision;
   const currentAutomaticVendor = currentVendorSource(automaticVendor) ? automaticVendor : null;
   const currentVendorNotice = currentVendorSource(vendorMatchNotice) ? vendorMatchNotice?.message : null;
+  const manualAutofill = manualAutofillSource?.key === autofill.sourceKey && manualAutofillSource.revision === autofill.revision;
+  const invoiceAmounts = compareAutofillAmounts(autofill.preview?.evidence, calculated.totals);
+  const invoiceAmountConflict = !manualAutofill && invoiceAmounts.blocking;
+  const invoiceAmountMessage = invoiceAmounts.differences.map(row =>
+    `${row.label}: invoice ${money(row.printed, currency)}, form ${money(row.calculated, currency)}`).join(". ");
+  useEffect(() => {
+    if (manualAutofill || humanEdited.current.has("vatRate") || !autofill.preview || !booksCatalog) return;
+    const rate = autofill.preview.fields.vatRate;
+    setLines(current => {
+      let changed = false;
+      const next = current.map(line => {
+        const draft = fillUnsetAutofillTax(line.booksDraft, booksCatalog, companyId, rate, lineTaxEdited.current.has(line.key));
+        if (draft === line.booksDraft) return line;
+        changed = true;
+        return { ...line, booksDraft: draft, booksSelection: booksLineSelection(draft) };
+      });
+      return changed ? next : current;
+    });
+  }, [autofill.preview, booksCatalog, companyId, manualAutofill, lines]);
   useLayoutEffect(() => { automaticVendorKey.current = currentAutomaticVendor?.request.key ?? null; }, [currentAutomaticVendor?.request.key]);
   const vendorResolving = currentAutomaticVendor?.status === "pending" || vendorPending?.companyId === companyId && vendorPending.pending &&
     (!vendorPending.automaticKey || vendorPending.automaticKey === currentAutomaticVendor?.request.key);
@@ -382,12 +404,15 @@ function BillForm({
     );
   }
   function updateBooksLine(key: number, draft: BooksLineDraft) {
+    const previous = lines.find(line => line.key === key)?.booksDraft;
+    if ((previous?.taxId ?? "") !== (draft.taxId ?? "") || (previous?.taxName ?? "") !== (draft.taxName ?? "") ||
+      previous?.taxRate !== draft.taxRate || !!previous?.unfinished?.tax !== !!draft.unfinished?.tax) lineTaxEdited.current.add(key);
     markLineEdited(key, "books");
     setLines((current) => current.map((line) => line.key === key
       ? { ...line, booksDraft: draft, booksSelection: booksLineSelection(draft) } : line));
   }
   function clearBooksLines(markHuman = true) {
-    if (markHuman) lines.forEach(line => markLineEdited(line.key, "books"));
+    if (markHuman) lines.forEach(line => { markLineEdited(line.key, "books"); lineTaxEdited.current.add(line.key); });
     setLines((current) => current.map((line) => ({ ...line, booksDraft: undefined, booksSelection: null })));
     setBooksFieldsRevision((current) => current + 1);
   }
@@ -556,6 +581,10 @@ function BillForm({
     }
     if (!calculated.totals) {
       setError(calculated.error);
+      return;
+    }
+    if (submit && invoiceAmountConflict) {
+      setError(`${invoiceAmountMessage}. Correct the invoice VAT and amounts, or choose Use manual entry if the reading is wrong.`);
       return;
     }
     if (selectedJob && selectedJob.currency !== currency) {
@@ -1302,6 +1331,19 @@ function BillForm({
                 <p className="books-tax-note">
                   {usesLineBooks ? `VAT follows each line's tax or ${BOOKS_NO_VAT_NAME} choice. Books line selections require a zero discount.` : "Discount is applied before VAT."}
                 </p>
+                {!!invoiceAmounts.differences.length && !manualAutofill && <div aria-label="Invoice amount comparison">
+                  <p className="books-field-error" role={invoiceAmountConflict ? "alert" : "status"}>
+                    {invoiceAmountMessage}. {invoiceAmountConflict
+                      ? "Correct the invoice VAT and amounts before saving and syncing. You can keep an unfinished draft."
+                      : "A one-fils rounding difference remains in the invoice amounts."}
+                  </p>
+                  {invoiceAmountConflict && <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => {
+                    autofill.stop(); setManualAutofillSource({ key: autofill.sourceKey, revision: autofill.revision });
+                  }}>Use manual entry</Button>}
+                </div>}
+                {manualAutofill && <p role="status" aria-label="Manual invoice amounts">
+                  Manual entry selected for these files. Correct the amounts from the original; automatic reading is stopped.
+                </p>}
                 {Number(discount) > 0 && !usesLineBooks && !manualEntryOnly && (
                   <Notice>
                     Discounted bills can be saved locally, but cannot sync to Zoho Books yet. Keep the original invoice amounts and contact your administrator before synchronization.
@@ -1384,7 +1426,7 @@ function BillForm({
                 name="intent"
                 value="submit"
                 type="submit"
-                disabled={busy || checkingFiles || vendorResolving || jobs.loading || vendorTaxConflict || autofill.waiting}
+                disabled={busy || checkingFiles || vendorResolving || jobs.loading || vendorTaxConflict || autofill.waiting || invoiceAmountConflict}
               >
                 {busy ? <LoaderCircle size={15} className="spin" /> : <Send size={15} />}
                 {busy ? busyLabel : saveLabel}

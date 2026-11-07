@@ -44,6 +44,8 @@ async function fixture(page: Page): Promise<Fixture> {
     const selectedJob = [job, otherJob].find(row => path === `/api/jobs/${row.id}`);
     if (method === "GET" && selectedJob) return route.fulfill({ json: { job: selectedJob, bills: [] } });
     if (method === "GET" && path === "/api/bills/options") return route.fulfill({ json: { ...options, companyId: url.searchParams.get("companyId") } });
+    if (method === "GET" && [company, otherCompany].some(row => path === `/api/companies/${row.id}/payment-accounts`))
+      return route.fulfill({ json: { companyId: path.split("/")[3], accounts: [], warning: "Fictional payment account lookup; no payment will be recorded." } });
     if (method === "GET" && path === "/api/bills/item-suggestions") return route.fulfill({ json: {
       companyId: url.searchParams.get("companyId"), jobId: url.searchParams.get("jobId"), suggestions: [],
     } });
@@ -138,7 +140,11 @@ function booksOnly(reply: InvoiceAutofillResponse) {
   return reply;
 }
 async function chooseLine(page: Page, line: number, kind: "account" | "tax", name: string) {
-  await page.getByRole("combobox", { name: `Line ${line} ${kind}`, exact: true }).fill(name);
+  const input = page.getByRole("combobox", { name: `Line ${line} ${kind}`, exact: true });
+  await input.fill(name);
+  // Autofill may already have selected this exact tax, so filling the same
+  // value need not emit a change. Explicitly reopen the current picker.
+  await input.click();
   await page.getByRole("option", { name: new RegExp(`^${name}`) }).click();
 }
 
@@ -386,6 +392,7 @@ test("partial item rows fill every readable value and ordinary validation permit
       { description: "Rate unreadable", quantity: "3", unitPrice: "" },
     ];
     reply.preview.warnings = ["Some item cells were unreadable. Complete their empty values."];
+    reply.preview.evidence = { ...reply.preview.evidence, subtotal: "42.00", vatAmount: "2.10", total: "44.10" };
     return { json: reply };
   };
   await open(page); await files(page).setInputFiles(original("FICTIONAL-partial-items.pdf")); await ready(page);
@@ -735,5 +742,99 @@ test("both attachment boxes share the aggregate byte limit and rejected manual a
   await expect(manualList(page).getByRole("group")).toHaveCount(1);
   await expect(page.getByRole("list", { name: "Selected invoice attachments", exact: true }).getByRole("group")).toHaveCount(1);
   await page.waitForTimeout(650); expect(state.reads).toHaveLength(1); expect(state.reads[0].source.files).toHaveLength(1);
+  expect(state.creates).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+function printedFivePercentInvoice(reply: InvoiceAutofillResponse) {
+  reply.preview.fields.lines = [{ description: "Fictional clear sheet", quantity: "5", unitPrice: "150.00" }];
+  reply.preview.fields.vatRate = "5.00";
+  reply.preview.evidence = { ...reply.preview.evidence, subtotal: "750.00", discount: "0.00", vatAmount: "37.50", vatRate: "5.00", total: "787.50" };
+  return reply;
+}
+const zeroRate = { id: "88999", name: "Fictional Zero Rate", rate: "0.00", selectable: true };
+
+test("printed5percent VAT fills an unset scoped tax after account selection and saves787.50", async ({ page }) => {
+  const state = await fixture(page);
+  state.respond = async reply => ({ json: printedFivePercentInvoice(reply) });
+  await open(page); await files(page).setInputFiles(original("FICTIONAL-750-plus-VAT.pdf")); await ready(page);
+  await chooseLine(page, 1, "account", options.accounts[0].name);
+  await expect(page.getByRole("combobox", { name: "Line 1 tax", exact: true })).toHaveValue(options.taxes[0].name);
+  await expect(page.getByLabel("Invoice amount comparison", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("checkbox")).toHaveCount(0);
+  await page.getByRole("button", { name: "Save and sync", exact: true }).click();
+  await expect(page).toHaveURL(/\/bills\/autofill-saved\/payment\?entry=1&saved=1$/);
+  expect(state.creates).toHaveLength(1); expect(state.bill?.total).toBe("787.50"); expect(state.bill?.vatAmount).toBe("37.50");
+  const input = state.creates[0] as { lines: { booksSelection: { taxId: string; taxRate: string } }[] };
+  expect(input.lines[0].booksSelection).toMatchObject({ taxId: options.taxes[0].id, taxRate: "5.00" });
+  expect(state.uploads).toHaveLength(1); expect(state.actions).toHaveLength(1); expect(state.unexpected).toEqual([]);
+});
+
+test("an explicit zero-rate choice stays selected but printed787.50 prevents final750 and still permits a draft", async ({ page }) => {
+  const state = await fixture(page);
+  state.respond = async reply => ({ json: printedFivePercentInvoice(reply) });
+  await page.route("**/api/bills/options?*", route => route.fulfill({ json: { ...options, taxes: [...options.taxes, zeroRate],
+    companyId: new URL(route.request().url()).searchParams.get("companyId") } }));
+  await open(page); await files(page).setInputFiles(original("FICTIONAL-zero-rate-conflict.pdf")); await ready(page);
+  await chooseLine(page, 1, "tax", zeroRate.name); await chooseLine(page, 1, "account", options.accounts[0].name);
+  await expect(page.getByRole("combobox", { name: "Line 1 tax", exact: true })).toHaveValue(zeroRate.name);
+  const comparison = page.getByLabel("Invoice amount comparison", { exact: true });
+  await expect(comparison).toContainText("787.50"); await expect(comparison).toContainText("750.00"); await expect(comparison).toContainText("37.50");
+  await expect(page.getByRole("button", { name: "Save and sync", exact: true })).toBeDisabled();
+  expect(state.creates).toEqual([]); expect(state.actions).toEqual([]);
+  await page.getByRole("button", { name: "Save as draft", exact: true }).click();
+  await expect.poll(() => state.creates.length).toBe(1);
+  const input = state.creates[0] as { lines: { booksSelection: { taxId: string } }[] };
+  expect(input.lines[0].booksSelection.taxId).toBe(zeroRate.id);
+  expect(state.bill?.status).toBe("DRAFT"); expect(state.actions).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("manual entry explicitly releases a wrong AI amount comparison only for the unchanged reading source", async ({ page }) => {
+  const state = await fixture(page);
+  state.respond = async reply => ({ json: printedFivePercentInvoice(reply) });
+  await open(page); await files(page).setInputFiles(original("FICTIONAL-manual-exception-front.pdf")); await ready(page);
+  await chooseLine(page, 1, "tax", "No VAT"); await chooseLine(page, 1, "account", options.accounts[0].name);
+  await page.locator("#invoice-number").fill("KEEP-MY-CORRECTION");
+  await expect(page.getByRole("button", { name: "Save and sync", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: "Use manual entry", exact: true }).click();
+  await expect(page.getByLabel("Manual invoice amounts", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Save and sync", exact: true })).toBeEnabled();
+  await manualFiles(page).setInputFiles(original("FICTIONAL-manual-support-stays-private.pdf"));
+  await expect(page.getByLabel("Manual invoice amounts", { exact: true })).toBeVisible();
+  await page.waitForTimeout(450); expect(state.reads).toHaveLength(1);
+  await files(page).setInputFiles(original("FICTIONAL-manual-exception-back.pdf"));
+  await expect.poll(() => state.reads.length).toBe(2); await ready(page);
+  await expect(page.getByLabel("Manual invoice amounts", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Save and sync", exact: true })).toBeDisabled();
+  await expect(page.locator("#invoice-number")).toHaveValue("KEEP-MY-CORRECTION");
+  await expect(page.getByRole("combobox", { name: "Line 1 tax", exact: true })).toHaveValue("No VAT");
+  expect(state.reads[1].source.files).toHaveLength(2); expect(state.creates).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("equal-rate Books tax ambiguity leaves tax unset and never silently chooses zero", async ({ page }) => {
+  const state = await fixture(page); state.respond = async reply => ({ json: printedFivePercentInvoice(reply) });
+  await page.route("**/api/bills/options?*", route => route.fulfill({ json: { ...options,
+    taxes: [...options.taxes, { ...options.taxes[0], id: "88777", name: "Another real5percent tax" }],
+    companyId: new URL(route.request().url()).searchParams.get("companyId") } }));
+  await open(page); await files(page).setInputFiles(original("FICTIONAL-tax-identity-ambiguous.pdf")); await ready(page);
+  await chooseLine(page, 1, "account", options.accounts[0].name);
+  await expect(page.getByRole("combobox", { name: "Line 1 tax", exact: true })).toHaveValue("");
+  await page.getByRole("button", { name: "Save and sync", exact: true }).click();
+  await expect(page.getByText("Line 1: select an account and tax, and choose or clear the optional customer.", { exact: true }).first()).toBeVisible();
+  expect(state.creates).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("printed VAT amount still protects the total when the percentage was unreadable", async ({ page }) => {
+  const state = await fixture(page); state.respond = async reply => {
+    printedFivePercentInvoice(reply); delete reply.preview.fields.vatRate; reply.preview.evidence.vatRate = null;
+    return { json: reply };
+  };
+  await open(page); await files(page).setInputFiles(original("FICTIONAL-readable-total-unreadable-rate.pdf")); await ready(page);
+  await chooseLine(page, 1, "account", options.accounts[0].name);
+  await expect(page.getByRole("combobox", { name: "Line 1 tax", exact: true })).toHaveValue("");
+  await chooseLine(page, 1, "tax", "No VAT");
+  await expect(page.getByLabel("Invoice amount comparison", { exact: true })).toContainText("37.50");
+  await expect(page.getByRole("button", { name: "Save and sync", exact: true })).toBeDisabled();
+  await chooseLine(page, 1, "tax", options.taxes[0].name);
+  await expect(page.getByRole("button", { name: "Save and sync", exact: true })).toBeEnabled();
   expect(state.creates).toEqual([]); expect(state.unexpected).toEqual([]);
 });
